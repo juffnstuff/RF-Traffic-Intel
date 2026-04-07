@@ -24,11 +24,15 @@
     "node-fetch": "^3.3.2",
     "open": "^10.1.0",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^4.3.0",
+    "vite": "^5.2.11"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.3.0",
-    "concurrently": "^8.2.2",
-    "vite": "^5.2.11"
+    "concurrently": "^8.2.2"
+  },
+  "overrides": {},
+  "engines": {
+    "node": ">=18"
   }
 }

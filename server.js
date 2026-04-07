@@ -43,7 +43,7 @@ app.get('/api/health', (req, res) => {
     status: 'ok',
     hasData,
     dataAge: stat ? Math.round((Date.now() - stat.mtimeMs) / 60000) + ' minutes' : null,
-    cacheFiles: fs.readdirSync(CACHE_DIR).filter(f => f.endsWith('.json')),
+    cacheFiles: fs.existsSync(CACHE_DIR) ? fs.readdirSync(CACHE_DIR).filter(f => f.endsWith('.json')) : [],
   });
 });
 
