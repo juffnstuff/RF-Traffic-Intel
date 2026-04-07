@@ -2,4 +2,4 @@ node_modules/
 .env
 auth/credentials.json
 auth/token.json
-data/cache/
+# data/cache/ — committed for demo; uncomment when using real data
