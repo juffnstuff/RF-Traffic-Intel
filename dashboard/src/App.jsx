@@ -51,6 +51,77 @@ function LeadLagCard({ title, result }) {
   );
 }
 
+/**
+ * Sparkline-style bar chart with optional DMA overlay lines.
+ * Renders as a pure-CSS chart — no charting library needed.
+ */
+function TimeSeriesChart({ data, label, color, dma30, dma90, height = 120 }) {
+  const max = Math.max(...data, ...(dma30 || []).filter(v => v != null), ...(dma90 || []).filter(v => v != null), 1);
+
+  return (
+    <div style={{ position: 'relative', height, display: 'flex', alignItems: 'flex-end', gap: 1 }}>
+      {/* Bars for daily values */}
+      {data.map((v, i) => {
+        const barH = (v / max) * height;
+        const d30 = dma30?.[i];
+        const d90 = dma90?.[i];
+        return (
+          <div key={i} style={{ flex: '1 1 0', position: 'relative', height: '100%', display: 'flex', alignItems: 'flex-end' }}>
+            <div style={{
+              width: '100%', height: barH, background: color, opacity: 0.35, borderRadius: '1px 1px 0 0',
+            }} />
+            {/* 30 DMA dot */}
+            {d30 != null && (
+              <div style={{
+                position: 'absolute', bottom: (d30 / max) * height - 2,
+                left: '50%', transform: 'translateX(-50%)',
+                width: 4, height: 4, borderRadius: '50%', background: '#f59e0b',
+              }} />
+            )}
+            {/* 90 DMA dot */}
+            {d90 != null && (
+              <div style={{
+                position: 'absolute', bottom: (d90 / max) * height - 2,
+                left: '50%', transform: 'translateX(-50%)',
+                width: 4, height: 4, borderRadius: '50%', background: '#06b6d4',
+              }} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DMAChart({ title, daily, field, color }) {
+  const raw = daily.map(d => d[field] || 0);
+  const dma30 = movingAverage(raw, 30);
+  const dma90 = movingAverage(raw, 90);
+
+  // Current DMA values (latest non-null)
+  const latest30 = dma30.filter(v => v != null).pop();
+  const latest90 = dma90.filter(v => v != null).pop();
+  const latestRaw = raw[raw.length - 1];
+
+  return (
+    <div style={{ background: '#1e293b', borderRadius: 8, padding: 16, flex: '1 1 400px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div style={{ color: '#f8fafc', fontSize: 14, fontWeight: 600 }}>{title}</div>
+        <div style={{ display: 'flex', gap: 16, fontSize: 11 }}>
+          <span style={{ color }}>Daily: {formatNum(latestRaw)}</span>
+          <span style={{ color: '#f59e0b' }}>30 DMA: {latest30 != null ? latest30.toFixed(1) : '—'}</span>
+          <span style={{ color: '#06b6d4' }}>90 DMA: {latest90 != null ? latest90.toFixed(1) : '—'}</span>
+        </div>
+      </div>
+      <TimeSeriesChart data={raw} label={title} color={color} dma30={dma30} dma90={dma90} height={100} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 10, color: '#64748b' }}>
+        <span>{daily[0]?.date}</span>
+        <span>{daily[daily.length - 1]?.date}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -91,7 +162,22 @@ export default function App() {
     const sessions = filtered.reduce((s, d) => s + (d.ga4_sessions || 0), 0);
     const quotes = filtered.reduce((s, d) => s + (d.ns_quotes || 0), 0);
     const orders = filtered.reduce((s, d) => s + (d.ns_orders || 0), 0);
-    return { organic, sessions, quotes, orders };
+
+    // Compute latest DMAs
+    const qRaw = filtered.map(d => d.ns_quotes || 0);
+    const oRaw = filtered.map(d => d.ns_orders || 0);
+    const q30 = movingAverage(qRaw, 30);
+    const q90 = movingAverage(qRaw, 90);
+    const o30 = movingAverage(oRaw, 30);
+    const o90 = movingAverage(oRaw, 90);
+
+    return {
+      organic, sessions, quotes, orders,
+      quotes30: q30.filter(v => v != null).pop(),
+      quotes90: q90.filter(v => v != null).pop(),
+      orders30: o30.filter(v => v != null).pop(),
+      orders90: o90.filter(v => v != null).pop(),
+    };
   }, [filtered]);
 
   const leadLagResults = useMemo(() => {
@@ -109,7 +195,6 @@ export default function App() {
     setRefreshing(true);
     try {
       await fetch(`/api/refresh/${endpoint}`, { method: 'POST' });
-      // reload data after a short delay
       setTimeout(() => window.location.reload(), 2000);
     } catch {
       setRefreshing(false);
@@ -138,7 +223,6 @@ export default function App() {
           <span style={{ color: '#f59e0b' }}>RF</span> Traffic Intelligence
         </h1>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          {/* Range selector */}
           {Object.keys(RANGES).map(r => (
             <button key={r} onClick={() => setRange(r)} style={{
               background: range === r ? '#f59e0b' : '#1e293b',
@@ -169,8 +253,33 @@ export default function App() {
           <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
             <StatCard label="Organic Clicks" value={formatNum(summary.organic)} sub={`${filtered.length} days`} />
             <StatCard label="Total Sessions" value={formatNum(summary.sessions)} />
-            <StatCard label="Quotes" value={formatNum(summary.quotes)} />
-            <StatCard label="Sales Orders" value={formatNum(summary.orders)} />
+            <StatCard
+              label="Quotes"
+              value={formatNum(summary.quotes)}
+              sub={summary.quotes30 != null ? `30d: ${summary.quotes30.toFixed(1)} / 90d: ${summary.quotes90 != null ? summary.quotes90.toFixed(1) : '—'}` : undefined}
+            />
+            <StatCard
+              label="Sales Orders"
+              value={formatNum(summary.orders)}
+              sub={summary.orders30 != null ? `30d: ${summary.orders30.toFixed(1)} / 90d: ${summary.orders90 != null ? summary.orders90.toFixed(1) : '—'}` : undefined}
+            />
+          </div>
+        )}
+
+        {/* NetSuite DMA Charts */}
+        {filtered.length > 0 && (
+          <div style={{ marginBottom: 24 }}>
+            <h2 style={{ fontSize: 14, color: '#94a3b8', marginBottom: 12, fontWeight: 600 }}>
+              NetSuite Activity — 30 &amp; 90 Day Moving Averages
+            </h2>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              <DMAChart title="Quotes (Estimates)" daily={filtered} field="ns_quotes" color="#a78bfa" />
+              <DMAChart title="Sales Orders" daily={filtered} field="ns_orders" color="#34d399" />
+            </div>
+            <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11, color: '#64748b' }}>
+              <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#f59e0b', marginRight: 4 }} />30 DMA</span>
+              <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#06b6d4', marginRight: 4 }} />90 DMA</span>
+            </div>
           </div>
         )}
 
