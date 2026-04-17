@@ -73,7 +73,13 @@ function ChartTooltip({ active, payload, label, formatter }) {
   );
 }
 
-function DMALineChart({ title, data, field30, field90, fieldRaw, color, formatter = fmtNum, currentValue }) {
+const LINE_COLORS = {
+  daily: '#94a3b8',  // slate-400, faint background
+  ma30: '#fbbf24',   // amber-400, primary
+  ma90: '#a78bfa',   // violet-400, dashed
+};
+
+function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmtNum, currentValue }) {
   const latest30 = data.length > 0 ? data[data.length - 1]?.[field30] : null;
 
   // Thin out X axis ticks
@@ -112,19 +118,19 @@ function DMALineChart({ title, data, field30, field90, fieldRaw, color, formatte
           {fieldRaw && (
             <Line
               type="monotone" dataKey={fieldRaw} name="Daily"
-              stroke={color} strokeWidth={1} strokeOpacity={0.45}
-              dot={false} activeDot={{ r: 3, fill: color }}
+              stroke={LINE_COLORS.daily} strokeWidth={1} strokeOpacity={0.4}
+              dot={false} activeDot={{ r: 3, fill: LINE_COLORS.daily }}
             />
           )}
           <Line
             type="monotone" dataKey={field30} name="30 DMA"
-            stroke={color} strokeWidth={2.5}
-            dot={false} activeDot={{ r: 5, fill: color, stroke: '#0f172a', strokeWidth: 2 }}
+            stroke={LINE_COLORS.ma30} strokeWidth={2.5}
+            dot={false} activeDot={{ r: 5, fill: LINE_COLORS.ma30, stroke: '#0f172a', strokeWidth: 2 }}
           />
           <Line
             type="monotone" dataKey={field90} name="90 DMA"
-            stroke="#e2e8f0" strokeWidth={1.75} strokeDasharray="4 3"
-            dot={false} activeDot={{ r: 4, fill: '#e2e8f0', stroke: '#0f172a', strokeWidth: 2 }}
+            stroke={LINE_COLORS.ma90} strokeWidth={2} strokeDasharray="4 3"
+            dot={false} activeDot={{ r: 4, fill: LINE_COLORS.ma90, stroke: '#0f172a', strokeWidth: 2 }}
           />
           <Legend
             wrapperStyle={{ fontSize: 10, color: '#cbd5e1', paddingTop: 8 }}
@@ -377,43 +383,43 @@ export default function App() {
               <DMALineChart
                 title="Total Quote DMA (by quote creation date)" data={chartData}
                 fieldRaw="quotesDollars" field30="q30" field90="q90"
-                color="#a5b4fc" formatter={fmtMoney}
+                formatter={fmtMoney}
               />
               <DMALineChart
                 title="Total Sales Order DMA (by date converted)" data={chartData}
                 fieldRaw="ordersDollars" field30="o30" field90="o90"
-                color="#4ade80" formatter={fmtMoney}
+                formatter={fmtMoney}
               />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart
                 title="Quote Count DMA" data={chartData}
                 fieldRaw="quotes" field30="qc30" field90="qc90"
-                color="#a5b4fc" formatter={fmtNum}
+                formatter={fmtNum}
               />
               <DMALineChart
                 title="Sales Order Count DMA" data={chartData}
                 fieldRaw="orders" field30="oc30" field90="oc90"
-                color="#4ade80" formatter={fmtNum}
+                formatter={fmtNum}
               />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart
                 title="Total Shipped DMA (by actual ship date)" data={chartData}
                 fieldRaw="shippedDollars" field30="s30" field90="s90"
-                color="#7dd3fc" formatter={fmtMoney}
+                formatter={fmtMoney}
               />
               <DMALineChart
                 title="Close Rate DMA (count)" data={chartData}
                 field30="closeRate" field90="cr90"
-                color="#f9a8d4" formatter={fmtPct}
+                formatter={fmtPct}
               />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart
                 title="Capture Rate DMA (sales order$ / quote$)" data={chartData}
                 field30="captureRate" field90="capt90"
-                color="#fcd34d" formatter={fmtPct}
+                formatter={fmtPct}
               />
             </div>
           </>
