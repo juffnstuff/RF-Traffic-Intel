@@ -195,81 +195,72 @@ export default function App() {
     return Array.from(years).sort();
   }, [data]);
 
-  const filtered = useMemo(() => {
+  // Full-history series with MAs computed across the entire dataset so any
+  // range view shows already-primed moving averages from its first day.
+  const fullSeries = useMemo(() => {
     if (!data?.daily) return [];
     let rows = [...data.daily].sort((a, b) => a.date.localeCompare(b.date));
-    if (/^\d{4}$/.test(range)) {
-      rows = rows.filter(d => d.date.startsWith(range));
-    } else if (RELATIVE_RANGES[range]) {
-      const cutoff = new Date();
-      cutoff.setDate(cutoff.getDate() - RELATIVE_RANGES[range]);
-      const cutStr = cutoff.toISOString().slice(0, 10);
-      rows = rows.filter(d => d.date >= cutStr);
-    }
     if (weekdayOnly) rows = weekdaysOnly(rows);
-    return rows;
-  }, [data, range, weekdayOnly]);
 
-  const chartData = useMemo(() => {
-    const quotes = filtered.map(d => d.quotes_count || 0);
-    const quotesDollars = filtered.map(d => d.quotes_total || 0);
-    // Adjusted quotes: excludes "Lost: Alternate RF Solution/Quote"
-    const quotesAdjDollars = filtered.map(d => d.quotes_adj_total || d.quotes_total || 0);
-    const orders = filtered.map(d => d.orders_count || 0);
-    const ordersDollars = filtered.map(d => d.orders_total || 0);
-    const shipped = filtered.map(d => d.shipped_count || 0);
-    const shippedDollars = filtered.map(d => d.shipped_total || 0);
+    const quotes = rows.map(d => d.quotes_count || 0);
+    const quotesDollars = rows.map(d => d.quotes_total || 0);
+    const orders = rows.map(d => d.orders_count || 0);
+    const ordersDollars = rows.map(d => d.orders_total || 0);
+    const shipped = rows.map(d => d.shipped_count || 0);
+    const shippedDollars = rows.map(d => d.shipped_total || 0);
 
-    const q30 = movingAverage(quotes, 30);
-    const q90 = movingAverage(quotes, 90);
+    const qc30 = movingAverage(quotes, 30);
+    const qc90 = movingAverage(quotes, 90);
     const qd30 = movingAverage(quotesDollars, 30);
     const qd90 = movingAverage(quotesDollars, 90);
-    const qad30 = movingAverage(quotesAdjDollars, 30);
-    const qad90 = movingAverage(quotesAdjDollars, 90);
-    const o30 = movingAverage(orders, 30);
-    const o90 = movingAverage(orders, 90);
+    const oc30 = movingAverage(orders, 30);
+    const oc90 = movingAverage(orders, 90);
     const od30 = movingAverage(ordersDollars, 30);
     const od90 = movingAverage(ordersDollars, 90);
-    const s30 = movingAverage(shipped, 30);
-    const s90 = movingAverage(shipped, 90);
+    const sc30 = movingAverage(shipped, 30);
+    const sc90 = movingAverage(shipped, 90);
     const sd30 = movingAverage(shippedDollars, 30);
     const sd90 = movingAverage(shippedDollars, 90);
 
-    // Close rate by count
-    const closeRate = q30.map((q, i) => {
-      if (q == null || o30[i] == null || q === 0) return null;
-      return o30[i] / q;
-    });
-    const cr90 = q90.map((q, i) => {
-      if (q == null || o90[i] == null || q === 0) return null;
-      return o90[i] / q;
-    });
+    const closeRate = qc30.map((q, i) => (q == null || oc30[i] == null || q === 0 ? null : oc30[i] / q));
+    const cr90 = qc90.map((q, i) => (q == null || oc90[i] == null || q === 0 ? null : oc90[i] / q));
+    const captureRate = qd30.map((q, i) => (q == null || od30[i] == null || q === 0 ? null : od30[i] / q));
+    const capt90 = qd90.map((q, i) => (q == null || od90[i] == null || q === 0 ? null : od90[i] / q));
 
-    // Capture rate by $ — uses the same values shown on the quote + sales order charts
-    const captureRate = qd30.map((q, i) => {
-      if (q == null || od30[i] == null || q === 0) return null;
-      return od30[i] / q;
-    });
-    const capt90 = qd90.map((q, i) => {
-      if (q == null || od90[i] == null || q === 0) return null;
-      return od90[i] / q;
-    });
-
-    return filtered.map((d, i) => ({
+    return rows.map((d, i) => ({
       date: d.date,
-      quotes: quotes[i], q30: qd30[i], q90: qd90[i], qc30: q30[i], qc90: q90[i],
-      orders: orders[i], o30: od30[i], o90: od90[i], oc30: o30[i], oc90: o90[i],
-      shipped: shipped[i], s30: sd30[i], s90: sd90[i], sc30: s30[i], sc90: s90[i],
+      quotes_count: d.quotes_count || 0,
+      orders_count: d.orders_count || 0,
+      shipped_count: d.shipped_count || 0,
+      quotes_total: d.quotes_total || 0,
+      orders_total: d.orders_total || 0,
+      shipped_total: d.shipped_total || 0,
+      quotes: quotes[i], q30: qd30[i], q90: qd90[i], qc30: qc30[i], qc90: qc90[i],
+      orders: orders[i], o30: od30[i], o90: od90[i], oc30: oc30[i], oc90: oc90[i],
+      shipped: shipped[i], s30: sd30[i], s90: sd90[i], sc30: sc30[i], sc90: sc90[i],
       quotesDollars: quotesDollars[i], ordersDollars: ordersDollars[i], shippedDollars: shippedDollars[i],
       closeRate: closeRate[i], cr90: cr90[i],
       captureRate: captureRate[i], capt90: capt90[i],
     }));
-  }, [filtered]);
+  }, [data, weekdayOnly]);
+
+  const chartData = useMemo(() => {
+    if (!fullSeries.length) return [];
+    if (range === 'all') return fullSeries;
+    if (/^\d{4}$/.test(range)) return fullSeries.filter(d => d.date.startsWith(range));
+    if (RELATIVE_RANGES[range]) {
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - RELATIVE_RANGES[range]);
+      const cutStr = cutoff.toISOString().slice(0, 10);
+      return fullSeries.filter(d => d.date >= cutStr);
+    }
+    return fullSeries;
+  }, [fullSeries, range]);
 
   const summary = useMemo(() => {
     if (chartData.length === 0) return null;
     const last = chartData[chartData.length - 1];
-    const sumField = (f) => filtered.reduce((s, d) => s + (d[f] || 0), 0);
+    const sumField = (f) => chartData.reduce((s, d) => s + (d[f] || 0), 0);
     const totalQ = sumField('quotes_count');
     const totalO = sumField('orders_count');
     return {
@@ -282,18 +273,18 @@ export default function App() {
       totalShippedDollars: sumField('shipped_total'),
       totalQ, totalO,
     };
-  }, [chartData, filtered]);
+  }, [chartData]);
 
   const leadLagResults = useMemo(() => {
-    if (filtered.length < 30) return {};
-    const quotes = filtered.map(d => d.quotes_count || 0);
-    const orders = filtered.map(d => d.orders_count || 0);
-    const shipped = filtered.map(d => d.shipped_count || 0);
+    if (chartData.length < 30) return {};
+    const quotes = chartData.map(d => d.quotes_count || 0);
+    const orders = chartData.map(d => d.orders_count || 0);
+    const shipped = chartData.map(d => d.shipped_count || 0);
     return {
       quotesToOrders: leadLag(quotes, orders),
       ordersToShipped: leadLag(orders, shipped),
     };
-  }, [filtered]);
+  }, [chartData]);
 
   const handleRefresh = async (mode) => {
     setRefreshing(true);
@@ -334,7 +325,7 @@ export default function App() {
             <span style={{ color: '#f59e0b' }}>RF</span> Traffic Intelligence
           </h1>
           <div style={{ color: '#64748b', fontSize: 11, marginTop: 2 }}>
-            {data?.sources?.join(', ')} — {filtered.length} days
+            {data?.sources?.join(', ')} — {chartData.length} days
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>

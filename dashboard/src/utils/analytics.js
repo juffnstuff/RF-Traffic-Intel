@@ -5,15 +5,19 @@
 
 /**
  * Compute a trailing moving average for a numeric array.
+ * Uses a partial window at the start of the series (mean of 0..i) so that
+ * the MA has a value from day 1 rather than blank for the first `window-1` days.
+ * Once enough history exists, it becomes a full trailing `window` average.
  * @param {number[]} values - raw data points
- * @param {number} window - number of periods
- * @returns {(number|null)[]} MA values (null when insufficient history)
+ * @param {number} window - max number of periods
+ * @returns {(number|null)[]} MA values
  */
 export function movingAverage(values, window) {
   return values.map((_, i) => {
-    if (i < window - 1) return null;
-    const slice = values.slice(i - window + 1, i + 1);
-    return slice.reduce((a, b) => a + b, 0) / window;
+    const start = Math.max(0, i - window + 1);
+    const slice = values.slice(start, i + 1);
+    if (slice.length === 0) return null;
+    return slice.reduce((a, b) => a + b, 0) / slice.length;
   });
 }
 
