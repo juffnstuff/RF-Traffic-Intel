@@ -47,28 +47,53 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Main data endpoint — prefers unified, falls back to netsuite-only if that's all we have
+// Normalize row to the current schema (handles old demo format too)
+function normalizeRow(d) {
+  return {
+    date: d.date,
+    quotes_count: d.quotes_count ?? d.ns_quotes ?? d.quotes ?? 0,
+    quotes_total: d.quotes_total ?? 0,
+    orders_count: d.orders_count ?? d.ns_orders ?? d.orders ?? 0,
+    orders_total: d.orders_total ?? 0,
+    shipped_count: d.shipped_count ?? 0,
+    shipped_total: d.shipped_total ?? 0,
+    gsc_clicks: d.gsc_clicks ?? 0,
+    gsc_impressions: d.gsc_impressions ?? 0,
+    ga4_sessions: d.ga4_sessions ?? 0,
+  };
+}
+
+// Main data endpoint — prefers fresh netsuite cache, then unified, then old demo
 app.get('/api/unified', (req, res) => {
   const netsuitePath = path.join(CACHE_DIR, 'netsuite-daily.json');
   let data;
 
-  if (fs.existsSync(UNIFIED_PATH)) {
-    data = JSON.parse(fs.readFileSync(UNIFIED_PATH));
-  } else if (fs.existsSync(netsuitePath)) {
-    // Promote NetSuite-only cache to unified shape
+  // Prefer netsuite-daily.json if it's fresh (from live fetch)
+  const nsExists = fs.existsSync(netsuitePath);
+  const unifiedExists = fs.existsSync(UNIFIED_PATH);
+
+  let useNS = false;
+  if (nsExists && unifiedExists) {
+    const nsStat = fs.statSync(netsuitePath);
+    const unifiedStat = fs.statSync(UNIFIED_PATH);
+    useNS = nsStat.mtimeMs > unifiedStat.mtimeMs;
+  } else if (nsExists) {
+    useNS = true;
+  }
+
+  if (useNS) {
     const ns = JSON.parse(fs.readFileSync(netsuitePath));
     data = {
       generated: ns.generated,
-      sources: ['netsuite'],
-      daily: (ns.daily || []).map(d => ({
-        date: d.date,
-        quotes_count: d.quotes_count ?? d.quotes ?? 0,
-        quotes_total: d.quotes_total ?? 0,
-        orders_count: d.orders_count ?? d.orders ?? 0,
-        orders_total: d.orders_total ?? 0,
-        shipped_count: d.shipped_count ?? 0,
-        shipped_total: d.shipped_total ?? 0,
-      })),
+      sources: ns.sources || ['netsuite'],
+      daily: (ns.daily || []).map(normalizeRow),
+    };
+  } else if (unifiedExists) {
+    const raw = JSON.parse(fs.readFileSync(UNIFIED_PATH));
+    data = {
+      generated: raw.generated,
+      sources: raw.sources || ['demo'],
+      daily: (raw.daily || []).map(normalizeRow),
     };
   } else {
     return res.status(404).json({

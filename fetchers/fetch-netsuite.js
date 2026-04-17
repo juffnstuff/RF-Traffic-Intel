@@ -84,7 +84,7 @@ function buildOAuthHeader({ method, baseUrl, queryParams, accountId, consumerKey
     .map(k => `${percentEncode(k)}="${percentEncode(oauthParams[k])}"`)
     .join(', ');
 
-  return `OAuth realm="${percentEncode(accountId)}", ${headerParts}`;
+  return `OAuth realm="${accountId}", ${headerParts}`;
 }
 
 async function runSuiteQL(sql) {
