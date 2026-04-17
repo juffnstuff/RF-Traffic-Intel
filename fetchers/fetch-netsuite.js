@@ -4,12 +4,11 @@
  * Pulls daily quotes, sales orders, and shipped sales from NetSuite
  * via SuiteQL using OAuth 1.0 Token-Based Authentication.
  *
- * Requires env vars:
- *   NS_ACCOUNT_ID, NS_CONSUMER_KEY, NS_CONSUMER_SECRET,
- *   NS_TOKEN_ID, NS_TOKEN_SECRET
+ * Modes:
+ *   - Full: no date filter, fetches ALL historical data (initial backfill)
+ *   - Incremental: fetches last N days and upserts into DB
  *
- * Outputs:
- *   data/cache/netsuite-daily.json
+ * Writes to PostgreSQL if DATABASE_URL is set, otherwise falls back to JSON cache.
  */
 
 import 'dotenv/config';
@@ -22,8 +21,6 @@ import fetch from 'node-fetch';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CACHE_DIR = path.join(__dirname, '..', 'data', 'cache');
 const OUTPUT_PATH = path.join(CACHE_DIR, 'netsuite-daily.json');
-
-const LOOKBACK_DAYS = parseInt(process.env.LOOKBACK_DAYS || '540', 10);
 
 function requireEnv(name) {
   const v = process.env[name]?.trim();
@@ -41,19 +38,15 @@ function percentEncode(str) {
 }
 
 function buildOAuthHeader({ method, baseUrl, queryParams, accountId, consumerKey, consumerSecret, tokenId, tokenSecret }) {
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const nonce = crypto.randomBytes(16).toString('hex');
-
   const oauthParams = {
     oauth_consumer_key: consumerKey,
-    oauth_nonce: nonce,
+    oauth_nonce: crypto.randomBytes(16).toString('hex'),
     oauth_signature_method: 'HMAC-SHA256',
-    oauth_timestamp: timestamp,
+    oauth_timestamp: Math.floor(Date.now() / 1000).toString(),
     oauth_token: tokenId,
     oauth_version: '1.0',
   };
 
-  // Combine OAuth params + query params for signature base string
   const allParams = { ...oauthParams };
   if (queryParams) {
     for (const [k, v] of Object.entries(queryParams)) {
@@ -107,13 +100,9 @@ async function runSuiteQL(sql) {
     const fullUrl = `${baseUrl}?limit=${limit}&offset=${offset}`;
 
     const authHeader = buildOAuthHeader({
-      method: 'POST',
-      baseUrl,
-      queryParams,
+      method: 'POST', baseUrl, queryParams,
       accountId, consumerKey, consumerSecret, tokenId, tokenSecret,
     });
-
-    console.log(`    → POST ${baseUrl} (offset=${offset})`);
 
     const res = await fetch(fullUrl, {
       method: 'POST',
@@ -136,7 +125,7 @@ async function runSuiteQL(sql) {
     hasMore = data.hasMore === true;
     offset += limit;
 
-    if (offset > 50000) break;
+    if (offset > 200000) break;
   }
 
   return rows;
@@ -150,25 +139,39 @@ function parseNSDate(s) {
   return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
 }
 
-export async function fetchNetSuite() {
-  const since = new Date();
-  since.setDate(since.getDate() - LOOKBACK_DAYS);
-  const sinceStr = since.toISOString().slice(0, 10);
+function buildDateFilter(sinceDateStr) {
+  if (!sinceDateStr) return '';
+  return `AND t.tranDate >= TO_DATE('${sinceDateStr}', 'YYYY-MM-DD')`;
+}
 
-  console.log(`🔎  NetSuite fetch — lookback ${LOOKBACK_DAYS} days (since ${sinceStr})`);
+function buildShipDateFilter(sinceDateStr) {
+  if (!sinceDateStr) return '';
+  return `AND t.actualShipDate >= TO_DATE('${sinceDateStr}', 'YYYY-MM-DD')`;
+}
+
+/**
+ * @param {object} opts
+ * @param {string|null} opts.since  — ISO date string or null for full history
+ */
+export async function fetchNetSuite({ since = null } = {}) {
+  const mode = since ? `incremental (since ${since})` : 'full history';
+  console.log(`🔎  NetSuite fetch — ${mode}`);
   console.log(`    Account: ${process.env.NS_ACCOUNT_ID}`);
+
+  const dateFilter = buildDateFilter(since);
+  const shipFilter = buildShipDateFilter(since);
 
   const quotesQ = `
     SELECT t.tranDate, COUNT(*) as cnt, SUM(t.total) as total
     FROM transaction t
-    WHERE t.recordType = 'estimate' AND t.tranDate >= TO_DATE('${sinceStr}', 'YYYY-MM-DD')
+    WHERE t.recordType = 'estimate' ${dateFilter}
     GROUP BY t.tranDate
   `.trim();
 
   const ordersQ = `
     SELECT t.tranDate, COUNT(*) as cnt, SUM(t.total) as total
     FROM transaction t
-    WHERE t.recordType = 'salesorder' AND t.tranDate >= TO_DATE('${sinceStr}', 'YYYY-MM-DD')
+    WHERE t.recordType = 'salesorder' ${dateFilter}
     GROUP BY t.tranDate
   `.trim();
 
@@ -177,7 +180,7 @@ export async function fetchNetSuite() {
     FROM transaction t
     WHERE t.recordType = 'salesorder'
       AND t.actualShipDate IS NOT NULL
-      AND t.actualShipDate >= TO_DATE('${sinceStr}', 'YYYY-MM-DD')
+      ${shipFilter}
     GROUP BY t.actualShipDate
   `.trim();
 
@@ -231,25 +234,45 @@ export async function fetchNetSuite() {
   }
 
   const daily = Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+  console.log(`  → merged ${daily.length} unique days`);
 
+  // Write to DB if available
+  if (process.env.DATABASE_URL) {
+    const { upsertDailyRows, logFetch } = await import('../db.js');
+    try {
+      const upserted = await upsertDailyRows(daily);
+      await logFetch('success', upserted, null);
+      console.log(`✅  Upserted ${upserted} rows into PostgreSQL`);
+    } catch (e) {
+      await logFetch('error', 0, e.message).catch(() => {});
+      throw e;
+    }
+  }
+
+  // Always write JSON cache as fallback
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
   const out = {
     generated: new Date().toISOString(),
     source: 'netsuite-suiteql',
     sources: ['netsuite'],
     accountId: process.env.NS_ACCOUNT_ID,
-    lookbackDays: LOOKBACK_DAYS,
     daily,
   };
-
-  fs.mkdirSync(CACHE_DIR, { recursive: true });
   fs.writeFileSync(OUTPUT_PATH, JSON.stringify(out, null, 2));
-  console.log(`✅  Wrote ${daily.length} daily rows to ${OUTPUT_PATH}`);
+  console.log(`✅  Wrote ${daily.length} daily rows to JSON cache`);
 
   return out;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  fetchNetSuite().catch(e => {
+  const args = process.argv.slice(2);
+  const since = args.includes('--full') ? null : (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 60);
+    return d.toISOString().slice(0, 10);
+  })();
+
+  fetchNetSuite({ since }).catch(e => {
     console.error('❌  Fetch failed:', e.message);
     process.exit(1);
   });

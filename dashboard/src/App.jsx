@@ -1,36 +1,137 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import {
+  ResponsiveContainer, LineChart, Line, XAxis, YAxis,
+  Tooltip, Legend, CartesianGrid, ReferenceDot,
+} from 'recharts';
 import { movingAverage, leadLag, weekdaysOnly } from './utils/analytics';
 
-const RANGES = { '1m': 30, '3m': 90, '6m': 180, '1y': 365, '2y': 730, all: Infinity };
+const RANGES = { '3m': 90, '6m': 180, '1y': 365, '2y': 730, all: Infinity };
 
-function formatNum(n) {
+function fmtNum(n) {
   if (n == null || Number.isNaN(n)) return '—';
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
   if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
   return n.toFixed(0);
 }
 
-function formatMoney(n) {
+function fmtMoney(n) {
   if (n == null || Number.isNaN(n)) return '—';
   if (n >= 1000000) return '$' + (n / 1000000).toFixed(2) + 'M';
   if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'K';
   return '$' + n.toFixed(0);
 }
 
-function formatPct(n) {
+function fmtPct(n) {
   if (n == null || Number.isNaN(n)) return '—';
   return (n * 100).toFixed(1) + '%';
 }
 
-function StatCard({ label, value, sub }) {
+function fmtDate(d) {
+  if (!d) return '';
+  const parts = d.split('-');
+  if (parts.length !== 3) return d;
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${months[parseInt(parts[1],10)-1]} ${parseInt(parts[2],10)}, ${parts[0]}`;
+}
+
+function fmtAxisDate(d) {
+  if (!d) return '';
+  const parts = d.split('-');
+  if (parts.length !== 3) return d;
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${months[parseInt(parts[1],10)-1]} ${parts[0].slice(2)}`;
+}
+
+function StatCard({ label, value, sub, small }) {
   return (
     <div style={{
       background: '#1e293b', borderRadius: 8, padding: '16px 20px',
-      flex: '1 1 180px', minWidth: 180,
+      flex: '1 1 180px', minWidth: 160,
     }}>
-      <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 4 }}>{label}</div>
-      <div style={{ color: '#f8fafc', fontSize: 24, fontWeight: 700 }}>{value}</div>
-      {sub && <div style={{ color: '#64748b', fontSize: 11, marginTop: 2 }}>{sub}</div>}
+      <div style={{ color: '#94a3b8', fontSize: 11, marginBottom: 2 }}>{label}</div>
+      <div style={{ color: '#f8fafc', fontSize: 28, fontWeight: 700, lineHeight: 1.1 }}>{value}</div>
+      {sub && <div style={{ color: '#64748b', fontSize: 11, marginTop: 4 }}>{sub}</div>}
+      {small && <div style={{ color: '#475569', fontSize: 10, marginTop: 2 }}>{small}</div>}
+    </div>
+  );
+}
+
+function ChartTooltip({ active, payload, label, formatter }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{
+      background: '#0f172a', border: '1px solid #334155', borderRadius: 6,
+      padding: '10px 14px', fontSize: 12, lineHeight: 1.6,
+    }}>
+      <div style={{ color: '#f8fafc', fontWeight: 600, marginBottom: 4 }}>{fmtDate(label)}</div>
+      {payload.map((p, i) => (
+        <div key={i} style={{ color: p.color }}>
+          {p.name}: {formatter ? formatter(p.value) : fmtNum(p.value)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DMALineChart({ title, data, field30, field90, fieldRaw, color, formatter = fmtNum, currentValue }) {
+  const latest30 = data.length > 0 ? data[data.length - 1]?.[field30] : null;
+
+  // Thin out X axis ticks
+  const tickInterval = Math.max(1, Math.floor(data.length / 8));
+
+  return (
+    <div style={{ background: '#1e293b', borderRadius: 8, padding: '16px 20px', flex: '1 1 580px', minWidth: 400 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+        <div>
+          <div style={{ color: '#94a3b8', fontSize: 11 }}>{title}</div>
+          <div style={{ color: '#f8fafc', fontSize: 22, fontWeight: 700 }}>
+            {formatter(currentValue ?? latest30)}
+            <span style={{ fontSize: 11, color: '#64748b', marginLeft: 6 }}>30 DMA</span>
+          </div>
+        </div>
+      </div>
+      <ResponsiveContainer width="100%" height={220}>
+        <LineChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+          <XAxis
+            dataKey="date"
+            tickFormatter={fmtAxisDate}
+            interval={tickInterval}
+            tick={{ fill: '#64748b', fontSize: 10 }}
+            axisLine={{ stroke: '#334155' }}
+            tickLine={false}
+          />
+          <YAxis
+            tickFormatter={formatter}
+            tick={{ fill: '#64748b', fontSize: 10 }}
+            axisLine={false}
+            tickLine={false}
+            width={55}
+          />
+          <Tooltip content={<ChartTooltip formatter={formatter} />} />
+          {fieldRaw && (
+            <Line
+              type="monotone" dataKey={fieldRaw} name="Daily"
+              stroke={color} strokeWidth={1} strokeOpacity={0.25}
+              dot={false} activeDot={{ r: 3, fill: color }}
+            />
+          )}
+          <Line
+            type="monotone" dataKey={field30} name="30 DMA"
+            stroke={color} strokeWidth={2}
+            dot={false} activeDot={{ r: 5, fill: color, stroke: '#0f172a', strokeWidth: 2 }}
+          />
+          <Line
+            type="monotone" dataKey={field90} name="90 DMA"
+            stroke="#64748b" strokeWidth={1.5} strokeDasharray="4 3"
+            dot={false} activeDot={{ r: 4, fill: '#64748b', stroke: '#0f172a', strokeWidth: 2 }}
+          />
+          <Legend
+            wrapperStyle={{ fontSize: 10, color: '#64748b', paddingTop: 8 }}
+            iconType="plainline"
+          />
+        </LineChart>
+      </ResponsiveContainer>
     </div>
   );
 }
@@ -41,8 +142,8 @@ function MiniBar({ correlations, bestLag }) {
     <div style={{ display: 'flex', gap: 1, height: 40, alignItems: 'flex-end' }}>
       {correlations.map((r, i) => {
         const h = (Math.abs(r) / maxAbs) * 100;
-        const color = i === bestLag ? '#f59e0b' : Math.abs(r) > 0.4 ? '#22c55e' : '#334155';
-        return <div key={i} style={{ width: 4, height: `${h}%`, background: color, borderRadius: 1 }} />;
+        const clr = i === bestLag ? '#f59e0b' : Math.abs(r) > 0.4 ? '#22c55e' : '#334155';
+        return <div key={i} style={{ width: 4, height: `${h}%`, background: clr, borderRadius: 1 }} />;
       })}
     </div>
   );
@@ -63,91 +164,24 @@ function LeadLagCard({ title, result }) {
   );
 }
 
-function TimeSeriesChart({ data, color, dma30, dma90, height = 120 }) {
-  const allVals = [
-    ...data.filter(v => v != null && !Number.isNaN(v)),
-    ...(dma30 || []).filter(v => v != null && !Number.isNaN(v)),
-    ...(dma90 || []).filter(v => v != null && !Number.isNaN(v)),
-  ];
-  const max = Math.max(...allVals, 0.001);
-
-  return (
-    <div style={{ position: 'relative', height, display: 'flex', alignItems: 'flex-end', gap: 1 }}>
-      {data.map((v, i) => {
-        const barH = v != null && !Number.isNaN(v) ? (v / max) * height : 0;
-        const d30 = dma30?.[i];
-        const d90 = dma90?.[i];
-        return (
-          <div key={i} style={{ flex: '1 1 0', position: 'relative', height: '100%', display: 'flex', alignItems: 'flex-end' }}>
-            <div style={{
-              width: '100%', height: barH, background: color, opacity: 0.35, borderRadius: '1px 1px 0 0',
-            }} />
-            {d30 != null && !Number.isNaN(d30) && (
-              <div style={{
-                position: 'absolute', bottom: (d30 / max) * height - 2,
-                left: '50%', transform: 'translateX(-50%)',
-                width: 4, height: 4, borderRadius: '50%', background: '#f59e0b',
-              }} />
-            )}
-            {d90 != null && !Number.isNaN(d90) && (
-              <div style={{
-                position: 'absolute', bottom: (d90 / max) * height - 2,
-                left: '50%', transform: 'translateX(-50%)',
-                width: 4, height: 4, borderRadius: '50%', background: '#06b6d4',
-              }} />
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function DMAChart({ title, daily, values, color, formatter = formatNum }) {
-  const dma30 = movingAverage(values, 30);
-  const dma90 = movingAverage(values, 90);
-
-  const latest30 = [...dma30].reverse().find(v => v != null);
-  const latest90 = [...dma90].reverse().find(v => v != null);
-  const latestRaw = values[values.length - 1];
-
-  return (
-    <div style={{ background: '#1e293b', borderRadius: 8, padding: 16, flex: '1 1 400px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <div style={{ color: '#f8fafc', fontSize: 14, fontWeight: 600 }}>{title}</div>
-        <div style={{ display: 'flex', gap: 14, fontSize: 11 }}>
-          <span style={{ color }}>Today: {formatter(latestRaw)}</span>
-          <span style={{ color: '#f59e0b' }}>30 DMA: {formatter(latest30)}</span>
-          <span style={{ color: '#06b6d4' }}>90 DMA: {formatter(latest90)}</span>
-        </div>
-      </div>
-      <TimeSeriesChart data={values} color={color} dma30={dma30} dma90={dma90} height={110} />
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 10, color: '#64748b' }}>
-        <span>{daily[0]?.date}</span>
-        <span>{daily[daily.length - 1]?.date}</span>
-      </div>
-    </div>
-  );
-}
-
 export default function App() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [range, setRange] = useState('6m');
+  const [range, setRange] = useState('1y');
   const [weekdayOnly, setWeekdayOnly] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
+  const loadData = useCallback(() => {
+    setLoading(true);
     fetch('/api/unified')
-      .then(r => {
-        if (!r.ok) throw new Error(`API returned ${r.status}`);
-        return r.json();
-      })
+      .then(r => { if (!r.ok) throw new Error(`API ${r.status}`); return r.json(); })
       .then(setData)
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => { loadData(); }, [loadData]);
 
   const filtered = useMemo(() => {
     if (!data?.daily) return [];
@@ -163,7 +197,7 @@ export default function App() {
     return rows;
   }, [data, range, weekdayOnly]);
 
-  const series = useMemo(() => {
+  const chartData = useMemo(() => {
     const quotes = filtered.map(d => d.quotes_count || 0);
     const quotesDollars = filtered.map(d => d.quotes_total || 0);
     const orders = filtered.map(d => d.orders_count || 0);
@@ -171,89 +205,109 @@ export default function App() {
     const shipped = filtered.map(d => d.shipped_count || 0);
     const shippedDollars = filtered.map(d => d.shipped_total || 0);
 
-    // Close rate = orders / quotes, computed on 30-day rolling basis to smooth noise
     const q30 = movingAverage(quotes, 30);
+    const q90 = movingAverage(quotes, 90);
+    const qd30 = movingAverage(quotesDollars, 30);
+    const qd90 = movingAverage(quotesDollars, 90);
     const o30 = movingAverage(orders, 30);
+    const o90 = movingAverage(orders, 90);
+    const od30 = movingAverage(ordersDollars, 30);
+    const od90 = movingAverage(ordersDollars, 90);
+    const s30 = movingAverage(shipped, 30);
+    const s90 = movingAverage(shipped, 90);
+    const sd30 = movingAverage(shippedDollars, 30);
+    const sd90 = movingAverage(shippedDollars, 90);
+
     const closeRate = q30.map((q, i) => {
       if (q == null || o30[i] == null || q === 0) return null;
       return o30[i] / q;
     });
+    const cr90 = q90.map((q, i) => {
+      if (q == null || o90[i] == null || q === 0) return null;
+      return o90[i] / q;
+    });
 
-    return { quotes, quotesDollars, orders, ordersDollars, shipped, shippedDollars, closeRate };
+    return filtered.map((d, i) => ({
+      date: d.date,
+      quotes: quotes[i], q30: qd30[i], q90: qd90[i], qc30: q30[i], qc90: q90[i],
+      orders: orders[i], o30: od30[i], o90: od90[i], oc30: o30[i], oc90: o90[i],
+      shipped: shipped[i], s30: sd30[i], s90: sd90[i], sc30: s30[i], sc90: s90[i],
+      quotesDollars: quotesDollars[i], ordersDollars: ordersDollars[i], shippedDollars: shippedDollars[i],
+      closeRate: closeRate[i], cr90: cr90[i],
+    }));
   }, [filtered]);
 
   const summary = useMemo(() => {
-    if (filtered.length === 0) return null;
+    if (chartData.length === 0) return null;
+    const last = chartData[chartData.length - 1];
     const sumField = (f) => filtered.reduce((s, d) => s + (d[f] || 0), 0);
-    const totalQuotes = sumField('quotes_count');
-    const totalOrders = sumField('orders_count');
+    const totalQ = sumField('quotes_count');
+    const totalO = sumField('orders_count');
     return {
-      quotes: totalQuotes,
-      orders: totalOrders,
-      shipped: sumField('shipped_count'),
-      quotesDollars: sumField('quotes_total'),
-      ordersDollars: sumField('orders_total'),
-      shippedDollars: sumField('shipped_total'),
-      closeRate: totalQuotes > 0 ? totalOrders / totalQuotes : null,
+      q30: last.q30, o30: last.o30, s30: last.s30,
+      qc30: last.qc30, oc30: last.oc30, sc30: last.sc30,
+      closeRate: last.closeRate,
+      totalQuotesDollars: sumField('quotes_total'),
+      totalOrdersDollars: sumField('orders_total'),
+      totalShippedDollars: sumField('shipped_total'),
+      totalQ, totalO,
     };
-  }, [filtered]);
+  }, [chartData, filtered]);
 
   const leadLagResults = useMemo(() => {
     if (filtered.length < 30) return {};
+    const quotes = filtered.map(d => d.quotes_count || 0);
+    const orders = filtered.map(d => d.orders_count || 0);
+    const shipped = filtered.map(d => d.shipped_count || 0);
     return {
-      quotesToOrders: leadLag(series.quotes, series.orders),
-      ordersToShipped: leadLag(series.orders, series.shipped),
+      quotesToOrders: leadLag(quotes, orders),
+      ordersToShipped: leadLag(orders, shipped),
     };
-  }, [filtered, series]);
+  }, [filtered]);
 
-  const handleRefresh = async (endpoint) => {
+  const handleRefresh = async (mode) => {
     setRefreshing(true);
     try {
-      const res = await fetch(`/api/refresh/${endpoint}`, { method: 'POST' });
+      const res = await fetch(`/api/refresh/netsuite?mode=${mode}`, { method: 'POST' });
       const json = await res.json();
       if (json.success) {
-        setTimeout(() => window.location.reload(), 500);
+        setTimeout(() => { loadData(); setRefreshing(false); }, 500);
       } else {
+        alert(`Refresh failed: ${json.error}`);
         setRefreshing(false);
-        alert(`Refresh failed: ${json.error || 'Unknown error'}`);
       }
     } catch (e) {
-      setRefreshing(false);
       alert(`Refresh failed: ${e.message}`);
+      setRefreshing(false);
     }
   };
 
   if (loading) return (
-    <div style={{ background: '#0f172a', color: '#f8fafc', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div>Loading data...</div>
+    <div style={{ background: '#0f172a', color: '#f8fafc', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'system-ui' }}>
+      Loading data...
     </div>
   );
 
   if (error) return (
-    <div style={{ background: '#0f172a', color: '#f8fafc', minHeight: '100vh', padding: 40 }}>
+    <div style={{ background: '#0f172a', color: '#f8fafc', minHeight: '100vh', padding: 40, fontFamily: 'system-ui' }}>
       <h1 style={{ color: '#f59e0b' }}>RF Traffic Intelligence</h1>
       <p style={{ color: '#ef4444' }}>Error: {error}</p>
-      <p style={{ color: '#94a3b8' }}>
-        Set NetSuite credentials in environment, then POST to <code>/api/refresh/netsuite</code>.
-      </p>
     </div>
   );
 
   return (
     <div style={{ background: '#0f172a', color: '#f8fafc', minHeight: '100vh', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
-      <header style={{ padding: '20px 32px', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+      {/* Header */}
+      <header style={{ padding: '16px 32px', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
         <div>
           <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>
             <span style={{ color: '#f59e0b' }}>RF</span> Traffic Intelligence
           </h1>
-          {data?.generated && (
-            <div style={{ color: '#64748b', fontSize: 11, marginTop: 2 }}>
-              Data as of {new Date(data.generated).toLocaleString()}
-              {data.sources && ` — ${data.sources.join(', ')}`}
-            </div>
-          )}
+          <div style={{ color: '#64748b', fontSize: 11, marginTop: 2 }}>
+            {data?.sources?.join(', ')} — {filtered.length} days
+          </div>
         </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
           {Object.keys(RANGES).map(r => (
             <button key={r} onClick={() => setRange(r)} style={{
               background: range === r ? '#f59e0b' : '#1e293b',
@@ -261,97 +315,76 @@ export default function App() {
               border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
             }}>{r}</button>
           ))}
-          <label style={{ color: '#94a3b8', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, marginLeft: 8 }}>
+          <label style={{ color: '#94a3b8', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, marginLeft: 6 }}>
             <input type="checkbox" checked={weekdayOnly} onChange={e => setWeekdayOnly(e.target.checked)} />
-            Weekdays only
+            Weekdays
           </label>
-          <button onClick={() => handleRefresh('netsuite')} disabled={refreshing} style={{
+          <button onClick={() => handleRefresh('incremental')} disabled={refreshing} style={{
             background: '#164e63', color: '#67e8f9', border: 'none', borderRadius: 4,
-            padding: '6px 14px', cursor: 'pointer', fontSize: 12, marginLeft: 8, fontWeight: 600,
+            padding: '5px 12px', cursor: 'pointer', fontSize: 11, marginLeft: 6, fontWeight: 600,
           }}>
-            {refreshing ? 'Refreshing...' : '↻ Refresh NetSuite'}
+            {refreshing ? 'Refreshing...' : '↻ Refresh'}
+          </button>
+          <button onClick={() => handleRefresh('full')} disabled={refreshing} style={{
+            background: '#1e293b', color: '#94a3b8', border: '1px solid #334155', borderRadius: 4,
+            padding: '5px 12px', cursor: 'pointer', fontSize: 11, fontWeight: 600,
+          }}>
+            Full Backfill
           </button>
         </div>
       </header>
 
-      <main style={{ padding: '24px 32px', maxWidth: 1600, margin: '0 auto' }}>
+      <main style={{ padding: '20px 32px', maxWidth: 1600, margin: '0 auto' }}>
+        {/* Summary cards */}
         {summary && (
-          <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
-            <StatCard label="Quotes" value={formatNum(summary.quotes)} sub={formatMoney(summary.quotesDollars)} />
-            <StatCard label="Sales Orders" value={formatNum(summary.orders)} sub={formatMoney(summary.ordersDollars)} />
-            <StatCard label="Shipped Sales" value={formatNum(summary.shipped)} sub={formatMoney(summary.shippedDollars)} />
-            <StatCard label="Close Rate" value={formatPct(summary.closeRate)} sub={`${filtered.length} days`} />
+          <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+            <StatCard label="Total Quote DMA" value={fmtMoney(summary.q30)} sub={`30 DMA avg daily`} small={`Period total: ${fmtMoney(summary.totalQuotesDollars)}`} />
+            <StatCard label="Total Orders DMA" value={fmtMoney(summary.o30)} sub={`30 DMA avg daily`} small={`Period total: ${fmtMoney(summary.totalOrdersDollars)}`} />
+            <StatCard label="Total Shipped DMA" value={fmtMoney(summary.s30)} sub={`30 DMA avg daily`} small={`Period total: ${fmtMoney(summary.totalShippedDollars)}`} />
+            <StatCard label="Close Rate DMA" value={fmtPct(summary.closeRate)} sub="30 DMA orders/quotes" />
           </div>
         )}
 
-        {filtered.length > 0 && (
-          <div style={{ marginBottom: 24 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <h2 style={{ fontSize: 14, color: '#94a3b8', margin: 0, fontWeight: 600 }}>
-                NetSuite Activity — 30 &amp; 90 Day Moving Averages
-              </h2>
-              <div style={{ display: 'flex', gap: 16, fontSize: 11, color: '#64748b' }}>
-                <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#f59e0b', marginRight: 4 }} />30 DMA</span>
-                <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#06b6d4', marginRight: 4 }} />90 DMA</span>
-              </div>
+        {/* Dollar DMA Charts */}
+        {chartData.length > 0 && (
+          <>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <DMALineChart
+                title="Total Quote DMA" data={chartData}
+                fieldRaw="quotesDollars" field30="q30" field90="q90"
+                color="#818cf8" formatter={fmtMoney}
+              />
+              <DMALineChart
+                title="Close Rate DMA" data={chartData}
+                field30="closeRate" field90="cr90"
+                color="#f472b6" formatter={fmtPct}
+              />
             </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-              <DMAChart title="Quotes (count)" daily={filtered} values={series.quotes} color="#a78bfa" />
-              <DMAChart title="Sales Orders (count)" daily={filtered} values={series.orders} color="#34d399" />
-              <DMAChart title="Shipped Sales (count)" daily={filtered} values={series.shipped} color="#60a5fa" />
-              <DMAChart title="Close Rate (orders / quotes, rolling)" daily={filtered} values={series.closeRate.map(v => v || 0)} color="#f472b6" formatter={formatPct} />
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <DMALineChart
+                title="Total Orders Created DMA" data={chartData}
+                fieldRaw="ordersDollars" field30="o30" field90="o90"
+                color="#34d399" formatter={fmtMoney}
+              />
+              <DMALineChart
+                title="Total Shipped DMA" data={chartData}
+                fieldRaw="shippedDollars" field30="s30" field90="s90"
+                color="#60a5fa" formatter={fmtMoney}
+              />
             </div>
-          </div>
+          </>
         )}
 
-        {filtered.length > 0 && (
-          <div style={{ marginBottom: 24 }}>
-            <h2 style={{ fontSize: 14, color: '#94a3b8', marginBottom: 12, fontWeight: 600 }}>Dollar Volume — 30 &amp; 90 Day Moving Averages</h2>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-              <DMAChart title="Quotes ($)" daily={filtered} values={series.quotesDollars} color="#a78bfa" formatter={formatMoney} />
-              <DMAChart title="Sales Orders ($)" daily={filtered} values={series.ordersDollars} color="#34d399" formatter={formatMoney} />
-              <DMAChart title="Shipped Sales ($)" daily={filtered} values={series.shippedDollars} color="#60a5fa" formatter={formatMoney} />
-            </div>
-          </div>
-        )}
-
+        {/* Lead-Lag */}
         {(leadLagResults.quotesToOrders || leadLagResults.ordersToShipped) && (
-          <div style={{ marginBottom: 24 }}>
-            <h2 style={{ fontSize: 14, color: '#94a3b8', marginBottom: 12, fontWeight: 600 }}>Lead-Lag Correlation</h2>
+          <div style={{ marginBottom: 20 }}>
+            <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>Lead-Lag Correlation</h2>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
               <LeadLagCard title="Quotes → Sales Orders" result={leadLagResults.quotesToOrders} />
-              <LeadLagCard title="Orders → Shipped Sales" result={leadLagResults.ordersToShipped} />
+              <LeadLagCard title="Orders → Shipped" result={leadLagResults.ordersToShipped} />
             </div>
           </div>
         )}
-
-        <div style={{ overflowX: 'auto' }}>
-          <h2 style={{ fontSize: 14, color: '#94a3b8', marginBottom: 12, fontWeight: 600 }}>
-            Daily Data ({filtered.length} rows — last 60)
-          </h2>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #334155' }}>
-                {['Date', 'Quotes', '$ Quotes', 'Orders', '$ Orders', 'Shipped', '$ Shipped'].map(h => (
-                  <th key={h} style={{ padding: '8px 12px', textAlign: 'left', color: '#64748b', fontWeight: 600 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.slice(-60).reverse().map(d => (
-                <tr key={d.date} style={{ borderBottom: '1px solid #1e293b' }}>
-                  <td style={{ padding: '6px 12px', color: '#cbd5e1' }}>{d.date}</td>
-                  <td style={{ padding: '6px 12px' }}>{formatNum(d.quotes_count)}</td>
-                  <td style={{ padding: '6px 12px' }}>{formatMoney(d.quotes_total)}</td>
-                  <td style={{ padding: '6px 12px' }}>{formatNum(d.orders_count)}</td>
-                  <td style={{ padding: '6px 12px' }}>{formatMoney(d.orders_total)}</td>
-                  <td style={{ padding: '6px 12px' }}>{formatNum(d.shipped_count)}</td>
-                  <td style={{ padding: '6px 12px' }}>{formatMoney(d.shipped_total)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
       </main>
     </div>
   );
