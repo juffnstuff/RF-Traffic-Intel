@@ -26,49 +26,65 @@ const OUTPUT_PATH = path.join(CACHE_DIR, 'netsuite-daily.json');
 const LOOKBACK_DAYS = parseInt(process.env.LOOKBACK_DAYS || '540', 10);
 
 function requireEnv(name) {
-  const v = process.env[name];
+  const v = process.env[name]?.trim();
   if (!v) throw new Error(`Missing env var: ${name}`);
   return v;
 }
 
 function percentEncode(str) {
-  return encodeURIComponent(str).replace(/[!'()*]/g, c =>
-    '%' + c.charCodeAt(0).toString(16).toUpperCase()
-  );
+  return encodeURIComponent(str)
+    .replace(/!/g, '%21')
+    .replace(/'/g, '%27')
+    .replace(/\(/g, '%28')
+    .replace(/\)/g, '%29')
+    .replace(/\*/g, '%2A');
 }
 
-function buildOAuthHeader({ method, url, accountId, consumerKey, consumerSecret, tokenId, tokenSecret }) {
+function buildOAuthHeader({ method, baseUrl, queryParams, accountId, consumerKey, consumerSecret, tokenId, tokenSecret }) {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = crypto.randomBytes(16).toString('hex');
+
   const oauthParams = {
     oauth_consumer_key: consumerKey,
-    oauth_token: tokenId,
+    oauth_nonce: nonce,
     oauth_signature_method: 'HMAC-SHA256',
-    oauth_timestamp: Math.floor(Date.now() / 1000).toString(),
-    oauth_nonce: crypto.randomBytes(16).toString('hex'),
+    oauth_timestamp: timestamp,
+    oauth_token: tokenId,
     oauth_version: '1.0',
   };
 
-  const paramString = Object.keys(oauthParams)
+  // Combine OAuth params + query params for signature base string
+  const allParams = { ...oauthParams };
+  if (queryParams) {
+    for (const [k, v] of Object.entries(queryParams)) {
+      allParams[k] = String(v);
+    }
+  }
+
+  const paramString = Object.keys(allParams)
     .sort()
-    .map(k => `${percentEncode(k)}=${percentEncode(oauthParams[k])}`)
+    .map(k => `${percentEncode(k)}=${percentEncode(allParams[k])}`)
     .join('&');
 
-  const baseString = [
+  const signatureBaseString = [
     method.toUpperCase(),
-    percentEncode(url),
+    percentEncode(baseUrl),
     percentEncode(paramString),
   ].join('&');
 
   const signingKey = `${percentEncode(consumerSecret)}&${percentEncode(tokenSecret)}`;
-  const signature = crypto.createHmac('sha256', signingKey).update(baseString).digest('base64');
+  const signature = crypto.createHmac('sha256', signingKey)
+    .update(signatureBaseString)
+    .digest('base64');
 
   oauthParams.oauth_signature = signature;
 
-  const headerParams = Object.keys(oauthParams)
+  const headerParts = Object.keys(oauthParams)
     .sort()
     .map(k => `${percentEncode(k)}="${percentEncode(oauthParams[k])}"`)
     .join(', ');
 
-  return `OAuth realm="${accountId}", ${headerParams}`;
+  return `OAuth realm="${percentEncode(accountId)}", ${headerParts}`;
 }
 
 async function runSuiteQL(sql) {
@@ -87,14 +103,19 @@ async function runSuiteQL(sql) {
   let hasMore = true;
 
   while (hasMore) {
-    const url = `${baseUrl}?limit=${limit}&offset=${offset}`;
+    const queryParams = { limit: String(limit), offset: String(offset) };
+    const fullUrl = `${baseUrl}?limit=${limit}&offset=${offset}`;
+
     const authHeader = buildOAuthHeader({
       method: 'POST',
-      url: baseUrl,
+      baseUrl,
+      queryParams,
       accountId, consumerKey, consumerSecret, tokenId, tokenSecret,
     });
 
-    const res = await fetch(url, {
+    console.log(`    → POST ${baseUrl} (offset=${offset})`);
+
+    const res = await fetch(fullUrl, {
       method: 'POST',
       headers: {
         Authorization: authHeader,
@@ -106,6 +127,7 @@ async function runSuiteQL(sql) {
 
     if (!res.ok) {
       const text = await res.text();
+      console.error(`    ✗ HTTP ${res.status}: ${text.slice(0, 300)}`);
       throw new Error(`SuiteQL error (${res.status}): ${text.slice(0, 500)}`);
     }
 
@@ -134,6 +156,7 @@ export async function fetchNetSuite() {
   const sinceStr = since.toISOString().slice(0, 10);
 
   console.log(`🔎  NetSuite fetch — lookback ${LOOKBACK_DAYS} days (since ${sinceStr})`);
+  console.log(`    Account: ${process.env.NS_ACCOUNT_ID}`);
 
   const quotesQ = `
     SELECT t.tranDate, COUNT(*) as cnt, SUM(t.total) as total
@@ -212,6 +235,7 @@ export async function fetchNetSuite() {
   const out = {
     generated: new Date().toISOString(),
     source: 'netsuite-suiteql',
+    sources: ['netsuite'],
     accountId: process.env.NS_ACCOUNT_ID,
     lookbackDays: LOOKBACK_DAYS,
     daily,
