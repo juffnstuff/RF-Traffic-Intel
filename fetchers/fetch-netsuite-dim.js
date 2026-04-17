@@ -116,13 +116,11 @@ function buildFilter(sinceDateStr, col) {
 
 function lineJoinsAndFilter() {
   // Real item lines only — skip summary/tax rows.
-  // Sales rep: neither transaction.salesrep, transactionline.salesrep,
-  // nor the transactionsalesteam table exist in this SuiteQL schema.
-  // Use customer.salesrep (the rep that defaults onto the transaction).
+  // Sales rep on the transaction is the `employee` column (title: "Sales Rep"),
+  // NOT `salesrep`. Verified via NetSuite SuiteQL metadata catalog.
   return `
     INNER JOIN transactionline tl ON tl.transaction = t.id
     LEFT JOIN item i ON i.id = tl.item
-    LEFT JOIN customer c ON c.id = t.entity
   `;
 }
 
@@ -136,21 +134,23 @@ function baseLineConditions() {
 
 async function runDimQuery({ recordType, dateCol, extraWhere = '', since, trantype }) {
   const dateFilter = buildFilter(since, dateCol);
+  // Line amounts on sales-side transactions are stored negative in NetSuite's
+  // credit-natural convention; negate so the dashboard shows positive $.
   const sql = `
     SELECT
       ${dateCol} as bucket_date,
       COALESCE(BUILTIN.DF(i.custitem1), '') as part_group,
-      COALESCE(TO_CHAR(c.salesrep), '') as salesrep_id,
-      BUILTIN.DF(c.salesrep) as salesrep_name,
+      COALESCE(TO_CHAR(t.employee), '') as salesrep_id,
+      BUILTIN.DF(t.employee) as salesrep_name,
       COUNT(DISTINCT t.id) as txn_cnt,
-      SUM(tl.foreignamount) as line_total
+      -SUM(tl.foreignamount) as line_total
     FROM transaction t
     ${lineJoinsAndFilter()}
     WHERE t.recordType = '${recordType}'
       ${baseLineConditions()}
       ${extraWhere}
       ${dateFilter}
-    GROUP BY ${dateCol}, BUILTIN.DF(i.custitem1), c.salesrep, BUILTIN.DF(c.salesrep)
+    GROUP BY ${dateCol}, BUILTIN.DF(i.custitem1), t.employee, BUILTIN.DF(t.employee)
   `.trim();
 
   console.log(`  → ${trantype}...`);
