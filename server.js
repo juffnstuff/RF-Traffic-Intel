@@ -47,15 +47,34 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Main data endpoint
+// Main data endpoint — prefers unified, falls back to netsuite-only if that's all we have
 app.get('/api/unified', (req, res) => {
-  if (!fs.existsSync(UNIFIED_PATH)) {
+  const netsuitePath = path.join(CACHE_DIR, 'netsuite-daily.json');
+  let data;
+
+  if (fs.existsSync(UNIFIED_PATH)) {
+    data = JSON.parse(fs.readFileSync(UNIFIED_PATH));
+  } else if (fs.existsSync(netsuitePath)) {
+    // Promote NetSuite-only cache to unified shape
+    const ns = JSON.parse(fs.readFileSync(netsuitePath));
+    data = {
+      generated: ns.generated,
+      sources: ['netsuite'],
+      daily: (ns.daily || []).map(d => ({
+        date: d.date,
+        quotes_count: d.quotes_count ?? d.quotes ?? 0,
+        quotes_total: d.quotes_total ?? 0,
+        orders_count: d.orders_count ?? d.orders ?? 0,
+        orders_total: d.orders_total ?? 0,
+        shipped_count: d.shipped_count ?? 0,
+        shipped_total: d.shipped_total ?? 0,
+      })),
+    };
+  } else {
     return res.status(404).json({
-      error: 'No data yet. Run: node fetchers/fetch-all.js',
-      hint: 'Or for quick start with just NetSuite: node fetchers/fetch-all.js --netsuite-only',
+      error: 'No data yet. Run: node fetchers/fetch-netsuite.js',
     });
   }
-  const data = JSON.parse(fs.readFileSync(UNIFIED_PATH));
 
   // Optional date filter
   const { start, end } = req.query;
@@ -92,16 +111,15 @@ app.post('/api/refresh/netsuite', async (req, res) => {
   try {
     console.log('🔄  Refreshing NetSuite data...');
     const { fetchNetSuite } = await import('./fetchers/fetch-netsuite.js');
-    await fetchNetSuite();
-
-    // Rebuild unified
-    const { exec } = await import('child_process');
-    exec('node fetchers/fetch-all.js --skip-google', (err) => {
-      if (err) console.warn('Merge warning:', err.message);
+    const result = await fetchNetSuite();
+    res.json({
+      success: true,
+      message: 'NetSuite data refreshed',
+      rows: result.daily.length,
+      generated: result.generated,
     });
-
-    res.json({ success: true, message: 'NetSuite data refreshed' });
   } catch (e) {
+    console.error('Refresh failed:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -134,4 +152,19 @@ app.listen(PORT, () => {
   console.log(`    http://localhost:${PORT}`);
   console.log(`    API: http://localhost:${PORT}/api/unified`);
   console.log(`\n    Data status: ${fs.existsSync(UNIFIED_PATH) ? '✅ cached data available' : '⚠️  no data yet — run: node fetchers/fetch-all.js'}\n`);
+
+  // Auto-fetch NetSuite data on startup if credentials are present
+  const hasNSCreds = process.env.NS_ACCOUNT_ID && process.env.NS_CONSUMER_KEY &&
+                     process.env.NS_CONSUMER_SECRET && process.env.NS_TOKEN_ID &&
+                     process.env.NS_TOKEN_SECRET;
+
+  if (hasNSCreds) {
+    console.log('🔑  NetSuite credentials detected — fetching fresh data in background...');
+    import('./fetchers/fetch-netsuite.js')
+      .then(({ fetchNetSuite }) => fetchNetSuite())
+      .then(() => console.log('✅  NetSuite auto-fetch complete'))
+      .catch(e => console.error('⚠️  NetSuite auto-fetch failed:', e.message));
+  } else {
+    console.log('ℹ️   NetSuite credentials not set — using cached/demo data');
+  }
 });
