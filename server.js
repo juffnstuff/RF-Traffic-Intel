@@ -85,6 +85,71 @@ app.get('/api/unified', async (req, res) => {
   }
 });
 
+// Filter options (part groups + sales reps) for the filtered page
+app.get('/api/filters', async (req, res) => {
+  if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
+  try {
+    const { getFilterOptions } = await import('./db.js');
+    const opts = await getFilterOptions();
+    res.json(opts);
+  } catch (e) {
+    console.error('Filter options error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Filtered daily data — same shape as /api/unified, filtered by part groups + sales reps
+app.get('/api/unified-dim', async (req, res) => {
+  if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
+  try {
+    const { getDailyDimFiltered, getDimRowCount } = await import('./db.js');
+    const partGroups = (req.query.partGroups || '').split(',').map(s => s.trim()).filter(Boolean);
+    const salesReps  = (req.query.salesReps  || '').split(',').map(s => s.trim()).filter(Boolean);
+
+    const dimCount = await getDimRowCount();
+    if (dimCount === 0) {
+      return res.status(404).json({ error: 'No dim data yet. Run a dim fetch first.' });
+    }
+
+    let daily = await getDailyDimFiltered({ partGroups, salesReps });
+
+    const { start, end } = req.query;
+    if (start || end) {
+      daily = daily.filter(d => (!start || d.date >= start) && (!end || d.date <= end));
+    }
+
+    res.json({
+      generated: new Date().toISOString(),
+      sources: ['netsuite-dim'],
+      filters: { partGroups, salesReps },
+      daily,
+    });
+  } catch (e) {
+    console.error('unified-dim error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/refresh/netsuite-dim', async (req, res) => {
+  if (!hasNS) return res.status(400).json({ error: 'NetSuite credentials not configured' });
+  const mode = req.query.mode || 'incremental';
+  try {
+    console.log(`🔄  Manual dim refresh (${mode})...`);
+    const { fetchNetSuiteDim } = await import('./fetchers/fetch-netsuite-dim.js');
+    let since = null;
+    if (mode !== 'full') {
+      const d = new Date();
+      d.setDate(d.getDate() - 60);
+      since = d.toISOString().slice(0, 10);
+    }
+    const result = await fetchNetSuiteDim({ since });
+    res.json({ success: true, message: `Dim ${mode} refresh complete`, rows: result.rows });
+  } catch (e) {
+    console.error('Dim refresh failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/netsuite', (req, res) => {
   const p = path.join(CACHE_DIR, 'netsuite-daily.json');
   if (!fs.existsSync(p)) return res.status(404).json({ error: 'No cache' });
@@ -185,6 +250,22 @@ app.listen(PORT, async () => {
           .then(r => console.log(`✅  Backfill complete: ${r.daily.length} days`))
           .catch(e => console.error('⚠️  Backfill failed:', e.message));
       }
+
+      // Also backfill the dim table if empty
+      try {
+        const { getDimRowCount } = await import('./db.js');
+        const dimCount = await getDimRowCount();
+        console.log(`    DB dim rows: ${dimCount}`);
+        if (dimCount === 0 && hasNS) {
+          console.log('📦  Dim table empty — starting line-level backfill...');
+          const { fetchNetSuiteDim } = await import('./fetchers/fetch-netsuite-dim.js');
+          fetchNetSuiteDim({ since: null })
+            .then(r => console.log(`✅  Dim backfill complete: ${r.rows} rows`))
+            .catch(e => console.error('⚠️  Dim backfill failed:', e.message));
+        }
+      } catch (e) {
+        console.error('⚠️  Dim count check failed:', e.message);
+      }
     } catch (e) {
       console.error('⚠️  DB init failed:', e.message);
     }
@@ -206,10 +287,16 @@ app.listen(PORT, async () => {
     cron.schedule('0 2 * * 1-5', async () => {
       console.log(`\n⏰  Cron: nightly NetSuite refresh (${new Date().toISOString()})`);
       try {
-        const { fetchNetSuite } = await import('./fetchers/fetch-netsuite.js');
         const d = new Date();
         d.setDate(d.getDate() - 60);
-        await fetchNetSuite({ since: d.toISOString().slice(0, 10) });
+        const since = d.toISOString().slice(0, 10);
+
+        const { fetchNetSuite } = await import('./fetchers/fetch-netsuite.js');
+        await fetchNetSuite({ since });
+
+        const { fetchNetSuiteDim } = await import('./fetchers/fetch-netsuite-dim.js');
+        await fetchNetSuiteDim({ since });
+
         console.log('✅  Cron refresh complete');
       } catch (e) {
         console.error('⚠️  Cron refresh failed:', e.message);
