@@ -139,14 +139,9 @@ function parseNSDate(s) {
   return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
 }
 
-function buildDateFilter(sinceDateStr) {
+function buildFilter(sinceDateStr, col) {
   if (!sinceDateStr) return '';
-  return `AND t.tranDate >= TO_DATE('${sinceDateStr}', 'YYYY-MM-DD')`;
-}
-
-function buildShipDateFilter(sinceDateStr) {
-  if (!sinceDateStr) return '';
-  return `AND t.actualShipDate >= TO_DATE('${sinceDateStr}', 'YYYY-MM-DD')`;
+  return `AND ${col} >= TO_DATE('${sinceDateStr}', 'YYYY-MM-DD')`;
 }
 
 /**
@@ -158,21 +153,25 @@ export async function fetchNetSuite({ since = null } = {}) {
   console.log(`🔎  NetSuite fetch — ${mode}`);
   console.log(`    Account: ${process.env.NS_ACCOUNT_ID}`);
 
-  const dateFilter = buildDateFilter(since);
-  const shipFilter = buildShipDateFilter(since);
+  // Quotes bucketed by estimate creation date
+  const quoteCreatedFilter = buildFilter(since, 'TRUNC(t.createddate)');
+  // Sales orders bucketed by the date the SO record was created (i.e. when the quote was converted)
+  const orderCreatedFilter = buildFilter(since, 'TRUNC(t.createddate)');
+  // Shipped by actual ship date
+  const shipFilter = buildFilter(since, 't.actualShipDate');
 
   const quotesQ = `
-    SELECT t.tranDate, COUNT(*) as cnt, SUM(t.total) as total
+    SELECT TRUNC(t.createddate) as tranDate, COUNT(*) as cnt, SUM(t.total) as total
     FROM transaction t
-    WHERE t.recordType = 'estimate' ${dateFilter}
-    GROUP BY t.tranDate
+    WHERE t.recordType = 'estimate' ${quoteCreatedFilter}
+    GROUP BY TRUNC(t.createddate)
   `.trim();
 
   const ordersQ = `
-    SELECT t.tranDate, COUNT(*) as cnt, SUM(t.total) as total
+    SELECT TRUNC(t.createddate) as tranDate, COUNT(*) as cnt, SUM(t.total) as total
     FROM transaction t
-    WHERE t.recordType = 'salesorder' ${dateFilter}
-    GROUP BY t.tranDate
+    WHERE t.recordType = 'salesorder' ${orderCreatedFilter}
+    GROUP BY TRUNC(t.createddate)
   `.trim();
 
   const shippedQ = `
@@ -186,12 +185,12 @@ export async function fetchNetSuite({ since = null } = {}) {
 
   // Adjusted quotes: exclude "Lost: Alternate RF Solution/Quote" (custbody_rf_lost_reason = 13)
   const quotesAdjQ = `
-    SELECT t.tranDate, COUNT(*) as cnt, SUM(t.total) as total
+    SELECT TRUNC(t.createddate) as tranDate, COUNT(*) as cnt, SUM(t.total) as total
     FROM transaction t
     WHERE t.recordType = 'estimate'
       AND (t.custbody_rf_lost_reason IS NULL OR t.custbody_rf_lost_reason != 13)
-      ${dateFilter}
-    GROUP BY t.tranDate
+      ${quoteCreatedFilter}
+    GROUP BY TRUNC(t.createddate)
   `.trim();
 
   console.log('  → querying estimates...');

@@ -5,7 +5,7 @@ import {
 } from 'recharts';
 import { movingAverage, leadLag, weekdaysOnly } from './utils/analytics';
 
-const RANGES = { '3m': 90, '6m': 180, '1y': 365, '2y': 730, all: Infinity };
+const RELATIVE_RANGES = { '3m': 90, '6m': 180 };
 
 function fmtNum(n) {
   if (n == null || Number.isNaN(n)) return '—';
@@ -45,13 +45,13 @@ function fmtAxisDate(d) {
 function StatCard({ label, value, sub, small }) {
   return (
     <div style={{
-      background: '#1e293b', borderRadius: 8, padding: '16px 20px',
+      background: '#334155', borderRadius: 8, padding: '16px 20px',
       flex: '1 1 180px', minWidth: 160,
     }}>
-      <div style={{ color: '#94a3b8', fontSize: 11, marginBottom: 2 }}>{label}</div>
+      <div style={{ color: '#cbd5e1', fontSize: 11, marginBottom: 2 }}>{label}</div>
       <div style={{ color: '#f8fafc', fontSize: 28, fontWeight: 700, lineHeight: 1.1 }}>{value}</div>
-      {sub && <div style={{ color: '#64748b', fontSize: 11, marginTop: 4 }}>{sub}</div>}
-      {small && <div style={{ color: '#475569', fontSize: 10, marginTop: 2 }}>{small}</div>}
+      {sub && <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 4 }}>{sub}</div>}
+      {small && <div style={{ color: '#94a3b8', fontSize: 10, marginTop: 2 }}>{small}</div>}
     </div>
   );
 }
@@ -60,7 +60,7 @@ function ChartTooltip({ active, payload, label, formatter }) {
   if (!active || !payload?.length) return null;
   return (
     <div style={{
-      background: '#0f172a', border: '1px solid #334155', borderRadius: 6,
+      background: '#0f172a', border: '1px solid #64748b', borderRadius: 6,
       padding: '10px 14px', fontSize: 12, lineHeight: 1.6,
     }}>
       <div style={{ color: '#f8fafc', fontWeight: 600, marginBottom: 4 }}>{fmtDate(label)}</div>
@@ -80,30 +80,30 @@ function DMALineChart({ title, data, field30, field90, fieldRaw, color, formatte
   const tickInterval = Math.max(1, Math.floor(data.length / 8));
 
   return (
-    <div style={{ background: '#1e293b', borderRadius: 8, padding: '16px 20px', flex: '1 1 580px', minWidth: 400 }}>
+    <div style={{ background: '#334155', borderRadius: 8, padding: '16px 20px', flex: '1 1 580px', minWidth: 400 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
         <div>
-          <div style={{ color: '#94a3b8', fontSize: 11 }}>{title}</div>
+          <div style={{ color: '#cbd5e1', fontSize: 11 }}>{title}</div>
           <div style={{ color: '#f8fafc', fontSize: 22, fontWeight: 700 }}>
             {formatter(currentValue ?? latest30)}
-            <span style={{ fontSize: 11, color: '#64748b', marginLeft: 6 }}>30 DMA</span>
+            <span style={{ fontSize: 11, color: '#94a3b8', marginLeft: 6 }}>30 DMA</span>
           </div>
         </div>
       </div>
       <ResponsiveContainer width="100%" height={220}>
         <LineChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#64748b" strokeOpacity={0.4} />
           <XAxis
             dataKey="date"
             tickFormatter={fmtAxisDate}
             interval={tickInterval}
-            tick={{ fill: '#64748b', fontSize: 10 }}
-            axisLine={{ stroke: '#334155' }}
+            tick={{ fill: '#cbd5e1', fontSize: 10 }}
+            axisLine={{ stroke: '#94a3b8' }}
             tickLine={false}
           />
           <YAxis
             tickFormatter={formatter}
-            tick={{ fill: '#64748b', fontSize: 10 }}
+            tick={{ fill: '#cbd5e1', fontSize: 10 }}
             axisLine={false}
             tickLine={false}
             width={55}
@@ -112,22 +112,22 @@ function DMALineChart({ title, data, field30, field90, fieldRaw, color, formatte
           {fieldRaw && (
             <Line
               type="monotone" dataKey={fieldRaw} name="Daily"
-              stroke={color} strokeWidth={1} strokeOpacity={0.25}
+              stroke={color} strokeWidth={1} strokeOpacity={0.45}
               dot={false} activeDot={{ r: 3, fill: color }}
             />
           )}
           <Line
             type="monotone" dataKey={field30} name="30 DMA"
-            stroke={color} strokeWidth={2}
+            stroke={color} strokeWidth={2.5}
             dot={false} activeDot={{ r: 5, fill: color, stroke: '#0f172a', strokeWidth: 2 }}
           />
           <Line
             type="monotone" dataKey={field90} name="90 DMA"
-            stroke="#64748b" strokeWidth={1.5} strokeDasharray="4 3"
-            dot={false} activeDot={{ r: 4, fill: '#64748b', stroke: '#0f172a', strokeWidth: 2 }}
+            stroke="#e2e8f0" strokeWidth={1.75} strokeDasharray="4 3"
+            dot={false} activeDot={{ r: 4, fill: '#e2e8f0', stroke: '#0f172a', strokeWidth: 2 }}
           />
           <Legend
-            wrapperStyle={{ fontSize: 10, color: '#64748b', paddingTop: 8 }}
+            wrapperStyle={{ fontSize: 10, color: '#cbd5e1', paddingTop: 8 }}
             iconType="plainline"
           />
         </LineChart>
@@ -168,7 +168,7 @@ export default function App() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [range, setRange] = useState('1y');
+  const [range, setRange] = useState('6m');
   const [weekdayOnly, setWeekdayOnly] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -183,13 +183,20 @@ export default function App() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  const availableYears = useMemo(() => {
+    if (!data?.daily?.length) return [];
+    const years = new Set(data.daily.map(d => d.date.slice(0, 4)));
+    return Array.from(years).sort();
+  }, [data]);
+
   const filtered = useMemo(() => {
     if (!data?.daily) return [];
     let rows = [...data.daily].sort((a, b) => a.date.localeCompare(b.date));
-    const days = RANGES[range];
-    if (days < Infinity) {
+    if (/^\d{4}$/.test(range)) {
+      rows = rows.filter(d => d.date.startsWith(range));
+    } else if (RELATIVE_RANGES[range]) {
       const cutoff = new Date();
-      cutoff.setDate(cutoff.getDate() - days);
+      cutoff.setDate(cutoff.getDate() - RELATIVE_RANGES[range]);
       const cutStr = cutoff.toISOString().slice(0, 10);
       rows = rows.filter(d => d.date >= cutStr);
     }
@@ -232,12 +239,12 @@ export default function App() {
       return o90[i] / q;
     });
 
-    // Capture rate by $ (orders$ / adjusted quotes$)
-    const captureRate = qad30.map((q, i) => {
+    // Capture rate by $ — uses the same values shown on the quote + sales order charts
+    const captureRate = qd30.map((q, i) => {
       if (q == null || od30[i] == null || q === 0) return null;
       return od30[i] / q;
     });
-    const capt90 = qad90.map((q, i) => {
+    const capt90 = qd90.map((q, i) => {
       if (q == null || od90[i] == null || q === 0) return null;
       return od90[i] / q;
     });
@@ -325,10 +332,10 @@ export default function App() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-          {Object.keys(RANGES).map(r => (
+          {[...Object.keys(RELATIVE_RANGES), ...availableYears, 'all'].map(r => (
             <button key={r} onClick={() => setRange(r)} style={{
-              background: range === r ? '#f59e0b' : '#1e293b',
-              color: range === r ? '#0f172a' : '#94a3b8',
+              background: range === r ? '#f59e0b' : '#334155',
+              color: range === r ? '#0f172a' : '#e2e8f0',
               border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
             }}>{r}</button>
           ))}
@@ -359,7 +366,7 @@ export default function App() {
             <StatCard label="Total Orders DMA" value={fmtMoney(summary.o30)} sub={`30 DMA avg daily`} small={`Period total: ${fmtMoney(summary.totalOrdersDollars)}`} />
             <StatCard label="Total Shipped DMA" value={fmtMoney(summary.s30)} sub={`30 DMA avg daily`} small={`Period total: ${fmtMoney(summary.totalShippedDollars)}`} />
             <StatCard label="Close Rate DMA" value={fmtPct(summary.closeRate)} sub="30 DMA orders/quotes (count)" />
-            <StatCard label="Capture Rate DMA" value={fmtPct(summary.captureRate)} sub="30 DMA orders$/adj quotes$" small="Excl. RF Alternate Solution" />
+            <StatCard label="Capture Rate DMA" value={fmtPct(summary.captureRate)} sub="30 DMA orders$/quotes$" />
           </div>
         )}
 
@@ -368,33 +375,45 @@ export default function App() {
           <>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart
-                title="Total Quote DMA" data={chartData}
+                title="Total Quote DMA (by quote creation date)" data={chartData}
                 fieldRaw="quotesDollars" field30="q30" field90="q90"
-                color="#818cf8" formatter={fmtMoney}
+                color="#a5b4fc" formatter={fmtMoney}
+              />
+              <DMALineChart
+                title="Total Sales Order DMA (by date converted)" data={chartData}
+                fieldRaw="ordersDollars" field30="o30" field90="o90"
+                color="#4ade80" formatter={fmtMoney}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <DMALineChart
+                title="Quote Count DMA" data={chartData}
+                fieldRaw="quotes" field30="qc30" field90="qc90"
+                color="#a5b4fc" formatter={fmtNum}
+              />
+              <DMALineChart
+                title="Sales Order Count DMA" data={chartData}
+                fieldRaw="orders" field30="oc30" field90="oc90"
+                color="#4ade80" formatter={fmtNum}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <DMALineChart
+                title="Total Shipped DMA (by actual ship date)" data={chartData}
+                fieldRaw="shippedDollars" field30="s30" field90="s90"
+                color="#7dd3fc" formatter={fmtMoney}
               />
               <DMALineChart
                 title="Close Rate DMA (count)" data={chartData}
                 field30="closeRate" field90="cr90"
-                color="#f472b6" formatter={fmtPct}
+                color="#f9a8d4" formatter={fmtPct}
               />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart
-                title="Capture Rate DMA (sales$ / adj quotes$)" data={chartData}
+                title="Capture Rate DMA (sales order$ / quote$)" data={chartData}
                 field30="captureRate" field90="capt90"
-                color="#fbbf24" formatter={fmtPct}
-              />
-            </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-              <DMALineChart
-                title="Total Orders Created DMA" data={chartData}
-                fieldRaw="ordersDollars" field30="o30" field90="o90"
-                color="#34d399" formatter={fmtMoney}
-              />
-              <DMALineChart
-                title="Total Shipped DMA" data={chartData}
-                fieldRaw="shippedDollars" field30="s30" field90="s90"
-                color="#60a5fa" formatter={fmtMoney}
+                color="#fcd34d" formatter={fmtPct}
               />
             </div>
           </>
