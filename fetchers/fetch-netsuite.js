@@ -184,9 +184,23 @@ export async function fetchNetSuite({ since = null } = {}) {
     GROUP BY t.actualShipDate
   `.trim();
 
+  // Adjusted quotes: exclude "Lost: Alternate RF Solution/Quote" (custbody_rf_lost_reason = 13)
+  const quotesAdjQ = `
+    SELECT t.tranDate, COUNT(*) as cnt, SUM(t.total) as total
+    FROM transaction t
+    WHERE t.recordType = 'estimate'
+      AND (t.custbody_rf_lost_reason IS NULL OR t.custbody_rf_lost_reason != 13)
+      ${dateFilter}
+    GROUP BY t.tranDate
+  `.trim();
+
   console.log('  → querying estimates...');
   const quotesRaw = await runSuiteQL(quotesQ);
   console.log(`    ${quotesRaw.length} quote-days`);
+
+  console.log('  → querying adjusted estimates (excl. RF Alternate Solution)...');
+  const quotesAdjRaw = await runSuiteQL(quotesAdjQ);
+  console.log(`    ${quotesAdjRaw.length} adj quote-days`);
 
   console.log('  → querying sales orders...');
   const ordersRaw = await runSuiteQL(ordersQ);
@@ -202,6 +216,7 @@ export async function fetchNetSuite({ since = null } = {}) {
       byDate.set(date, {
         date,
         quotes_count: 0, quotes_total: 0,
+        quotes_adj_count: 0, quotes_adj_total: 0,
         orders_count: 0, orders_total: 0,
         shipped_count: 0, shipped_total: 0,
       });
@@ -215,6 +230,14 @@ export async function fetchNetSuite({ since = null } = {}) {
     const row = ensure(date);
     row.quotes_count = Number(r.cnt) || 0;
     row.quotes_total = Number(r.total) || 0;
+  }
+
+  for (const r of quotesAdjRaw) {
+    const date = parseNSDate(r.trandate || r.tranDate);
+    if (!date) continue;
+    const row = ensure(date);
+    row.quotes_adj_count = Number(r.cnt) || 0;
+    row.quotes_adj_total = Number(r.total) || 0;
   }
 
   for (const r of ordersRaw) {

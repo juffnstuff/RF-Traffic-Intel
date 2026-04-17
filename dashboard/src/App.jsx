@@ -200,6 +200,8 @@ export default function App() {
   const chartData = useMemo(() => {
     const quotes = filtered.map(d => d.quotes_count || 0);
     const quotesDollars = filtered.map(d => d.quotes_total || 0);
+    // Adjusted quotes: excludes "Lost: Alternate RF Solution/Quote"
+    const quotesAdjDollars = filtered.map(d => d.quotes_adj_total || d.quotes_total || 0);
     const orders = filtered.map(d => d.orders_count || 0);
     const ordersDollars = filtered.map(d => d.orders_total || 0);
     const shipped = filtered.map(d => d.shipped_count || 0);
@@ -209,6 +211,8 @@ export default function App() {
     const q90 = movingAverage(quotes, 90);
     const qd30 = movingAverage(quotesDollars, 30);
     const qd90 = movingAverage(quotesDollars, 90);
+    const qad30 = movingAverage(quotesAdjDollars, 30);
+    const qad90 = movingAverage(quotesAdjDollars, 90);
     const o30 = movingAverage(orders, 30);
     const o90 = movingAverage(orders, 90);
     const od30 = movingAverage(ordersDollars, 30);
@@ -218,6 +222,7 @@ export default function App() {
     const sd30 = movingAverage(shippedDollars, 30);
     const sd90 = movingAverage(shippedDollars, 90);
 
+    // Close rate by count
     const closeRate = q30.map((q, i) => {
       if (q == null || o30[i] == null || q === 0) return null;
       return o30[i] / q;
@@ -227,6 +232,16 @@ export default function App() {
       return o90[i] / q;
     });
 
+    // Capture rate by $ (orders$ / adjusted quotes$)
+    const captureRate = qad30.map((q, i) => {
+      if (q == null || od30[i] == null || q === 0) return null;
+      return od30[i] / q;
+    });
+    const capt90 = qad90.map((q, i) => {
+      if (q == null || od90[i] == null || q === 0) return null;
+      return od90[i] / q;
+    });
+
     return filtered.map((d, i) => ({
       date: d.date,
       quotes: quotes[i], q30: qd30[i], q90: qd90[i], qc30: q30[i], qc90: q90[i],
@@ -234,6 +249,7 @@ export default function App() {
       shipped: shipped[i], s30: sd30[i], s90: sd90[i], sc30: s30[i], sc90: s90[i],
       quotesDollars: quotesDollars[i], ordersDollars: ordersDollars[i], shippedDollars: shippedDollars[i],
       closeRate: closeRate[i], cr90: cr90[i],
+      captureRate: captureRate[i], capt90: capt90[i],
     }));
   }, [filtered]);
 
@@ -247,6 +263,7 @@ export default function App() {
       q30: last.q30, o30: last.o30, s30: last.s30,
       qc30: last.qc30, oc30: last.oc30, sc30: last.sc30,
       closeRate: last.closeRate,
+      captureRate: last.captureRate,
       totalQuotesDollars: sumField('quotes_total'),
       totalOrdersDollars: sumField('orders_total'),
       totalShippedDollars: sumField('shipped_total'),
@@ -341,7 +358,8 @@ export default function App() {
             <StatCard label="Total Quote DMA" value={fmtMoney(summary.q30)} sub={`30 DMA avg daily`} small={`Period total: ${fmtMoney(summary.totalQuotesDollars)}`} />
             <StatCard label="Total Orders DMA" value={fmtMoney(summary.o30)} sub={`30 DMA avg daily`} small={`Period total: ${fmtMoney(summary.totalOrdersDollars)}`} />
             <StatCard label="Total Shipped DMA" value={fmtMoney(summary.s30)} sub={`30 DMA avg daily`} small={`Period total: ${fmtMoney(summary.totalShippedDollars)}`} />
-            <StatCard label="Close Rate DMA" value={fmtPct(summary.closeRate)} sub="30 DMA orders/quotes" />
+            <StatCard label="Close Rate DMA" value={fmtPct(summary.closeRate)} sub="30 DMA orders/quotes (count)" />
+            <StatCard label="Capture Rate DMA" value={fmtPct(summary.captureRate)} sub="30 DMA orders$/adj quotes$" small="Excl. RF Alternate Solution" />
           </div>
         )}
 
@@ -355,9 +373,16 @@ export default function App() {
                 color="#818cf8" formatter={fmtMoney}
               />
               <DMALineChart
-                title="Close Rate DMA" data={chartData}
+                title="Close Rate DMA (count)" data={chartData}
                 field30="closeRate" field90="cr90"
                 color="#f472b6" formatter={fmtPct}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <DMALineChart
+                title="Capture Rate DMA (sales$ / adj quotes$)" data={chartData}
+                field30="captureRate" field90="capt90"
+                color="#fbbf24" formatter={fmtPct}
               />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
