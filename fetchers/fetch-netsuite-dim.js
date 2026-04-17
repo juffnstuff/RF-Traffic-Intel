@@ -115,13 +115,14 @@ function buildFilter(sinceDateStr, col) {
 }
 
 function lineJoinsAndFilter() {
-  // real item lines only — skip summary/tax rows
-  // Sales rep lives on transactionsalesteam (isprimary='T' = main rep),
-  // NOT on transaction or transactionline directly.
+  // Real item lines only — skip summary/tax rows.
+  // Sales rep: neither transaction.salesrep, transactionline.salesrep,
+  // nor the transactionsalesteam table exist in this SuiteQL schema.
+  // Use customer.salesrep (the rep that defaults onto the transaction).
   return `
     INNER JOIN transactionline tl ON tl.transaction = t.id
     LEFT JOIN item i ON i.id = tl.item
-    LEFT JOIN transactionsalesteam ts ON ts.transaction = t.id AND ts.isprimary = 'T'
+    LEFT JOIN customer c ON c.id = t.entity
   `;
 }
 
@@ -139,8 +140,8 @@ async function runDimQuery({ recordType, dateCol, extraWhere = '', since, tranty
     SELECT
       ${dateCol} as bucket_date,
       COALESCE(BUILTIN.DF(i.custitem1), '') as part_group,
-      COALESCE(TO_CHAR(ts.employee), '') as salesrep_id,
-      BUILTIN.DF(ts.employee) as salesrep_name,
+      COALESCE(TO_CHAR(c.salesrep), '') as salesrep_id,
+      BUILTIN.DF(c.salesrep) as salesrep_name,
       COUNT(DISTINCT t.id) as txn_cnt,
       SUM(tl.foreignamount) as line_total
     FROM transaction t
@@ -149,7 +150,7 @@ async function runDimQuery({ recordType, dateCol, extraWhere = '', since, tranty
       ${baseLineConditions()}
       ${extraWhere}
       ${dateFilter}
-    GROUP BY ${dateCol}, BUILTIN.DF(i.custitem1), ts.employee, BUILTIN.DF(ts.employee)
+    GROUP BY ${dateCol}, BUILTIN.DF(i.custitem1), c.salesrep, BUILTIN.DF(c.salesrep)
   `.trim();
 
   console.log(`  → ${trantype}...`);
