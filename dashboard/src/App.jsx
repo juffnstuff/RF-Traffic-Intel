@@ -79,7 +79,7 @@ const LINE_COLORS = {
   ma90: '#a78bfa',   // violet-400, dashed
 };
 
-function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmtNum, currentValue }) {
+function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmtNum, currentValue, showDaily = true }) {
   const latest30 = data.length > 0 ? data[data.length - 1]?.[field30] : null;
 
   // Thin out X axis ticks
@@ -115,7 +115,7 @@ function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmt
             width={55}
           />
           <Tooltip content={<ChartTooltip formatter={formatter} />} />
-          {fieldRaw && (
+          {fieldRaw && showDaily && (
             <Line
               type="monotone" dataKey={fieldRaw} name="Daily"
               stroke={LINE_COLORS.daily} strokeWidth={1} strokeOpacity={0.4}
@@ -175,7 +175,9 @@ export default function App() {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [range, setRange] = useState('6m');
+  const [selectedYears, setSelectedYears] = useState([]);
   const [weekdayOnly, setWeekdayOnly] = useState(true);
+  const [showDaily, setShowDaily] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   const loadData = useCallback(() => {
@@ -246,8 +248,11 @@ export default function App() {
 
   const chartData = useMemo(() => {
     if (!fullSeries.length) return [];
+    if (selectedYears.length > 0) {
+      const ySet = new Set(selectedYears);
+      return fullSeries.filter(d => ySet.has(d.date.slice(0, 4)));
+    }
     if (range === 'all') return fullSeries;
-    if (/^\d{4}$/.test(range)) return fullSeries.filter(d => d.date.startsWith(range));
     if (RELATIVE_RANGES[range]) {
       const cutoff = new Date();
       cutoff.setDate(cutoff.getDate() - RELATIVE_RANGES[range]);
@@ -255,7 +260,7 @@ export default function App() {
       return fullSeries.filter(d => d.date >= cutStr);
     }
     return fullSeries;
-  }, [fullSeries, range]);
+  }, [fullSeries, range, selectedYears]);
 
   const summary = useMemo(() => {
     if (chartData.length === 0) return null;
@@ -329,16 +334,38 @@ export default function App() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-          {[...Object.keys(RELATIVE_RANGES), ...availableYears, 'all'].map(r => (
-            <button key={r} onClick={() => setRange(r)} style={{
-              background: range === r ? '#f59e0b' : '#334155',
-              color: range === r ? '#0f172a' : '#e2e8f0',
-              border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
-            }}>{r}</button>
-          ))}
+          {[...Object.keys(RELATIVE_RANGES), 'all'].map(r => {
+            const active = selectedYears.length === 0 && range === r;
+            return (
+              <button key={r} onClick={() => { setSelectedYears([]); setRange(r); }} style={{
+                background: active ? '#f59e0b' : '#334155',
+                color: active ? '#0f172a' : '#e2e8f0',
+                border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+              }}>{r}</button>
+            );
+          })}
+          <span style={{ width: 1, height: 18, background: '#475569', margin: '0 4px' }} />
+          {availableYears.map(y => {
+            const active = selectedYears.includes(y);
+            return (
+              <button
+                key={y}
+                onClick={() => setSelectedYears(prev => prev.includes(y) ? prev.filter(v => v !== y) : [...prev, y].sort())}
+                style={{
+                  background: active ? '#f59e0b' : '#334155',
+                  color: active ? '#0f172a' : '#e2e8f0',
+                  border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                }}
+              >{y}</button>
+            );
+          })}
           <label style={{ color: '#94a3b8', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, marginLeft: 6 }}>
             <input type="checkbox" checked={weekdayOnly} onChange={e => setWeekdayOnly(e.target.checked)} />
             Weekdays
+          </label>
+          <label style={{ color: '#94a3b8', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <input type="checkbox" checked={showDaily} onChange={e => setShowDaily(e.target.checked)} />
+            Show Daily
           </label>
           <button onClick={() => handleRefresh('incremental')} disabled={refreshing} style={{
             background: '#164e63', color: '#67e8f9', border: 'none', borderRadius: 4,
@@ -374,43 +401,48 @@ export default function App() {
               <DMALineChart
                 title="Total Quote DMA (by quote creation date)" data={chartData}
                 fieldRaw="quotesDollars" field30="q30" field90="q90"
-                formatter={fmtMoney}
+                formatter={fmtMoney} showDaily={showDaily}
               />
               <DMALineChart
                 title="Total Sales Order DMA (by date converted)" data={chartData}
                 fieldRaw="ordersDollars" field30="o30" field90="o90"
-                formatter={fmtMoney}
+                formatter={fmtMoney} showDaily={showDaily}
               />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart
                 title="Quote Count DMA" data={chartData}
                 fieldRaw="quotes" field30="qc30" field90="qc90"
-                formatter={fmtNum}
+                formatter={fmtNum} showDaily={showDaily}
               />
               <DMALineChart
                 title="Sales Order Count DMA" data={chartData}
                 fieldRaw="orders" field30="oc30" field90="oc90"
-                formatter={fmtNum}
+                formatter={fmtNum} showDaily={showDaily}
               />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart
                 title="Total Shipped DMA (by actual ship date)" data={chartData}
                 fieldRaw="shippedDollars" field30="s30" field90="s90"
-                formatter={fmtMoney}
+                formatter={fmtMoney} showDaily={showDaily}
               />
               <DMALineChart
-                title="Close Rate DMA (count)" data={chartData}
-                field30="closeRate" field90="cr90"
-                formatter={fmtPct}
+                title="Shipped Order Count DMA (by actual ship date)" data={chartData}
+                fieldRaw="shipped" field30="sc30" field90="sc90"
+                formatter={fmtNum} showDaily={showDaily}
               />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart
+                title="Close Rate DMA (count)" data={chartData}
+                field30="closeRate" field90="cr90"
+                formatter={fmtPct} showDaily={showDaily}
+              />
+              <DMALineChart
                 title="Capture Rate DMA (sales order$ / quote$)" data={chartData}
                 field30="captureRate" field90="capt90"
-                formatter={fmtPct}
+                formatter={fmtPct} showDaily={showDaily}
               />
             </div>
           </>
