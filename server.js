@@ -143,8 +143,10 @@ Metric glossary:
 - "close_rate" — 30 DMA of orders_count / quotes_count. A volume-based conversion metric.
 - "capture_rate" — 30 DMA of orders_dollars / adjusted quotes_dollars (excluding quotes marked "RF Alternate Solution" as lost reason). A dollar-weighted conversion metric.
 - "aov_orders" / "aov_shipped" — average order value = dollars / count, on the 30 DMA.
-- "lead_lag.quotes_to_orders" — { "best_lag_days": N, "r": x }. N is the lag (in days) at which quote activity most strongly predicts order activity. r is the Pearson correlation at that lag on the currently-visible range.
-- "lead_lag.orders_to_shipped" — same, but for orders → ship.
+- "lead_lag" — Pearson r at the best lag (0–45 days) on the smoothed (30 DMA) series. Four variants:
+  - "quotes_to_orders_count" — quote count → order count. Forecasts transaction volume.
+  - "quotes_to_orders_dollars" — quote $ → order $. Forecasts revenue. **Use this as the primary forecasting signal in paragraph 3 — revenue is what the user cares about. Mention the count variant only if it disagrees materially.**
+  - "orders_to_shipped_count" / "orders_to_shipped_dollars" — same, for orders → ship.
 - "ga4" — website traffic from Google Analytics 4. If present, use it as an upstream leading indicator of quotes (traffic → quotes → orders → ship). If null, acknowledge the source is coming but don't speculate about what it would say.
 
 How to read "r" as conversion-likelihood confidence:
@@ -177,7 +179,7 @@ Paragraph 1 — What's happening. The headline on sales and pipeline right now. 
 
 Paragraph 2 — Quality of demand. Close rate and capture rate — which way they're moving and what that implies. Then AOV: rising aov_orders with flat count means deals are getting bigger; falling means smaller. Be specific: cite the current close, capture, and AOV numbers.
 
-Paragraph 3 — Open-quote conversion likelihood. This is the headline number the user cares about. Using the quotes_to_orders lead-lag r and best_lag_days: (a) state the expected order $ and count from the currently-open quote pipeline over the next N days (compute with the formulas above); (b) calibrate confidence from r using the scale above, in plain words — "high confidence", "a reasonable guide", "too noisy to forecast reliably"; (c) end with one concrete watchlist item — a metric that's diverging, a lag that's unusually short/long, or a filter combination worth drilling into. If r is weak (< 0.4), skip the projected numbers and instead explain what's making the signal unreliable and what the user could do to sharpen it (longer range, fewer filters, more data).
+Paragraph 3 — Open-quote conversion likelihood. This is the headline number the user cares about. Use lead_lag.quotes_to_orders_dollars (the $ correlation) as the primary signal: (a) state the expected order $ from the currently-open quote pipeline over the next N days using its best_lag_days (compute with the formulas above); (b) calibrate confidence from r using the scale above, in plain words — "high confidence", "a reasonable guide", "too noisy to forecast reliably"; (c) if quotes_to_orders_count tells a meaningfully different story (e.g. count r is strong but $ r is weak, suggesting deal-size volatility, or vice versa), call that out in one sentence; (d) end with one concrete watchlist item — a metric that's diverging, a lag that's unusually short/long, or a filter combination worth drilling into. If the primary $ r is weak (< 0.4), skip the projected numbers and instead explain what's making the signal unreliable and what the user could do to sharpen it (longer range, fewer filters, more data).
 
 Style rules:
 - 2–3 sentences per paragraph, max.
@@ -227,6 +229,25 @@ app.post('/api/interpret', async (req, res) => {
     console.error('AI interpret error:', e);
     const status = e.status || 500;
     res.status(status).json({ error: e.message || 'AI call failed' });
+  }
+});
+
+// Per-part-group daily series — feeds the "By Part Group r-Analysis" tab.
+// Returns one daily array per part_group; the frontend computes lead-lag r
+// for each independently.
+app.get('/api/by-part-group', async (req, res) => {
+  if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
+  try {
+    const { getDailyByPartGroup, getDimRowCount } = await import('./db.js');
+    const dimCount = await getDimRowCount();
+    if (dimCount === 0) {
+      return res.status(404).json({ error: 'No dim data yet. Run a dim fetch first.' });
+    }
+    const groups = await getDailyByPartGroup();
+    res.json({ generated: new Date().toISOString(), groups });
+  } catch (e) {
+    console.error('by-part-group error:', e);
+    res.status(500).json({ error: e.message });
   }
 });
 

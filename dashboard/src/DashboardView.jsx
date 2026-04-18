@@ -376,12 +376,23 @@ export default function DashboardView({
 
   const leadLagResults = useMemo(() => {
     if (chartData.length < 30) return {};
-    const quotes = chartData.map(d => d.quotes_count || 0);
-    const orders = chartData.map(d => d.orders_count || 0);
-    const shipped = chartData.map(d => d.shipped_count || 0);
+    // Correlate the 30-DMA-smoothed series rather than raw daily — far less
+    // noise, more stable best-lag across views, and matches what the user
+    // sees on the line charts. Pearson skips null pairs so leading-window
+    // nulls (before the MA fills) don't pollute the result.
+    const qc30 = chartData.map(d => d.qc30);
+    const oc30 = chartData.map(d => d.oc30);
+    const sc30 = chartData.map(d => d.sc30);
+    const q30  = chartData.map(d => d.q30);
+    const o30  = chartData.map(d => d.o30);
+    const s30  = chartData.map(d => d.s30);
     return {
-      quotesToOrders: leadLag(quotes, orders),
-      ordersToShipped: leadLag(orders, shipped),
+      // Count-based — "how many transactions" predicts "how many transactions"
+      quotesToOrdersCount:  leadLag(qc30, oc30),
+      ordersToShippedCount: leadLag(oc30, sc30),
+      // Dollar-based — "how much $" predicts "how much $" (revenue forecasting)
+      quotesToOrdersDollars:  leadLag(q30, o30),
+      ordersToShippedDollars: leadLag(o30, s30),
     };
   }, [chartData]);
 
@@ -414,12 +425,18 @@ export default function DashboardView({
         orders_count: sum('orders_count'),
         shipped_count: sum('shipped_count'),
       },
-      lead_lag: (leadLagResults.quotesToOrders || leadLagResults.ordersToShipped) ? {
-        quotes_to_orders: leadLagResults.quotesToOrders
-          ? { best_lag_days: leadLagResults.quotesToOrders.bestLag, r: +leadLagResults.quotesToOrders.bestR.toFixed(3) }
+      lead_lag: (leadLagResults.quotesToOrdersCount || leadLagResults.ordersToShippedCount) ? {
+        quotes_to_orders_count: leadLagResults.quotesToOrdersCount
+          ? { best_lag_days: leadLagResults.quotesToOrdersCount.bestLag, r: +leadLagResults.quotesToOrdersCount.bestR.toFixed(3) }
           : null,
-        orders_to_shipped: leadLagResults.ordersToShipped
-          ? { best_lag_days: leadLagResults.ordersToShipped.bestLag, r: +leadLagResults.ordersToShipped.bestR.toFixed(3) }
+        quotes_to_orders_dollars: leadLagResults.quotesToOrdersDollars
+          ? { best_lag_days: leadLagResults.quotesToOrdersDollars.bestLag, r: +leadLagResults.quotesToOrdersDollars.bestR.toFixed(3) }
+          : null,
+        orders_to_shipped_count: leadLagResults.ordersToShippedCount
+          ? { best_lag_days: leadLagResults.ordersToShippedCount.bestLag, r: +leadLagResults.ordersToShippedCount.bestR.toFixed(3) }
+          : null,
+        orders_to_shipped_dollars: leadLagResults.ordersToShippedDollars
+          ? { best_lag_days: leadLagResults.ordersToShippedDollars.bestLag, r: +leadLagResults.ordersToShippedDollars.bestR.toFixed(3) }
           : null,
       } : null,
       // GA4 web traffic: placeholder until the GA4 fetcher is wired in. The
@@ -570,25 +587,36 @@ export default function DashboardView({
           </div>
         )}
 
-        {(leadLagResults.quotesToOrders || leadLagResults.ordersToShipped) && (
+        {(leadLagResults.quotesToOrdersCount || leadLagResults.ordersToShippedCount) && (
           <div style={{ marginBottom: 20 }}>
             <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, fontWeight: 600 }}>
               Lead-Lag Correlation
             </h2>
             <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
               How many days of delay give the tightest predictive link between the two series.
-              Higher |r| means today's activity more reliably predicts the other series that many days out.
+              Computed on the 30 DMA — same lines you see on the dollar/count charts above.
+              Count r forecasts transaction volume; $ r forecasts revenue.
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
               <LeadLagCard
-                title="Quotes → Sales Orders"
-                subtitle="Best lag where quote activity predicts future orders (0–45 days)"
-                result={leadLagResults.quotesToOrders}
+                title="Quotes → Sales Orders (count)"
+                subtitle="How many days quote count typically leads order count"
+                result={leadLagResults.quotesToOrdersCount}
               />
               <LeadLagCard
-                title="Orders → Shipped"
-                subtitle="Best lag where order activity predicts future shipments (0–45 days)"
-                result={leadLagResults.ordersToShipped}
+                title="Quotes → Sales Orders ($)"
+                subtitle="How many days quote $ typically leads order $"
+                result={leadLagResults.quotesToOrdersDollars}
+              />
+              <LeadLagCard
+                title="Orders → Shipped (count)"
+                subtitle="How many days order count typically leads shipped count"
+                result={leadLagResults.ordersToShippedCount}
+              />
+              <LeadLagCard
+                title="Orders → Shipped ($)"
+                subtitle="How many days order $ typically leads shipped $"
+                result={leadLagResults.ordersToShippedDollars}
               />
             </div>
           </div>

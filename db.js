@@ -202,6 +202,43 @@ export async function getFilterOptions() {
 }
 
 /**
+ * Return per-part-group daily rows from the dim table. Used by the
+ * by-part-group analysis tab to compute lead-lag r for each part group
+ * independently. Rolls up across sales reps within each part group.
+ */
+export async function getDailyByPartGroup() {
+  const p = getPool();
+  const sql = `
+    SELECT
+      part_group,
+      date::text as date,
+      SUM(CASE WHEN trantype = 'quote'   THEN txn_count  ELSE 0 END)::int   as quotes_count,
+      SUM(CASE WHEN trantype = 'quote'   THEN line_total ELSE 0 END)::float as quotes_total,
+      SUM(CASE WHEN trantype = 'order'   THEN txn_count  ELSE 0 END)::int   as orders_count,
+      SUM(CASE WHEN trantype = 'order'   THEN line_total ELSE 0 END)::float as orders_total,
+      SUM(CASE WHEN trantype = 'shipped' THEN txn_count  ELSE 0 END)::int   as shipped_count,
+      SUM(CASE WHEN trantype = 'shipped' THEN line_total ELSE 0 END)::float as shipped_total
+    FROM netsuite_daily_dim
+    WHERE part_group <> ''
+    GROUP BY part_group, date
+    ORDER BY part_group, date ASC
+  `;
+  const { rows } = await p.query(sql);
+  // Bucket by part_group → daily array
+  const byPg = new Map();
+  for (const r of rows) {
+    if (!byPg.has(r.part_group)) byPg.set(r.part_group, []);
+    byPg.get(r.part_group).push({
+      date: r.date,
+      quotes_count: r.quotes_count, quotes_total: r.quotes_total,
+      orders_count: r.orders_count, orders_total: r.orders_total,
+      shipped_count: r.shipped_count, shipped_total: r.shipped_total,
+    });
+  }
+  return Array.from(byPg.entries()).map(([part_group, daily]) => ({ part_group, daily }));
+}
+
+/**
  * Return daily rows (same shape as getAllDaily) aggregated from the dim table
  * with optional filters on part_group and salesrep_id (arrays).
  */
