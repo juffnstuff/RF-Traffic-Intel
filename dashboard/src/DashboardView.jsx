@@ -77,7 +77,22 @@ const LINE_COLORS = {
 
 function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmtNum, currentValue, showDaily = true }) {
   const latest30 = data.length > 0 ? data[data.length - 1]?.[field30] : null;
-  const tickInterval = Math.max(1, Math.floor(data.length / 8));
+
+  // One tick per month-start date in the visible data. If the view spans many
+  // months, thin so labels don't collide (~18 ticks max for a typical tile).
+  const monthTicks = useMemo(() => {
+    const starts = [];
+    let prevMonth = null;
+    for (const row of data) {
+      const m = row.date?.slice(0, 7); // "YYYY-MM"
+      if (m && m !== prevMonth) {
+        starts.push(row.date);
+        prevMonth = m;
+      }
+    }
+    const step = Math.max(1, Math.ceil(starts.length / 18));
+    return starts.filter((_, i) => i % step === 0);
+  }, [data]);
 
   return (
     <div style={{
@@ -97,7 +112,8 @@ function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmt
         <LineChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#64748b" strokeOpacity={0.4} />
           <XAxis
-            dataKey="date" tickFormatter={fmtAxisDate} interval={tickInterval}
+            dataKey="date" tickFormatter={fmtAxisDate}
+            ticks={monthTicks} interval={0}
             tick={{ fill: '#cbd5e1', fontSize: 10 }}
             axisLine={{ stroke: '#94a3b8' }} tickLine={false}
           />
