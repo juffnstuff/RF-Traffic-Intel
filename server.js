@@ -372,30 +372,31 @@ app.listen(PORT, async () => {
       const count = await getRowCount();
       console.log(`    DB rows: ${count}`);
 
-      // If DB is empty and NS creds are set, do a full backfill
-      if (count === 0 && hasNS) {
-        console.log('📦  Database empty — starting full historical backfill...');
-        const { fetchNetSuite } = await import('./fetchers/fetch-netsuite.js');
-        fetchNetSuite({ since: null })
-          .then(r => console.log(`✅  Backfill complete: ${r.daily.length} days`))
-          .catch(e => console.error('⚠️  Backfill failed:', e.message));
-      }
+      // Run backfills sequentially, not in parallel — NetSuite caps concurrent
+      // SuiteQL calls (typically 5). The outer IIFE is fire-and-forget so the
+      // server starts serving immediately, but inside we await each fetcher.
+      (async () => {
+        try {
+          if (count === 0 && hasNS) {
+            console.log('📦  Database empty — starting full historical backfill...');
+            const { fetchNetSuite } = await import('./fetchers/fetch-netsuite.js');
+            const r = await fetchNetSuite({ since: null });
+            console.log(`✅  Backfill complete: ${r.daily.length} days`);
+          }
 
-      // Also backfill the dim table if empty
-      try {
-        const { getDimRowCount } = await import('./db.js');
-        const dimCount = await getDimRowCount();
-        console.log(`    DB dim rows: ${dimCount}`);
-        if (dimCount === 0 && hasNS) {
-          console.log('📦  Dim table empty — starting line-level backfill...');
-          const { fetchNetSuiteDim } = await import('./fetchers/fetch-netsuite-dim.js');
-          fetchNetSuiteDim({ since: null })
-            .then(r => console.log(`✅  Dim backfill complete: ${r.rows} rows`))
-            .catch(e => console.error('⚠️  Dim backfill failed:', e.message));
+          const { getDimRowCount } = await import('./db.js');
+          const dimCount = await getDimRowCount();
+          console.log(`    DB dim rows: ${dimCount}`);
+          if (dimCount === 0 && hasNS) {
+            console.log('📦  Dim table empty — starting line-level backfill...');
+            const { fetchNetSuiteDim } = await import('./fetchers/fetch-netsuite-dim.js');
+            const r = await fetchNetSuiteDim({ since: null });
+            console.log(`✅  Dim backfill complete: ${r.rows} rows`);
+          }
+        } catch (e) {
+          console.error('⚠️  Startup backfill failed:', e.message);
         }
-      } catch (e) {
-        console.error('⚠️  Dim count check failed:', e.message);
-      }
+      })();
     } catch (e) {
       console.error('⚠️  DB init failed:', e.message);
     }

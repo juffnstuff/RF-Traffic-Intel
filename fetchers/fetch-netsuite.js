@@ -94,25 +94,37 @@ async function runSuiteQL(sql) {
   let offset = 0;
   const limit = 1000;
   let hasMore = true;
+  const MAX_ATTEMPTS = 6;
 
   while (hasMore) {
     const queryParams = { limit: String(limit), offset: String(offset) };
     const fullUrl = `${baseUrl}?limit=${limit}&offset=${offset}`;
 
-    const authHeader = buildOAuthHeader({
-      method: 'POST', baseUrl, queryParams,
-      accountId, consumerKey, consumerSecret, tokenId, tokenSecret,
-    });
+    let res;
+    for (let attempt = 0; ; attempt++) {
+      // Regenerate OAuth header on each attempt — nonce + timestamp must be unique per request.
+      const authHeader = buildOAuthHeader({
+        method: 'POST', baseUrl, queryParams,
+        accountId, consumerKey, consumerSecret, tokenId, tokenSecret,
+      });
+      res = await fetch(fullUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: authHeader,
+          'Content-Type': 'application/json',
+          Prefer: 'transient',
+        },
+        body: JSON.stringify({ q: sql }),
+      });
+      if (res.status !== 429 || attempt >= MAX_ATTEMPTS - 1) break;
 
-    const res = await fetch(fullUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: authHeader,
-        'Content-Type': 'application/json',
-        Prefer: 'transient',
-      },
-      body: JSON.stringify({ q: sql }),
-    });
+      // Respect Retry-After if present, otherwise exponential backoff with jitter.
+      const retryAfter = res.headers.get('Retry-After');
+      const headerMs = retryAfter && !Number.isNaN(Number(retryAfter)) ? Number(retryAfter) * 1000 : null;
+      const waitMs = headerMs ?? Math.min(60000, 2000 * (2 ** attempt) + Math.floor(Math.random() * 1000));
+      console.log(`    ⏳ 429 — concurrency limit; backing off ${Math.round(waitMs / 1000)}s (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
+      await new Promise(r => setTimeout(r, waitMs));
+    }
 
     if (!res.ok) {
       const text = await res.text();
