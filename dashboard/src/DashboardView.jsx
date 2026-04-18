@@ -570,41 +570,6 @@ export default function DashboardView({
           </div>
         )}
 
-        {chartData.length > 0 && (
-          <>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-              <DMALineChart title="Total Quote DMA (by quote creation date)" data={chartData}
-                fieldRaw="quotesDollars" field30="q30" field90="q90" formatter={fmtMoney} showDaily={showDaily} />
-              <DMALineChart title="Total Sales Order DMA (by date converted)" data={chartData}
-                fieldRaw="ordersDollars" field30="o30" field90="o90" formatter={fmtMoney} showDaily={showDaily} />
-            </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-              <DMALineChart title="Quote Count DMA" data={chartData}
-                fieldRaw="quotes" field30="qc30" field90="qc90" formatter={fmtNum} showDaily={showDaily} />
-              <DMALineChart title="Sales Order Count DMA" data={chartData}
-                fieldRaw="orders" field30="oc30" field90="oc90" formatter={fmtNum} showDaily={showDaily} />
-            </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-              <DMALineChart title="Total Shipped DMA (by actual ship date)" data={chartData}
-                fieldRaw="shippedDollars" field30="s30" field90="s90" formatter={fmtMoney} showDaily={showDaily} />
-              <DMALineChart title="Shipped Order Count DMA (by actual ship date)" data={chartData}
-                fieldRaw="shipped" field30="sc30" field90="sc90" formatter={fmtNum} showDaily={showDaily} />
-            </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-              <DMALineChart title="Avg Order Value DMA (orders$ / orders count)" data={chartData}
-                fieldRaw="aovOrderDaily" field30="aovO30" field90="aovO90" formatter={fmtMoney} showDaily={showDaily} />
-              <DMALineChart title="Avg Shipped Value DMA (shipped$ / shipped count)" data={chartData}
-                fieldRaw="aovShipDaily" field30="aovS30" field90="aovS90" formatter={fmtMoney} showDaily={showDaily} />
-            </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-              <DMALineChart title="Close Rate DMA (count)" data={chartData}
-                field30="closeRate" field90="cr90" formatter={fmtPct} showDaily={showDaily} />
-              <DMALineChart title="Capture Rate DMA (sales order$ / quote$)" data={chartData}
-                field30="captureRate" field90="capt90" formatter={fmtPct} showDaily={showDaily} />
-            </div>
-          </>
-        )}
-
         {(leadLagResults.quotesToOrders || leadLagResults.ordersToShipped) && (
           <div style={{ marginBottom: 20 }}>
             <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, fontWeight: 600 }}>
@@ -627,6 +592,48 @@ export default function DashboardView({
               />
             </div>
           </div>
+        )}
+
+        {chartData.length > 0 && (
+          <>
+            <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
+              Dollar Value &amp; AOV
+            </h2>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <DMALineChart title="Total Quote DMA (by quote creation date)" data={chartData}
+                fieldRaw="quotesDollars" field30="q30" field90="q90" formatter={fmtMoney} showDaily={showDaily} />
+              <DMALineChart title="Total Sales Order DMA (by date converted)" data={chartData}
+                fieldRaw="ordersDollars" field30="o30" field90="o90" formatter={fmtMoney} showDaily={showDaily} />
+            </div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <DMALineChart title="Total Shipped DMA (by actual ship date)" data={chartData}
+                fieldRaw="shippedDollars" field30="s30" field90="s90" formatter={fmtMoney} showDaily={showDaily} />
+              <DMALineChart title="Capture Rate DMA (sales order$ / quote$)" data={chartData}
+                field30="captureRate" field90="capt90" formatter={fmtPct} showDaily={showDaily} />
+            </div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+              <DMALineChart title="Avg Order Value DMA (orders$ / orders count)" data={chartData}
+                fieldRaw="aovOrderDaily" field30="aovO30" field90="aovO90" formatter={fmtMoney} showDaily={showDaily} />
+              <DMALineChart title="Avg Shipped Value DMA (shipped$ / shipped count)" data={chartData}
+                fieldRaw="aovShipDaily" field30="aovS30" field90="aovS90" formatter={fmtMoney} showDaily={showDaily} />
+            </div>
+
+            <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
+              Transaction Counts
+            </h2>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <DMALineChart title="Quote Count DMA" data={chartData}
+                fieldRaw="quotes" field30="qc30" field90="qc90" formatter={fmtNum} showDaily={showDaily} />
+              <DMALineChart title="Sales Order Count DMA" data={chartData}
+                fieldRaw="orders" field30="oc30" field90="oc90" formatter={fmtNum} showDaily={showDaily} />
+            </div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <DMALineChart title="Shipped Order Count DMA (by actual ship date)" data={chartData}
+                fieldRaw="shipped" field30="sc30" field90="sc90" formatter={fmtNum} showDaily={showDaily} />
+              <DMALineChart title="Close Rate DMA (count)" data={chartData}
+                field30="closeRate" field90="cr90" formatter={fmtPct} showDaily={showDaily} />
+            </div>
+          </>
         )}
       </main>
     </>
