@@ -45,6 +45,7 @@ function OverviewPage() {
       onRefresh={handleRefresh}
       refreshing={refreshing}
       sourceLabel={data?.sources?.join(', ') || ''}
+      aiContext={{ page: 'overview' }}
     />
   );
 }

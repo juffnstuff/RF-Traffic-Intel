@@ -144,6 +144,16 @@ export default function FilteredPage() {
       onRefresh={handleRefresh}
       refreshing={refreshing}
       sourceLabel="netsuite-dim"
+      aiContext={{
+        page: 'filtered',
+        filters: {
+          part_groups: selectedPartGroups,
+          sales_reps: selectedSalesReps.map(id => {
+            const rep = filterOptions.salesReps.find(r => String(r.id) === String(id));
+            return rep ? { id, name: rep.name } : { id };
+          }),
+        },
+      }}
     />
   );
 }

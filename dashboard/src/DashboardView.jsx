@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis,
   Tooltip, Legend, CartesianGrid,
@@ -177,11 +177,15 @@ export default function DashboardView({
   onRefresh,
   refreshing = false,
   sourceLabel = '',
+  aiContext = { page: 'overview' },   // { page, filters? } — metadata for the interpret call
 }) {
   const [range, setRange] = useState('6m');
   const [selectedYears, setSelectedYears] = useState([]);
   const [weekdayOnly, setWeekdayOnly] = useState(true);
   const [showDaily, setShowDaily] = useState(false);
+  const [aiText, setAiText] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState(null);
 
   const availableYears = useMemo(() => {
     if (!daily?.length) return [];
@@ -221,6 +225,11 @@ export default function DashboardView({
     const cr90 = qc90.map((q, i) => (q == null || oc90[i] == null || q === 0 ? null : oc90[i] / q));
     const captureRate = qAdj30.map((q, i) => (q == null || od30[i] == null || q === 0 ? null : od30[i] / q));
     const capt90 = qAdj90.map((q, i) => (q == null || od90[i] == null || q === 0 ? null : od90[i] / q));
+    // Average order value — divide the 30/90 DMAs of $ and count for a smooth ratio
+    const aovO30 = od30.map((d, i) => (d == null || oc30[i] == null || oc30[i] === 0 ? null : d / oc30[i]));
+    const aovO90 = od90.map((d, i) => (d == null || oc90[i] == null || oc90[i] === 0 ? null : d / oc90[i]));
+    const aovS30 = sd30.map((d, i) => (d == null || sc30[i] == null || sc30[i] === 0 ? null : d / sc30[i]));
+    const aovS90 = sd90.map((d, i) => (d == null || sc90[i] == null || sc90[i] === 0 ? null : d / sc90[i]));
 
     return rows.map((d, i) => ({
       date: d.date,
@@ -236,6 +245,10 @@ export default function DashboardView({
       quotesDollars: quotesDollars[i], ordersDollars: ordersDollars[i], shippedDollars: shippedDollars[i],
       closeRate: closeRate[i], cr90: cr90[i],
       captureRate: captureRate[i], capt90: capt90[i],
+      aovOrderDaily: orders[i] > 0 ? ordersDollars[i] / orders[i] : null,
+      aovShipDaily:  shipped[i] > 0 ? shippedDollars[i] / shipped[i] : null,
+      aovO30: aovO30[i], aovO90: aovO90[i],
+      aovS30: aovS30[i], aovS90: aovS90[i],
     }));
   }, [daily, weekdayOnly]);
 
@@ -264,6 +277,7 @@ export default function DashboardView({
       qc30: last.qc30, oc30: last.oc30, sc30: last.sc30,
       closeRate: last.closeRate,
       captureRate: last.captureRate,
+      aovO30: last.aovO30, aovS30: last.aovS30,
       totalQuotesDollars: sumField('quotes_total'),
       totalOrdersDollars: sumField('orders_total'),
       totalShippedDollars: sumField('shipped_total'),
@@ -282,6 +296,68 @@ export default function DashboardView({
       ordersToShipped: leadLag(orders, shipped),
     };
   }, [chartData]);
+
+  // Build the compact JSON snapshot Claude reads. Uses current_30 (latest 30 DMA)
+  // vs prior_30 (30 DMA from 30 rows earlier) so the model can state direction.
+  const buildAISnapshot = useCallback(() => {
+    if (chartData.length === 0) return null;
+    const last = chartData[chartData.length - 1];
+    const prior = chartData[Math.max(0, chartData.length - 31)];
+    const sum = (f) => chartData.reduce((s, d) => s + (d[f] || 0), 0);
+    const pick = (row) => ({
+      quote_dollars: row.q30, orders_dollars: row.o30, shipped_dollars: row.s30,
+      quote_count: row.qc30, orders_count: row.oc30, shipped_count: row.sc30,
+      close_rate: row.closeRate, capture_rate: row.captureRate,
+      aov_orders: row.aovO30, aov_shipped: row.aovS30,
+    });
+    return {
+      page: aiContext.page,
+      filters: aiContext.filters || null,
+      range: selectedYears.length > 0 ? selectedYears.join(',') : range,
+      days_visible: chartData.length,
+      weekday_only: weekdayOnly,
+      current_30: pick(last),
+      prior_30: pick(prior),
+      period_totals: {
+        quote_dollars: sum('quotes_total'),
+        orders_dollars: sum('orders_total'),
+        shipped_dollars: sum('shipped_total'),
+        quote_count: sum('quotes_count'),
+        orders_count: sum('orders_count'),
+        shipped_count: sum('shipped_count'),
+      },
+      lead_lag: (leadLagResults.quotesToOrders || leadLagResults.ordersToShipped) ? {
+        quotes_to_orders: leadLagResults.quotesToOrders
+          ? { best_lag_days: leadLagResults.quotesToOrders.bestLag, r: +leadLagResults.quotesToOrders.bestR.toFixed(3) }
+          : null,
+        orders_to_shipped: leadLagResults.ordersToShipped
+          ? { best_lag_days: leadLagResults.ordersToShipped.bestLag, r: +leadLagResults.ordersToShipped.bestR.toFixed(3) }
+          : null,
+      } : null,
+    };
+  }, [chartData, aiContext, range, selectedYears, weekdayOnly, leadLagResults]);
+
+  const handleAIAnalysis = async () => {
+    const snapshot = buildAISnapshot();
+    if (!snapshot) return;
+    setAiLoading(true);
+    setAiError(null);
+    setAiText(null);
+    try {
+      const res = await fetch('/api/interpret', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(snapshot),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || `API ${res.status}`);
+      setAiText(json.text);
+    } catch (e) {
+      setAiError(e.message);
+    } finally {
+      setAiLoading(false);
+    }
+  };
 
   return (
     <>
@@ -326,11 +402,17 @@ export default function DashboardView({
             <input type="checkbox" checked={showDaily} onChange={e => setShowDaily(e.target.checked)} />
             Show Daily
           </label>
+          <button onClick={handleAIAnalysis} disabled={aiLoading || chartData.length === 0} style={{
+            background: aiLoading ? '#334155' : '#7c3aed', color: '#f8fafc', border: 'none', borderRadius: 4,
+            padding: '5px 12px', cursor: aiLoading ? 'wait' : 'pointer', fontSize: 11, marginLeft: 6, fontWeight: 600,
+          }}>
+            {aiLoading ? 'Analyzing...' : '✨ AI Analysis'}
+          </button>
           {onRefresh && (
             <>
               <button onClick={() => onRefresh('incremental')} disabled={refreshing} style={{
                 background: '#164e63', color: '#67e8f9', border: 'none', borderRadius: 4,
-                padding: '5px 12px', cursor: 'pointer', fontSize: 11, marginLeft: 6, fontWeight: 600,
+                padding: '5px 12px', cursor: 'pointer', fontSize: 11, fontWeight: 600,
               }}>
                 {refreshing ? 'Refreshing...' : '↻ Refresh'}
               </button>
@@ -355,6 +437,45 @@ export default function DashboardView({
             <StatCard label="Total Shipped DMA" value={fmtMoney(summary.s30)} sub="30 DMA avg daily" small={`Period total: ${fmtMoney(summary.totalShippedDollars)}`} />
             <StatCard label="Close Rate DMA" value={fmtPct(summary.closeRate)} sub="30 DMA orders/quotes (count)" />
             <StatCard label="Capture Rate DMA" value={fmtPct(summary.captureRate)} sub="30 DMA orders$/quotes$" />
+            <StatCard label="Avg Order Value" value={fmtMoney(summary.aovO30)} sub="30 DMA orders$/count" />
+            <StatCard label="Avg Shipped Value" value={fmtMoney(summary.aovS30)} sub="30 DMA shipped$/count" />
+          </div>
+        )}
+
+        {(aiText || aiError || aiLoading) && (
+          <div style={{
+            background: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 100%)',
+            border: '1px solid #4c1d95', borderRadius: 8, padding: '16px 20px',
+            marginBottom: 20, position: 'relative',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: aiText || aiError ? 10 : 0 }}>
+              <div style={{ color: '#c4b5fd', fontSize: 11, fontWeight: 700, letterSpacing: 0.5 }}>
+                ✨ AI ANALYSIS {aiLoading && '(thinking…)'}
+              </div>
+              {(aiText || aiError) && (
+                <button onClick={() => { setAiText(null); setAiError(null); }} style={{
+                  background: 'transparent', color: '#a78bfa', border: '1px solid #4c1d95',
+                  borderRadius: 4, padding: '2px 8px', fontSize: 10, cursor: 'pointer',
+                }}>dismiss</button>
+              )}
+            </div>
+            {aiLoading && !aiText && (
+              <div style={{ color: '#c4b5fd', fontSize: 13, fontStyle: 'italic' }}>
+                Reading the current view and drafting an interpretation…
+              </div>
+            )}
+            {aiError && (
+              <div style={{ color: '#fca5a5', fontSize: 12 }}>
+                {aiError.includes('ANTHROPIC_API_KEY')
+                  ? 'AI is not configured. Add ANTHROPIC_API_KEY to the server environment (Railway → Variables) to enable this feature.'
+                  : `Error: ${aiError}`}
+              </div>
+            )}
+            {aiText && (
+              <div style={{ color: '#ede9fe', fontSize: 13.5, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+                {aiText}
+              </div>
+            )}
           </div>
         )}
 
@@ -377,6 +498,12 @@ export default function DashboardView({
                 fieldRaw="shippedDollars" field30="s30" field90="s90" formatter={fmtMoney} showDaily={showDaily} />
               <DMALineChart title="Shipped Order Count DMA (by actual ship date)" data={chartData}
                 fieldRaw="shipped" field30="sc30" field90="sc90" formatter={fmtNum} showDaily={showDaily} />
+            </div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <DMALineChart title="Avg Order Value DMA (orders$ / orders count)" data={chartData}
+                fieldRaw="aovOrderDaily" field30="aovO30" field90="aovO90" formatter={fmtMoney} showDaily={showDaily} />
+              <DMALineChart title="Avg Shipped Value DMA (shipped$ / shipped count)" data={chartData}
+                fieldRaw="aovShipDaily" field30="aovS30" field90="aovS90" formatter={fmtMoney} showDaily={showDaily} />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart title="Close Rate DMA (count)" data={chartData}
