@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback } from 'react';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis,
   Tooltip, Legend, CartesianGrid,
+  BarChart, Bar, Cell, ReferenceLine,
 } from 'recharts';
 import { movingAverage, leadLag, weekdaysOnly } from './utils/analytics';
 
@@ -147,30 +148,101 @@ function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmt
   );
 }
 
-function MiniBar({ correlations, bestLag }) {
-  const maxAbs = Math.max(...correlations.map(Math.abs), 0.01);
+function LeadLagTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0].payload;
   return (
-    <div style={{ display: 'flex', gap: 1, height: 40, alignItems: 'flex-end' }}>
-      {correlations.map((r, i) => {
-        const h = (Math.abs(r) / maxAbs) * 100;
-        const clr = i === bestLag ? '#f59e0b' : Math.abs(r) > 0.4 ? '#22c55e' : '#334155';
-        return <div key={i} style={{ width: 4, height: `${h}%`, background: clr, borderRadius: 1 }} />;
-      })}
+    <div style={{
+      background: '#0f172a', border: '1px solid #64748b', borderRadius: 6,
+      padding: '6px 10px', fontSize: 11, color: '#f8fafc', lineHeight: 1.5,
+    }}>
+      <div><strong>{p.lag}-day lag</strong></div>
+      <div>r = {p.r.toFixed(2)}</div>
     </div>
   );
 }
 
-function LeadLagCard({ title, result }) {
+function LegendChip({ color, label }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10, color: '#94a3b8' }}>
+      <span style={{ width: 8, height: 8, background: color, borderRadius: 2, display: 'inline-block' }} />
+      {label}
+    </span>
+  );
+}
+
+function LeadLagCard({ title, subtitle, result }) {
   if (!result) return null;
   const { bestLag, bestR, correlations } = result;
-  const dir = bestLag > 0 ? `leads by ${bestLag}d` : 'no lead';
+  const absR = Math.abs(bestR);
+
+  // Confidence scale matches the AI analysis prompt — keep these in sync.
+  const strength = absR >= 0.7 ? 'Strong' : absR >= 0.4 ? 'Moderate' : 'Weak';
+  const strengthColor = absR >= 0.7 ? '#22c55e' : absR >= 0.4 ? '#fbbf24' : '#94a3b8';
+  const inverse = bestR < 0;
+  const confidenceBlurb = absR >= 0.7
+    ? 'Reliable forecast signal.'
+    : absR >= 0.4
+    ? 'Reasonable guide — treat projections as a range.'
+    : 'Too noisy to forecast — try a longer range or fewer filters.';
+
+  const data = correlations.map((r, lag) => ({ lag, r: +r.toFixed(3) }));
+
   return (
-    <div style={{ background: '#1e293b', borderRadius: 8, padding: 16, flex: '1 1 280px' }}>
-      <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 8 }}>{title}</div>
-      <div style={{ color: '#f8fafc', fontSize: 14, marginBottom: 4 }}>
-        {dir} <span style={{ color: bestR > 0.5 ? '#22c55e' : '#f59e0b' }}>(r={bestR.toFixed(2)})</span>
+    <div style={{ background: '#1e293b', borderRadius: 8, padding: 16, flex: '1 1 320px', minWidth: 0 }}>
+      <div style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 600 }}>{title}</div>
+      {subtitle && <div style={{ color: '#64748b', fontSize: 10, marginTop: 2 }}>{subtitle}</div>}
+
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
+        <div style={{ color: '#f8fafc', fontSize: 18, fontWeight: 700 }}>
+          {bestLag}-day lag
+        </div>
+        <div style={{ color: '#94a3b8', fontSize: 13 }}>
+          r = {bestR.toFixed(2)}
+        </div>
+        <div style={{ color: strengthColor, fontSize: 11, fontWeight: 600 }}>
+          {strength}{inverse ? ' · inverse' : ''}
+        </div>
       </div>
-      <MiniBar correlations={correlations} bestLag={bestLag} />
+
+      <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 2, marginBottom: 6 }}>
+        {confidenceBlurb}
+      </div>
+
+      <ResponsiveContainer width="100%" height={110}>
+        <BarChart data={data} margin={{ top: 4, right: 6, left: 0, bottom: 2 }}>
+          <XAxis
+            dataKey="lag" ticks={[0, 7, 14, 21, 30, 45]}
+            tickFormatter={v => `${v}d`}
+            tick={{ fill: '#cbd5e1', fontSize: 10 }}
+            axisLine={{ stroke: '#475569' }} tickLine={false}
+            interval={0}
+          />
+          <YAxis domain={[-1, 1]} hide />
+          <ReferenceLine y={0} stroke="#475569" strokeWidth={1} />
+          <ReferenceLine y={0.4} stroke="#64748b" strokeDasharray="3 3" strokeWidth={1} />
+          <ReferenceLine y={-0.4} stroke="#64748b" strokeDasharray="3 3" strokeWidth={1} />
+          <Tooltip content={<LeadLagTooltip />} cursor={{ fill: '#0f172a', opacity: 0.3 }} />
+          <Bar dataKey="r" isAnimationActive={false}>
+            {data.map((d, i) => {
+              const fill = i === bestLag
+                ? '#f59e0b'
+                : Math.abs(d.r) >= 0.4
+                ? (d.r >= 0 ? '#22c55e' : '#ef4444')
+                : '#334155';
+              return <Cell key={i} fill={fill} />;
+            })}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 6 }}>
+        <LegendChip color="#f59e0b" label="best lag" />
+        <LegendChip color="#22c55e" label="|r| ≥ 0.4 (meaningful)" />
+        <LegendChip color="#ef4444" label="inverse" />
+        <LegendChip color="#334155" label="noisy" />
+        <span style={{ fontSize: 10, color: '#64748b' }}>dashed = ±0.4 threshold</span>
+      </div>
     </div>
   );
 }
@@ -535,10 +607,24 @@ export default function DashboardView({
 
         {(leadLagResults.quotesToOrders || leadLagResults.ordersToShipped) && (
           <div style={{ marginBottom: 20 }}>
-            <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>Lead-Lag Correlation</h2>
+            <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, fontWeight: 600 }}>
+              Lead-Lag Correlation
+            </h2>
+            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
+              How many days of delay give the tightest predictive link between the two series.
+              Higher |r| means today's activity more reliably predicts the other series that many days out.
+            </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-              <LeadLagCard title="Quotes → Sales Orders" result={leadLagResults.quotesToOrders} />
-              <LeadLagCard title="Orders → Shipped" result={leadLagResults.ordersToShipped} />
+              <LeadLagCard
+                title="Quotes → Sales Orders"
+                subtitle="Best lag where quote activity predicts future orders (0–45 days)"
+                result={leadLagResults.quotesToOrders}
+              />
+              <LeadLagCard
+                title="Orders → Shipped"
+                subtitle="Best lag where order activity predicts future shipments (0–45 days)"
+                result={leadLagResults.ordersToShipped}
+              />
             </div>
           </div>
         )}
