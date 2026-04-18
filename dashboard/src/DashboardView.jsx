@@ -350,6 +350,9 @@ export default function DashboardView({
           ? { best_lag_days: leadLagResults.ordersToShipped.bestLag, r: +leadLagResults.ordersToShipped.bestR.toFixed(3) }
           : null,
       } : null,
+      // GA4 web traffic: placeholder until the GA4 fetcher is wired in. The
+      // system prompt tells the model to skip speculation when this is null.
+      ga4: null,
     };
   }, [chartData, aiContext, range, selectedYears, weekdayOnly, leadLagResults]);
 
