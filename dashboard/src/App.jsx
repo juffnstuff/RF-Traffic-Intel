@@ -36,8 +36,8 @@ function OverviewPage() {
     }
   };
 
-  if (loading && !data) return <div style={{ padding: 40, color: '#94a3b8' }}>Loading data...</div>;
-  if (error && !data) return <p style={{ padding: 40, color: '#ef4444' }}>Error: {error}</p>;
+  if (loading && !data) return <div style={{ padding: 'clamp(16px, 4vw, 40px)', color: '#94a3b8' }}>Loading data...</div>;
+  if (error && !data) return <p style={{ padding: 'clamp(16px, 4vw, 40px)', color: '#ef4444' }}>Error: {error}</p>;
 
   return (
     <DashboardView
@@ -66,13 +66,13 @@ export default function App() {
 
   return (
     <div style={{ background: '#0f172a', color: '#f8fafc', minHeight: '100vh', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
-      <header style={{ padding: '16px 32px 0', borderBottom: '1px solid #1e293b' }}>
+      <header style={{ padding: '16px clamp(12px, 4vw, 32px) 0', borderBottom: '1px solid #1e293b' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, paddingBottom: 12 }}>
           <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>
             <span style={{ color: '#f59e0b' }}>RF</span> Traffic Intelligence
           </h1>
         </div>
-        <nav style={{ display: 'flex', gap: 2 }}>
+        <nav style={{ display: 'flex', gap: 2, overflowX: 'auto', whiteSpace: 'nowrap' }}>
           <button style={tabStyle(tab === 'overview')} onClick={() => setTab('overview')}>Overview</button>
           <button style={tabStyle(tab === 'filtered')} onClick={() => setTab('filtered')}>By Part Group / Rep</button>
         </nav>

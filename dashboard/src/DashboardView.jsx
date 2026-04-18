@@ -41,11 +41,11 @@ function fmtAxisDate(d) {
 function StatCard({ label, value, sub, small }) {
   return (
     <div style={{
-      background: '#334155', borderRadius: 8, padding: '16px 20px',
-      flex: '1 1 180px', minWidth: 160,
+      background: '#334155', borderRadius: 8, padding: '14px 16px',
+      flex: '1 1 160px', minWidth: 140,
     }}>
       <div style={{ color: '#cbd5e1', fontSize: 11, marginBottom: 2 }}>{label}</div>
-      <div style={{ color: '#f8fafc', fontSize: 28, fontWeight: 700, lineHeight: 1.1 }}>{value}</div>
+      <div style={{ color: '#f8fafc', fontSize: 24, fontWeight: 700, lineHeight: 1.1 }}>{value}</div>
       {sub && <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 4 }}>{sub}</div>}
       {small && <div style={{ color: '#94a3b8', fontSize: 10, marginTop: 2 }}>{small}</div>}
     </div>
@@ -80,7 +80,10 @@ function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmt
   const tickInterval = Math.max(1, Math.floor(data.length / 8));
 
   return (
-    <div style={{ background: '#334155', borderRadius: 8, padding: '16px 20px', flex: '1 1 580px', minWidth: 400 }}>
+    <div style={{
+      background: '#334155', borderRadius: 8, padding: '14px 16px',
+      flex: '1 1 480px', minWidth: 0,
+    }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
         <div>
           <div style={{ color: '#cbd5e1', fontSize: 11 }}>{title}</div>
@@ -283,7 +286,7 @@ export default function DashboardView({
   return (
     <>
       <div style={{
-        padding: '12px 32px', borderBottom: '1px solid #1e293b',
+        padding: '12px clamp(12px, 4vw, 32px)', borderBottom: '1px solid #1e293b',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,
       }}>
         <div style={{ color: '#64748b', fontSize: 11 }}>
@@ -344,7 +347,7 @@ export default function DashboardView({
 
       {headerExtras}
 
-      <main style={{ padding: '20px 32px', maxWidth: 1600, margin: '0 auto' }}>
+      <main style={{ padding: '16px clamp(12px, 4vw, 32px)', maxWidth: 1600, margin: '0 auto' }}>
         {summary && (
           <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
             <StatCard label="Total Quote DMA" value={fmtMoney(summary.q30)} sub="30 DMA avg daily" small={`Period total: ${fmtMoney(summary.totalQuotesDollars)}`} />

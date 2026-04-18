@@ -92,7 +92,7 @@ export default function FilteredPage() {
   const toggle = (setter) => (val) => setter(prev => prev.includes(val) ? prev.filter(v => v !== val) : [...prev, val]);
 
   const filterPanel = useMemo(() => (
-    <div style={{ padding: '14px 32px', borderBottom: '1px solid #1e293b', background: '#0b1220' }}>
+    <div style={{ padding: '14px clamp(12px, 4vw, 32px)', borderBottom: '1px solid #1e293b', background: '#0b1220' }}>
       <MultiSelectChips
         label="Part Group"
         options={filterOptions.partGroups}
@@ -115,11 +115,11 @@ export default function FilteredPage() {
   ), [filterOptions, selectedPartGroups, selectedSalesReps]);
 
   if (loading && !data) {
-    return <div style={{ padding: 40, color: '#94a3b8' }}>Loading filtered data...</div>;
+    return <div style={{ padding: 'clamp(16px, 4vw, 40px)', color: '#94a3b8' }}>Loading filtered data...</div>;
   }
   if (error && !data) {
     return (
-      <div style={{ padding: 40 }}>
+      <div style={{ padding: 'clamp(16px, 4vw, 40px)' }}>
         <p style={{ color: '#ef4444' }}>Error: {error}</p>
         <p style={{ color: '#94a3b8', fontSize: 12 }}>
           Tip: if this is the first time you're opening this page, trigger a dim refresh from the button below once data is available.
