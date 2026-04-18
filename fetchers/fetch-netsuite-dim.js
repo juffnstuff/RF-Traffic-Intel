@@ -132,6 +132,17 @@ function baseLineConditions() {
   `;
 }
 
+// Bucket each transaction by its own total ($). Buckets agreed from the
+// quote-size distribution analysis: 66% under $5K, 26% $5K-$25K, 7% $25K-$100K,
+// 1% over $100K. For salesorders / shipped we bucket by the SO's own total
+// (quote-to-SO linkage isn't modeled here — this is a macro-level slice).
+const SIZE_BUCKET_CASE = `CASE
+    WHEN ABS(COALESCE(t.total, 0)) < 5000   THEN 'Under $5K'
+    WHEN ABS(COALESCE(t.total, 0)) < 25000  THEN '$5K-$25K'
+    WHEN ABS(COALESCE(t.total, 0)) < 100000 THEN '$25K-$100K'
+    ELSE '$100K+'
+  END`;
+
 async function runDimQuery({ recordType, dateCol, extraWhere = '', since, trantype }) {
   const dateFilter = buildFilter(since, dateCol);
   // Line amounts on sales-side transactions are stored negative in NetSuite's
@@ -142,6 +153,7 @@ async function runDimQuery({ recordType, dateCol, extraWhere = '', since, tranty
       COALESCE(BUILTIN.DF(i.custitem1), '') as part_group,
       COALESCE(TO_CHAR(t.employee), '') as salesrep_id,
       BUILTIN.DF(t.employee) as salesrep_name,
+      ${SIZE_BUCKET_CASE} as size_bucket,
       COUNT(DISTINCT t.id) as txn_cnt,
       -SUM(tl.foreignamount) as line_total
     FROM transaction t
@@ -150,7 +162,7 @@ async function runDimQuery({ recordType, dateCol, extraWhere = '', since, tranty
       ${baseLineConditions()}
       ${extraWhere}
       ${dateFilter}
-    GROUP BY ${dateCol}, BUILTIN.DF(i.custitem1), t.employee, BUILTIN.DF(t.employee)
+    GROUP BY ${dateCol}, BUILTIN.DF(i.custitem1), t.employee, BUILTIN.DF(t.employee), ${SIZE_BUCKET_CASE}
   `.trim();
 
   console.log(`  → ${trantype}...`);
@@ -163,6 +175,7 @@ async function runDimQuery({ recordType, dateCol, extraWhere = '', since, tranty
     part_group: r.part_group ?? r.PART_GROUP ?? '',
     salesrep_id: r.salesrep_id ?? r.SALESREP_ID ?? '',
     salesrep_name: r.salesrep_name ?? r.SALESREP_NAME ?? null,
+    size_bucket: r.size_bucket ?? r.SIZE_BUCKET ?? 'Under $5K',
     txn_count: Number(r.txn_cnt ?? r.TXN_CNT) || 0,
     line_total: Number(r.line_total ?? r.LINE_TOTAL) || 0,
   })).filter(r => r.date);

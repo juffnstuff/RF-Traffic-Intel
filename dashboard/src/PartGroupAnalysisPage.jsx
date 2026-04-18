@@ -58,6 +58,8 @@ function HeaderCell({ label, sortKey, currentSort, onSort, align = 'left', tip }
 
 export default function PartGroupAnalysisPage() {
   const [groups, setGroups] = useState(null);
+  const [sizeBuckets, setSizeBuckets] = useState([]);  // [{bucket, quote_count, quote_total}]
+  const [sizeBucket, setSizeBucket] = useState(null);  // null = "All sizes"
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [range, setRange] = useState('6m');
@@ -67,12 +69,17 @@ export default function PartGroupAnalysisPage() {
 
   const loadData = useCallback(() => {
     setLoading(true);
-    fetch('/api/by-part-group')
+    const qs = sizeBucket ? `?sizeBucket=${encodeURIComponent(sizeBucket)}` : '';
+    fetch(`/api/by-part-group${qs}`)
       .then(r => { if (!r.ok) throw new Error(`API ${r.status}`); return r.json(); })
-      .then(json => { setGroups(json.groups); setError(null); })
+      .then(json => {
+        setGroups(json.groups);
+        if (json.sizeBuckets) setSizeBuckets(json.sizeBuckets);
+        setError(null);
+      })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [sizeBucket]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -221,9 +228,53 @@ export default function PartGroupAnalysisPage() {
       </div>
 
       <main style={{ padding: '20px clamp(12px, 4vw, 32px)', maxWidth: 1600, margin: '0 auto' }}>
+        {/* Size-bucket chips: filter r-analysis to one quote-value band */}
+        <div style={{
+          background: '#1e293b', borderRadius: 8, padding: 12,
+          marginBottom: 14, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10,
+        }}>
+          <div style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 600 }}>
+            Quote size:
+          </div>
+          <button
+            onClick={() => setSizeBucket(null)}
+            style={{
+              background: sizeBucket === null ? '#f59e0b' : '#334155',
+              color: sizeBucket === null ? '#0f172a' : '#e2e8f0',
+              border: 'none', borderRadius: 4, padding: '5px 12px',
+              cursor: 'pointer', fontSize: 12, fontWeight: 600,
+            }}
+          >All sizes</button>
+          {sizeBuckets.map(b => {
+            const active = sizeBucket === b.bucket;
+            return (
+              <button
+                key={b.bucket}
+                onClick={() => setSizeBucket(b.bucket)}
+                title={`${b.quote_count.toLocaleString()} quotes · $${(b.quote_total / 1e6).toFixed(1)}M total`}
+                style={{
+                  background: active ? '#f59e0b' : '#334155',
+                  color: active ? '#0f172a' : '#e2e8f0',
+                  border: 'none', borderRadius: 4, padding: '5px 12px',
+                  cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                }}
+              >
+                {b.bucket}
+                <span style={{
+                  opacity: 0.7, fontSize: 10, marginLeft: 6, fontWeight: 500,
+                }}>{b.quote_count.toLocaleString()}</span>
+              </button>
+            );
+          })}
+          <span style={{ color: '#64748b', fontSize: 11, marginLeft: 6 }}>
+            Bucketed by each transaction's own total $
+          </span>
+        </div>
+
         <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, marginBottom: 14 }}>
           <div style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
             Per-part-group lead-lag r
+            {sizeBucket && <span style={{ color: '#f59e0b', marginLeft: 6 }}>· {sizeBucket}</span>}
           </div>
           <div style={{ color: '#94a3b8', fontSize: 11, lineHeight: 1.5 }}>
             Each row is one part group, computed independently on its own 30 DMA-smoothed series.

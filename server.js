@@ -234,17 +234,26 @@ app.post('/api/interpret', async (req, res) => {
 
 // Per-part-group daily series — feeds the "By Part Group r-Analysis" tab.
 // Returns one daily array per part_group; the frontend computes lead-lag r
-// for each independently.
+// for each independently. Optional ?sizeBucket=<bucket> narrows to one band.
 app.get('/api/by-part-group', async (req, res) => {
   if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
   try {
-    const { getDailyByPartGroup, getDimRowCount } = await import('./db.js');
+    const { getDailyByPartGroup, getDimRowCount, getSizeBucketSummary } = await import('./db.js');
     const dimCount = await getDimRowCount();
     if (dimCount === 0) {
       return res.status(404).json({ error: 'No dim data yet. Run a dim fetch first.' });
     }
-    const groups = await getDailyByPartGroup();
-    res.json({ generated: new Date().toISOString(), groups });
+    const sizeBucket = (req.query.sizeBucket || '').trim() || null;
+    const [groups, sizeBuckets] = await Promise.all([
+      getDailyByPartGroup({ sizeBucket }),
+      getSizeBucketSummary(),
+    ]);
+    res.json({
+      generated: new Date().toISOString(),
+      sizeBucket,
+      sizeBuckets,
+      groups,
+    });
   } catch (e) {
     console.error('by-part-group error:', e);
     res.status(500).json({ error: e.message });

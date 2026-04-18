@@ -49,8 +49,25 @@ export async function initDB() {
     )
   `);
 
-  // Line-level aggregation by (date, trantype, part_group, salesrep)
+  // Auto-migrate: if the dim table exists without the size_bucket column, drop
+  // it so the new schema gets created below. An empty dim table triggers an
+  // auto-backfill on startup (see server.js), so the user doesn't have to do
+  // anything manual — the first post-deploy load repopulates with buckets.
+  const tableCheck = await p.query(`SELECT to_regclass('netsuite_daily_dim') as t`);
+  if (tableCheck.rows[0].t) {
+    const colCheck = await p.query(`
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'netsuite_daily_dim' AND column_name = 'size_bucket'
+    `);
+    if (colCheck.rows.length === 0) {
+      console.log('⚠️  Migrating netsuite_daily_dim → adding size_bucket dimension (will trigger refetch)');
+      await p.query(`DROP TABLE netsuite_daily_dim`);
+    }
+  }
+
+  // Line-level aggregation by (date, trantype, part_group, salesrep, size_bucket)
   // trantype values: 'quote', 'quote_adj', 'order', 'shipped'
+  // size_bucket values: 'Under $5K', '$5K-$25K', '$25K-$100K', '$100K+'
   await p.query(`
     CREATE TABLE IF NOT EXISTS netsuite_daily_dim (
       date DATE NOT NULL,
@@ -58,15 +75,17 @@ export async function initDB() {
       part_group TEXT NOT NULL DEFAULT '',
       salesrep_id TEXT NOT NULL DEFAULT '',
       salesrep_name TEXT,
+      size_bucket TEXT NOT NULL DEFAULT 'Under $5K',
       txn_count INTEGER DEFAULT 0,
       line_total NUMERIC(15,2) DEFAULT 0,
       updated_at TIMESTAMPTZ DEFAULT NOW(),
-      PRIMARY KEY (date, trantype, part_group, salesrep_id)
+      PRIMARY KEY (date, trantype, part_group, salesrep_id, size_bucket)
     )
   `);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_date ON netsuite_daily_dim(date)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_partgroup ON netsuite_daily_dim(part_group)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_salesrep ON netsuite_daily_dim(salesrep_id)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_size ON netsuite_daily_dim(size_bucket)`);
 
   console.log('✅  Database tables ready');
 }
@@ -144,9 +163,9 @@ export async function upsertDailyDimRows(rows, { replaceSince = null } = {}) {
     for (const r of rows) {
       await client.query(`
         INSERT INTO netsuite_daily_dim
-          (date, trantype, part_group, salesrep_id, salesrep_name, txn_count, line_total, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-        ON CONFLICT (date, trantype, part_group, salesrep_id) DO UPDATE SET
+          (date, trantype, part_group, salesrep_id, salesrep_name, size_bucket, txn_count, line_total, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        ON CONFLICT (date, trantype, part_group, salesrep_id, size_bucket) DO UPDATE SET
           salesrep_name = EXCLUDED.salesrep_name,
           txn_count     = EXCLUDED.txn_count,
           line_total    = EXCLUDED.line_total,
@@ -156,6 +175,7 @@ export async function upsertDailyDimRows(rows, { replaceSince = null } = {}) {
         r.part_group ?? '',
         r.salesrep_id ?? '',
         r.salesrep_name ?? null,
+        r.size_bucket ?? 'Under $5K',
         r.txn_count ?? 0,
         r.line_total ?? 0,
       ]);
@@ -201,13 +221,24 @@ export async function getFilterOptions() {
   };
 }
 
+// Ordered list of size buckets (small → large). Must match the CASE in the
+// fetcher — keep these in sync.
+export const SIZE_BUCKETS = ['Under $5K', '$5K-$25K', '$25K-$100K', '$100K+'];
+
 /**
  * Return per-part-group daily rows from the dim table. Used by the
  * by-part-group analysis tab to compute lead-lag r for each part group
  * independently. Rolls up across sales reps within each part group.
+ * Optional sizeBucket filter narrows to one size-band.
  */
-export async function getDailyByPartGroup() {
+export async function getDailyByPartGroup({ sizeBucket } = {}) {
   const p = getPool();
+  const where = [`part_group <> ''`];
+  const params = [];
+  if (sizeBucket) {
+    params.push(sizeBucket);
+    where.push(`size_bucket = $${params.length}`);
+  }
   const sql = `
     SELECT
       part_group,
@@ -219,12 +250,11 @@ export async function getDailyByPartGroup() {
       SUM(CASE WHEN trantype = 'shipped' THEN txn_count  ELSE 0 END)::int   as shipped_count,
       SUM(CASE WHEN trantype = 'shipped' THEN line_total ELSE 0 END)::float as shipped_total
     FROM netsuite_daily_dim
-    WHERE part_group <> ''
+    WHERE ${where.join(' AND ')}
     GROUP BY part_group, date
     ORDER BY part_group, date ASC
   `;
-  const { rows } = await p.query(sql);
-  // Bucket by part_group → daily array
+  const { rows } = await p.query(sql, params);
   const byPg = new Map();
   for (const r of rows) {
     if (!byPg.has(r.part_group)) byPg.set(r.part_group, []);
@@ -236,6 +266,28 @@ export async function getDailyByPartGroup() {
     });
   }
   return Array.from(byPg.entries()).map(([part_group, daily]) => ({ part_group, daily }));
+}
+
+/**
+ * Return the size-bucket list with per-bucket quote counts + totals so the UI
+ * can show "Under $5K (4,062 quotes)" etc. on the filter chips.
+ */
+export async function getSizeBucketSummary() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT
+      size_bucket,
+      SUM(CASE WHEN trantype = 'quote' THEN txn_count  ELSE 0 END)::int   as quote_count,
+      SUM(CASE WHEN trantype = 'quote' THEN line_total ELSE 0 END)::float as quote_total
+    FROM netsuite_daily_dim
+    GROUP BY size_bucket
+  `);
+  const byBucket = Object.fromEntries(rows.map(r => [r.size_bucket, r]));
+  return SIZE_BUCKETS.map(b => ({
+    bucket: b,
+    quote_count: byBucket[b]?.quote_count ?? 0,
+    quote_total: byBucket[b]?.quote_total ?? 0,
+  }));
 }
 
 /**
