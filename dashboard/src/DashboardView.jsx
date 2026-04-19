@@ -396,29 +396,66 @@ export default function DashboardView({
     };
   }, [chartData]);
 
-  // Build the compact JSON snapshot Claude reads. Uses current_30 (latest 30 DMA)
-  // vs prior_30 (30 DMA from 30 rows earlier) so the model can state direction.
+  // Build the compact JSON snapshot Claude reads. Gives explicit anchor points
+  // (today / 30d / 90d / YoY) with both 30 DMA and 90 DMA values so the model
+  // can talk about short-term momentum, quarterly trend, and seasonal YoY
+  // context — and read the 30-vs-90 posture on each metric as growth or
+  // contraction.
   const buildAISnapshot = useCallback(() => {
     if (chartData.length === 0) return null;
     const last = chartData[chartData.length - 1];
-    const prior = chartData[Math.max(0, chartData.length - 31)];
     const sum = (f) => chartData.reduce((s, d) => s + (d[f] || 0), 0);
-    const pick = (row) => ({
-      quote_dollars: row.q30, orders_dollars: row.o30, shipped_dollars: row.s30,
-      quote_count: row.qc30, orders_count: row.oc30, shipped_count: row.sc30,
-      close_rate: row.closeRate, capture_rate: row.captureRate,
-      aov_orders: row.aovO30, aov_shipped: row.aovS30,
+
+    // Snapshot of both DMAs for one row.
+    const snap = (row) => row && ({
+      date: row.date,
+      dma30: {
+        quote_dollars: row.q30, orders_dollars: row.o30, shipped_dollars: row.s30,
+        quote_count: row.qc30, orders_count: row.oc30, shipped_count: row.sc30,
+        close_rate: row.closeRate, capture_rate: row.captureRate,
+        aov_orders: row.aovO30, aov_shipped: row.aovS30,
+      },
+      dma90: {
+        quote_dollars: row.q90, orders_dollars: row.o90, shipped_dollars: row.s90,
+        quote_count: row.qc90, orders_count: row.oc90, shipped_count: row.sc90,
+        close_rate: row.cr90, capture_rate: row.capt90,
+        aov_orders: row.aovO90, aov_shipped: row.aovS90,
+      },
     });
+
+    // Find the row in fullSeries closest to (anchorDate - daysAgo). We search
+    // fullSeries (not chartData) so comparisons reach outside the current
+    // range window — the "year_ago" read only works if we have ≥1 yr history.
+    const findBackFromSeries = (anchorIso, daysAgo) => {
+      if (!fullSeries.length) return null;
+      const target = new Date(anchorIso);
+      target.setDate(target.getDate() - daysAgo);
+      const targetMs = target.getTime();
+      let best = null;
+      let bestDiff = Infinity;
+      for (const row of fullSeries) {
+        const diff = Math.abs(new Date(row.date).getTime() - targetMs);
+        if (diff < bestDiff) { bestDiff = diff; best = row; }
+      }
+      // Require the match to be within ±7 days — otherwise data doesn't reach
+      // back that far and the comparison would be misleading.
+      return bestDiff <= 7 * 86400 * 1000 ? best : null;
+    };
+
     return {
       page: aiContext.page,
       filters: aiContext.filters || null,
       range: selectedYears.length > 0 ? selectedYears.join(',') : range,
       days_visible: chartData.length,
       weekday_only: weekdayOnly,
-      current_date: last.date,    // date of the current_30 reading — lets the AI know which month
-      prior_date: prior.date,     // date of the prior_30 reading
-      current_30: pick(last),
-      prior_30: pick(prior),
+      // Explicit anchor points — replace the old ambiguous "current_30 vs
+      // prior_30" pair with four clearly-labeled snapshots.
+      metrics_at: {
+        today:            snap(last),
+        thirty_days_ago:  snap(findBackFromSeries(last.date, 30)),
+        ninety_days_ago:  snap(findBackFromSeries(last.date, 90)),
+        year_ago:         snap(findBackFromSeries(last.date, 365)),
+      },
       period_totals: {
         quote_dollars: sum('quotes_total'),
         orders_dollars: sum('orders_total'),
@@ -445,7 +482,7 @@ export default function DashboardView({
       // system prompt tells the model to skip speculation when this is null.
       ga4: null,
     };
-  }, [chartData, aiContext, range, selectedYears, weekdayOnly, leadLagResults]);
+  }, [chartData, fullSeries, aiContext, range, selectedYears, weekdayOnly, leadLagResults]);
 
   const handleAIAnalysis = async () => {
     const snapshot = buildAISnapshot();

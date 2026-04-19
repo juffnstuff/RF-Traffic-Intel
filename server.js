@@ -143,6 +143,15 @@ Metric glossary:
 - "close_rate" — 30 DMA of orders_count / quotes_count. A volume-based conversion metric.
 - "capture_rate" — 30 DMA of orders_dollars / adjusted quotes_dollars (excluding quotes marked "RF Alternate Solution" as lost reason). A dollar-weighted conversion metric.
 - "aov_orders" / "aov_shipped" — average order value = dollars / count, on the 30 DMA.
+
+Moving averages — CRITICAL interpretation rule:
+Every chart on the dashboard plots two moving averages: a 30-day (30 DMA) and a 90-day (90 DMA). In the snapshot you receive BOTH values at every anchor point (today, thirty_days_ago, ninety_days_ago, year_ago). The structural relationship between them is the primary read on whether a metric is growing or contracting — do not ignore it.
+  - 30 DMA > 90 DMA ⇒ growth posture. Recent pace is running hotter than the longer-term baseline; the metric is trending up.
+  - 30 DMA < 90 DMA ⇒ contraction posture. Recent pace is cooling relative to the longer-term baseline; the metric is trending down.
+  - 30 DMA ≈ 90 DMA ⇒ flat / inflection; watch for a crossover.
+  - A recent crossover (30 crossing above 90 after being below, or vice versa) is a meaningful trend change and should be called out explicitly. To detect it, compare today's 30-vs-90 with thirty_days_ago's 30-vs-90: if the sign flipped, that's a crossover.
+State the 30-vs-90 posture for quote $, orders $, and shipped $ in paragraph 1; reference it for the ratio metrics (close rate, capture rate) and AOV in paragraph 2. Use the user's own language: "30 DMA running above 90 DMA — growth" or "30 DMA has crossed below 90 DMA — contraction".
+
 - "lead_lag" — Pearson r at the best lag (0–45 days) on the smoothed (30 DMA) series. Four variants:
   - "quotes_to_orders_count" — quote count → order count. Forecasts transaction volume.
   - "quotes_to_orders_dollars" — quote $ → order $. Forecasts revenue. **Use this as the primary forecasting signal in paragraph 3 — revenue is what the user cares about. Mention the count variant only if it disagrees materially.**
@@ -183,17 +192,27 @@ Snapshot fields:
 - "range" — "3m" / "6m" / "all" / a custom year set like "2024,2025".
 - "days_visible" — number of days in the current view.
 - "weekday_only" — true means weekends are excluded.
-- "current_30" — the latest 30 DMA value for each metric.
-- "prior_30" — the 30 DMA value 30 days earlier.
+- "metrics_at" — four anchor snapshots (each with its own \`date\` + \`dma30\` + \`dma90\` blocks):
+    * "today"            — most recent reading. This is "now" in the narrative.
+    * "thirty_days_ago"  — one month back. Use for short-term momentum (MoM).
+    * "ninety_days_ago"  — one quarter back. Use for medium-term trend (QoQ).
+    * "year_ago"         — ~365 calendar days back. Use for year-over-year seasonal context. MAY BE NULL if we don't have a year of history (e.g. a newly-added part group, or a short visible range). If null, fall back to the other anchors and say so.
+  When discussing a percentage change, state WHICH comparison you're using — never say "prior" generically. Example: "quote $ up 12% YoY" or "quote $ up 4% MoM but flat YoY". YoY is the primary check because it controls for seasonality; MoM and QoQ are pace indicators.
 - "period_totals" — summed raw daily values over the visible range.
 - "lead_lag" — see above.
 - "ga4" — may be null.
 
 Write 3 short paragraphs, plain prose, no headers, no bullets, no markdown:
 
-Paragraph 1 — What's happening. The headline on sales and pipeline right now. Name the 30 DMA figures for quote $ and orders $, and say whether they're up or down vs prior_30 (percent change). Use current_date and prior_date to identify the months on each side of that comparison, then cross-check against the M curve: if the move matches the seasonal expectation, say so ("up 11% — tracking the typical Feb→Mar ramp"); if it's a departure from the pattern, call that out explicitly ("up only 3% vs prior_30 — the Feb→Mar ramp is running well below the seasonal norm"). If shipped $ differs meaningfully from orders $, mention it. If page=filtered, open by naming the filter set (e.g. "For Speed Bumps across reps Backman and Johnson…").
+Paragraph 1 — What's happening. The headline on sales and pipeline right now.
+- Name the today.dma30 figures for quote $ and orders $.
+- State the 30-vs-90 posture for each: "30 DMA above 90 DMA" = growth, "30 DMA below 90 DMA" = contraction. If a crossover has occurred in the last ~30 days (detect by comparing today's 30-vs-90 sign to thirty_days_ago's 30-vs-90 sign), call it out explicitly — that's a real inflection.
+- Give percent changes explicitly, naming each comparison: "up 18% YoY", "up 6% QoQ", "flat MoM". Lead with YoY when available; if year_ago is null, say so and use QoQ or MoM.
+- Cross-check the MoM / QoQ / YoY moves against the M curve: if the move is what the seasonal pattern would predict, say so ("up 11% MoM — tracking the typical Feb→Mar ramp"); if it departs from the pattern, call that out ("up only 3% MoM — the Feb→Mar ramp is running well below the seasonal norm").
+- If shipped $ diverges meaningfully from orders $ (posture or direction), mention it.
+- If page=filtered, open by naming the filter set (e.g. "For Speed Bumps across reps Backman and Johnson…").
 
-Paragraph 2 — Quality of demand. Close rate and capture rate — which way they're moving and what that implies. Then AOV: rising aov_orders with flat count means deals are getting bigger; falling means smaller. Be specific: cite the current close, capture, and AOV numbers.
+Paragraph 2 — Quality of demand. Close rate and capture rate — use the 30-vs-90 posture to describe direction ("capture rate 30 DMA sits above its 90 DMA — improving dollar conversion"), then name the today.dma30 values. Then AOV: state the 30-vs-90 posture for aov_orders and aov_shipped; rising aov with flat count means deals are getting bigger, falling means smaller. Cite today's numbers.
 
 Paragraph 3 — Open-quote conversion likelihood. This is the headline number the user cares about. Use lead_lag.quotes_to_orders_dollars (the $ correlation) as the primary signal: (a) state the expected order $ from the currently-open quote pipeline over the next N days using its best_lag_days (compute with the formulas above); (b) calibrate confidence from r using the scale above, in plain words — "high confidence", "a reasonable guide", "too noisy to forecast reliably"; (c) if quotes_to_orders_count tells a meaningfully different story (e.g. count r is strong but $ r is weak, suggesting deal-size volatility, or vice versa), call that out in one sentence; (d) end with one concrete watchlist item — a metric that's diverging, a lag that's unusually short/long, or a filter combination worth drilling into. If the primary $ r is weak (< 0.4), skip the projected numbers and instead explain what's making the signal unreliable and what the user could do to sharpen it (longer range, fewer filters, more data).
 
