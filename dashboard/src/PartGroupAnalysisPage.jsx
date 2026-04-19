@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { movingAverage, leadLag, weekdaysOnly } from './utils/analytics';
+import { RELATIVE_RANGES, RangeDropdown, YearsDropdown } from './FilterControls';
 
-const RELATIVE_RANGES = { '3m': 90, '6m': 180 };
 const MIN_DAYS_FOR_R = 60;  // hide a row's r if it has fewer days than this
 
 function fmtMoney(n) {
@@ -194,32 +194,17 @@ export default function PartGroupAnalysisPage() {
         <div style={{ color: '#64748b', fontSize: 11 }}>
           {sortedRows.length} part groups · 30 DMA-smoothed correlation, lag 0–45 days
         </div>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-          {[...Object.keys(RELATIVE_RANGES), 'all'].map(r => {
-            const active = selectedYears.length === 0 && range === r;
-            return (
-              <button key={r} onClick={() => { setSelectedYears([]); setRange(r); }} style={{
-                background: active ? '#f59e0b' : '#334155',
-                color: active ? '#0f172a' : '#e2e8f0',
-                border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
-              }}>{r}</button>
-            );
-          })}
-          <span style={{ width: 1, height: 18, background: '#475569', margin: '0 4px' }} />
-          {availableYears.map(y => {
-            const active = selectedYears.includes(y);
-            return (
-              <button
-                key={y}
-                onClick={() => setSelectedYears(prev => prev.includes(y) ? prev.filter(v => v !== y) : [...prev, y].sort())}
-                style={{
-                  background: active ? '#f59e0b' : '#334155',
-                  color: active ? '#0f172a' : '#e2e8f0',
-                  border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
-                }}
-              >{y}</button>
-            );
-          })}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <RangeDropdown
+            range={range}
+            disabled={selectedYears.length > 0}
+            onChange={r => { setSelectedYears([]); setRange(r); }}
+          />
+          <YearsDropdown
+            selected={selectedYears}
+            available={availableYears}
+            onChange={setSelectedYears}
+          />
           <label style={{ color: '#94a3b8', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, marginLeft: 6 }}>
             <input type="checkbox" checked={weekdayOnly} onChange={e => setWeekdayOnly(e.target.checked)} />
             Weekdays
