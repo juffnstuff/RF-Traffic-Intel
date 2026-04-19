@@ -149,6 +149,22 @@ Metric glossary:
   - "orders_to_shipped_count" / "orders_to_shipped_dollars" — same, for orders → ship.
 - "ga4" — website traffic from Google Analytics 4. If present, use it as an upstream leading indicator of quotes (traffic → quotes → orders → ship). If null, acknowledge the source is coming but don't speculate about what it would say.
 
+RubberForm's known seasonal pattern — the "M curve":
+- January → slow start of the year, climbing off the December low.
+- February–May → steady ramp; demand builds through spring.
+- May–July → first peak of the year; typical high-water mark.
+- July–September → slight summer dip between the two peaks.
+- October–November → second peak; late-year push before holidays.
+- December → sharp drop for the holidays; the annual low.
+
+Apply this to every trend read you do:
+- Before labeling a move as "up" or "down" in a narrative sense, check what the seasonal curve would predict for that month-pair and say whether the observed move matches or departs from it.
+- Examples of expected moves (do NOT call these trends): Feb→Mar up, May→Jun plateau, Jul→Aug mild dip, Oct→Nov climb, Nov→Dec sharp drop.
+- Examples of genuine signal worth flagging: Q1 ramp that's flat or weaker than prior years; Oct–Nov that fails to exceed the May–Jul peak; a drop in months where the curve says up.
+- When projecting forward from lead-lag in paragraph 3, temper or amplify the projection by the seasonal direction of the lag-window months (e.g. "on a 14-day lag we're landing in late July — expect the summer dip to pull that number down from the raw projection").
+
+Use "current_date" and "prior_date" in the snapshot to know exactly which months are in play for current_30 vs prior_30. Today's calendar month is "current_date".
+
 How to read "r" as conversion-likelihood confidence:
 - r ≥ 0.7 — strong. History says today's quote DMA reliably predicts order DMA ~N days out. You can talk about the forecast with genuine confidence.
 - 0.4 ≤ r < 0.7 — moderate. The relationship holds but with noise; treat projections as a range, not a point.
@@ -175,7 +191,7 @@ Snapshot fields:
 
 Write 3 short paragraphs, plain prose, no headers, no bullets, no markdown:
 
-Paragraph 1 — What's happening. The headline on sales and pipeline right now. Name the 30 DMA figures for quote $ and orders $, and say whether they're up or down vs prior_30 (percent change). If shipped $ differs meaningfully from orders $, mention it. If page=filtered, open by naming the filter set (e.g. "For Speed Bumps across reps Backman and Johnson…").
+Paragraph 1 — What's happening. The headline on sales and pipeline right now. Name the 30 DMA figures for quote $ and orders $, and say whether they're up or down vs prior_30 (percent change). Use current_date and prior_date to identify the months on each side of that comparison, then cross-check against the M curve: if the move matches the seasonal expectation, say so ("up 11% — tracking the typical Feb→Mar ramp"); if it's a departure from the pattern, call that out explicitly ("up only 3% vs prior_30 — the Feb→Mar ramp is running well below the seasonal norm"). If shipped $ differs meaningfully from orders $, mention it. If page=filtered, open by naming the filter set (e.g. "For Speed Bumps across reps Backman and Johnson…").
 
 Paragraph 2 — Quality of demand. Close rate and capture rate — which way they're moving and what that implies. Then AOV: rising aov_orders with flat count means deals are getting bigger; falling means smaller. Be specific: cite the current close, capture, and AOV numbers.
 

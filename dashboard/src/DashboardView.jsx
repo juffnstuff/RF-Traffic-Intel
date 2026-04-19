@@ -415,6 +415,8 @@ export default function DashboardView({
       range: selectedYears.length > 0 ? selectedYears.join(',') : range,
       days_visible: chartData.length,
       weekday_only: weekdayOnly,
+      current_date: last.date,    // date of the current_30 reading — lets the AI know which month
+      prior_date: prior.date,     // date of the prior_30 reading
       current_30: pick(last),
       prior_30: pick(prior),
       period_totals: {
