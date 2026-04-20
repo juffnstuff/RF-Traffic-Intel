@@ -87,6 +87,43 @@ export async function initDB() {
   await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_salesrep ON netsuite_daily_dim(salesrep_id)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_size ON netsuite_daily_dim(size_bucket)`);
 
+  // GA4 aggregate daily — one row per date, whole-account totals.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS ga4_daily (
+      date DATE PRIMARY KEY,
+      sessions INTEGER DEFAULT 0,
+      total_users INTEGER DEFAULT 0,
+      new_users INTEGER DEFAULT 0,
+      engaged_sessions INTEGER DEFAULT 0,
+      screen_page_views INTEGER DEFAULT 0,
+      avg_session_duration NUMERIC(10,2) DEFAULT 0,
+      bounce_rate NUMERIC(6,4) DEFAULT 0,
+      conversions INTEGER DEFAULT 0,
+      total_revenue NUMERIC(15,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // GA4 per-campaign daily — one row per (date, campaign_name). Campaign
+  // is sessionCampaignName from GA4 (pulled from utm_campaign / Google Ads).
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS ga4_daily_by_campaign (
+      date DATE NOT NULL,
+      campaign_name TEXT NOT NULL,
+      sessions INTEGER DEFAULT 0,
+      total_users INTEGER DEFAULT 0,
+      new_users INTEGER DEFAULT 0,
+      engaged_sessions INTEGER DEFAULT 0,
+      screen_page_views INTEGER DEFAULT 0,
+      conversions INTEGER DEFAULT 0,
+      total_revenue NUMERIC(15,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, campaign_name)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_campaign_date ON ga4_daily_by_campaign(date)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_campaign_name ON ga4_daily_by_campaign(campaign_name)`);
+
   console.log('✅  Database tables ready');
 }
 
@@ -358,4 +395,164 @@ export async function getDailyDimFiltered({ partGroups = [], salesReps = [] } = 
   `;
   const { rows } = await p.query(sql, params);
   return rows;
+}
+
+// ── GA4 helpers ──────────────────────────────────────────────────────
+
+export async function upsertGa4Daily(rows, { replaceSince = null } = {}) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    if (replaceSince) {
+      await client.query(`DELETE FROM ga4_daily WHERE date >= $1`, [replaceSince]);
+    }
+    let upserted = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO ga4_daily
+          (date, sessions, total_users, new_users, engaged_sessions, screen_page_views,
+           avg_session_duration, bounce_rate, conversions, total_revenue, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+        ON CONFLICT (date) DO UPDATE SET
+          sessions = EXCLUDED.sessions,
+          total_users = EXCLUDED.total_users,
+          new_users = EXCLUDED.new_users,
+          engaged_sessions = EXCLUDED.engaged_sessions,
+          screen_page_views = EXCLUDED.screen_page_views,
+          avg_session_duration = EXCLUDED.avg_session_duration,
+          bounce_rate = EXCLUDED.bounce_rate,
+          conversions = EXCLUDED.conversions,
+          total_revenue = EXCLUDED.total_revenue,
+          updated_at = NOW()
+      `, [
+        r.date, r.sessions ?? 0, r.total_users ?? 0, r.new_users ?? 0,
+        r.engaged_sessions ?? 0, r.screen_page_views ?? 0,
+        r.avg_session_duration ?? 0, r.bounce_rate ?? 0,
+        r.conversions ?? 0, r.total_revenue ?? 0,
+      ]);
+      upserted++;
+    }
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function upsertGa4DailyByCampaign(rows, { replaceSince = null } = {}) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    if (replaceSince) {
+      await client.query(`DELETE FROM ga4_daily_by_campaign WHERE date >= $1`, [replaceSince]);
+    }
+    let upserted = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO ga4_daily_by_campaign
+          (date, campaign_name, sessions, total_users, new_users, engaged_sessions,
+           screen_page_views, conversions, total_revenue, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        ON CONFLICT (date, campaign_name) DO UPDATE SET
+          sessions = EXCLUDED.sessions,
+          total_users = EXCLUDED.total_users,
+          new_users = EXCLUDED.new_users,
+          engaged_sessions = EXCLUDED.engaged_sessions,
+          screen_page_views = EXCLUDED.screen_page_views,
+          conversions = EXCLUDED.conversions,
+          total_revenue = EXCLUDED.total_revenue,
+          updated_at = NOW()
+      `, [
+        r.date, r.campaign_name,
+        r.sessions ?? 0, r.total_users ?? 0, r.new_users ?? 0,
+        r.engaged_sessions ?? 0, r.screen_page_views ?? 0,
+        r.conversions ?? 0, r.total_revenue ?? 0,
+      ]);
+      upserted++;
+    }
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getGa4Daily() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT date::text,
+      sessions, total_users, new_users, engaged_sessions, screen_page_views,
+      avg_session_duration::float as avg_session_duration,
+      bounce_rate::float as bounce_rate,
+      conversions,
+      total_revenue::float as total_revenue
+    FROM ga4_daily
+    ORDER BY date ASC
+  `);
+  return rows;
+}
+
+export async function getGa4DailyFiltered({ campaigns = [] } = {}) {
+  const p = getPool();
+  const where = [];
+  const params = [];
+  if (campaigns.length > 0) {
+    params.push(campaigns);
+    where.push(`campaign_name = ANY($${params.length})`);
+  }
+  const whereSQL = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  const { rows } = await p.query(`
+    SELECT
+      date::text,
+      SUM(sessions)::int          as sessions,
+      SUM(total_users)::int       as total_users,
+      SUM(new_users)::int         as new_users,
+      SUM(engaged_sessions)::int  as engaged_sessions,
+      SUM(screen_page_views)::int as screen_page_views,
+      SUM(conversions)::int       as conversions,
+      SUM(total_revenue)::float   as total_revenue
+    FROM ga4_daily_by_campaign
+    ${whereSQL}
+    GROUP BY date
+    ORDER BY date ASC
+  `, params);
+  return rows;
+}
+
+export async function getGa4CampaignOptions() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT campaign_name,
+      SUM(sessions)::int as sessions,
+      SUM(conversions)::int as conversions,
+      MAX(date)::text as last_seen
+    FROM ga4_daily_by_campaign
+    WHERE campaign_name <> ''
+      AND campaign_name <> '(not set)'
+      AND campaign_name <> '(direct)'
+    GROUP BY campaign_name
+    ORDER BY sessions DESC
+  `);
+  return rows.map(r => ({
+    value: r.campaign_name,
+    sessions: r.sessions,
+    conversions: r.conversions,
+    last_seen: r.last_seen,
+  }));
+}
+
+export async function getGa4RowCount() {
+  const p = getPool();
+  const { rows } = await p.query('SELECT COUNT(*) as cnt FROM ga4_daily');
+  return parseInt(rows[0].cnt, 10);
 }

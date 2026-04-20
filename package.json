@@ -10,6 +10,7 @@
     "fetch:ga4": "node fetchers/fetch-ga4.js",
     "fetch:netsuite": "node fetchers/fetch-netsuite.js",
     "fetch:netsuite-dim": "node fetchers/fetch-netsuite-dim.js",
+    "fetch:ga4": "node fetchers/fetch-ga4.js",
     "start": "node server.js",
     "server": "node server.js",
     "dev": "concurrently \"node server.js\" \"vite dashboard --port 5174\"",
@@ -17,6 +18,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",
+    "@google-analytics/data": "^5.2.1",
     "@vitejs/plugin-react": "^4.3.0",
     "chalk": "^5.3.0",
     "cors": "^2.8.5",

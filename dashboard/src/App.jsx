@@ -5,15 +5,22 @@ import PartGroupAnalysisPage from './PartGroupAnalysisPage';
 
 function OverviewPage() {
   const [data, setData] = useState(null);
+  const [ga4, setGa4] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const loadData = useCallback(() => {
     setLoading(true);
-    fetch('/api/unified')
-      .then(r => { if (!r.ok) throw new Error(`API ${r.status}`); return r.json(); })
-      .then(setData)
+    // GA4 is optional — don't fail the page if it's not ready yet.
+    Promise.all([
+      fetch('/api/unified').then(r => { if (!r.ok) throw new Error(`API ${r.status}`); return r.json(); }),
+      fetch('/api/ga4').then(r => r.ok ? r.json() : null).catch(() => null),
+    ])
+      .then(([unified, ga4Resp]) => {
+        setData(unified);
+        setGa4(ga4Resp);
+      })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
@@ -43,6 +50,7 @@ function OverviewPage() {
   return (
     <DashboardView
       daily={data?.daily || []}
+      ga4Daily={ga4?.daily || []}
       onRefresh={handleRefresh}
       refreshing={refreshing}
       sourceLabel={data?.sources?.join(', ') || ''}

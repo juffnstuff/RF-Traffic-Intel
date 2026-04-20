@@ -39,9 +39,12 @@ function MultiSelectChips({ label, options, selected, onToggle, onClear, emptyHi
 
 export default function FilteredPage() {
   const [filterOptions, setFilterOptions] = useState({ partGroups: [], salesReps: [] });
+  const [ga4Campaigns, setGa4Campaigns] = useState([]);
   const [selectedPartGroups, setSelectedPartGroups] = useState([]);
   const [selectedSalesReps, setSelectedSalesReps] = useState([]);
+  const [selectedCampaigns, setSelectedCampaigns] = useState([]);
   const [data, setData] = useState(null);
+  const [ga4, setGa4] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -51,6 +54,11 @@ export default function FilteredPage() {
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`API ${r.status}`)))
       .then(setFilterOptions)
       .catch(e => console.error('filter options load failed:', e));
+    // GA4 campaigns — optional, silent fail if GA4 isn't wired yet.
+    fetch('/api/ga4-campaigns')
+      .then(r => r.ok ? r.json() : null)
+      .then(j => setGa4Campaigns(j?.campaigns || []))
+      .catch(() => setGa4Campaigns([]));
   }, []);
 
   const loadData = useCallback(() => {
@@ -59,12 +67,28 @@ export default function FilteredPage() {
     if (selectedPartGroups.length) params.set('partGroups', selectedPartGroups.join(','));
     if (selectedSalesReps.length) params.set('salesReps', selectedSalesReps.join(','));
     const qs = params.toString();
-    fetch(`/api/unified-dim${qs ? '?' + qs : ''}`)
-      .then(r => { if (!r.ok) throw new Error(`API ${r.status}`); return r.json(); })
-      .then(json => { setData(json); setError(null); })
+
+    // If any campaign is selected, pull GA4 filtered to those campaigns;
+    // otherwise pull aggregate GA4 so the Traffic charts still render.
+    const ga4Qs = selectedCampaigns.length
+      ? '?campaigns=' + encodeURIComponent(selectedCampaigns.join(','))
+      : '';
+    const ga4Url = selectedCampaigns.length
+      ? `/api/ga4-by-campaign${ga4Qs}`
+      : `/api/ga4`;
+
+    Promise.all([
+      fetch(`/api/unified-dim${qs ? '?' + qs : ''}`).then(r => { if (!r.ok) throw new Error(`API ${r.status}`); return r.json(); }),
+      fetch(ga4Url).then(r => r.ok ? r.json() : null).catch(() => null),
+    ])
+      .then(([dimResp, ga4Resp]) => {
+        setData(dimResp);
+        setGa4(ga4Resp);
+        setError(null);
+      })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }, [selectedPartGroups, selectedSalesReps]);
+  }, [selectedPartGroups, selectedSalesReps, selectedCampaigns]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -77,6 +101,7 @@ export default function FilteredPage() {
         setTimeout(() => {
           loadData();
           fetch('/api/filters').then(r => r.json()).then(setFilterOptions).catch(() => {});
+          fetch('/api/ga4-campaigns').then(r => r.ok ? r.json() : null).then(j => setGa4Campaigns(j?.campaigns || [])).catch(() => {});
           setRefreshing(false);
         }, 500);
       } else {
@@ -111,8 +136,17 @@ export default function FilteredPage() {
         emptyHint="No sales reps yet — run a dim fetch."
         keyField="id" nameField="name"
       />
+      <MultiSelectChips
+        label="SEM Campaign (GA4)"
+        options={ga4Campaigns}
+        selected={selectedCampaigns}
+        onToggle={toggle(setSelectedCampaigns)}
+        onClear={() => setSelectedCampaigns([])}
+        emptyHint="No GA4 campaigns yet — waiting for GA4 fetch."
+        keyField="value" nameField="value"
+      />
     </div>
-  ), [filterOptions, selectedPartGroups, selectedSalesReps]);
+  ), [filterOptions, ga4Campaigns, selectedPartGroups, selectedSalesReps, selectedCampaigns]);
 
   if (loading && !data) {
     return <div style={{ padding: 'clamp(16px, 4vw, 40px)', color: '#94a3b8' }}>Loading filtered data...</div>;
@@ -134,11 +168,15 @@ export default function FilteredPage() {
     );
   }
 
-  const summary = `${selectedPartGroups.length || 'all'} part groups · ${selectedSalesReps.length || 'all'} reps`;
+  const summary =
+    `${selectedPartGroups.length || 'all'} part groups · ` +
+    `${selectedSalesReps.length || 'all'} reps · ` +
+    `${selectedCampaigns.length || 'all'} campaigns`;
 
   return (
     <DashboardView
       daily={data?.daily || []}
+      ga4Daily={ga4?.daily || []}
       headerExtras={filterPanel}
       subtitle={<>netsuite-dim — filtered: {summary}</>}
       onRefresh={handleRefresh}
@@ -152,6 +190,7 @@ export default function FilteredPage() {
             const rep = filterOptions.salesReps.find(r => String(r.id) === String(id));
             return rep ? { id, name: rep.name } : { id };
           }),
+          campaigns: selectedCampaigns,
         },
       }}
     />

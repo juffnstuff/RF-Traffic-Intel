@@ -259,6 +259,7 @@ function LeadLagCard({ title, subtitle, result }) {
  */
 export default function DashboardView({
   daily = [],
+  ga4Daily = [],                       // optional — GA4 daily rows aligned to `daily`
   headerExtras = null,
   subtitle = null,
   onRefresh,
@@ -293,6 +294,17 @@ export default function DashboardView({
     const shipped        = rows.map(d => d.shipped_count || 0);
     const shippedDollars = rows.map(d => d.shipped_total || 0);
 
+    // Align GA4 rows to the transactional rows by date (GA4 is the optional
+    // upstream signal — may not extend as far back or forward).
+    const ga4ByDate = new Map(
+      (ga4Daily || []).map(d => [d.date, d])
+    );
+    const sessions     = rows.map(d => ga4ByDate.get(d.date)?.sessions        ?? 0);
+    const totalUsers   = rows.map(d => ga4ByDate.get(d.date)?.total_users     ?? 0);
+    const newUsers     = rows.map(d => ga4ByDate.get(d.date)?.new_users       ?? 0);
+    const conversions  = rows.map(d => ga4ByDate.get(d.date)?.conversions     ?? 0);
+    const pageviews    = rows.map(d => ga4ByDate.get(d.date)?.screen_page_views ?? 0);
+
     const qc30 = movingAverage(quotes, 30);
     const qc90 = movingAverage(quotes, 90);
     const qd30 = movingAverage(quotesDollars, 30);
@@ -307,6 +319,18 @@ export default function DashboardView({
     const sc90 = movingAverage(shipped, 90);
     const sd30 = movingAverage(shippedDollars, 30);
     const sd90 = movingAverage(shippedDollars, 90);
+
+    // GA4 moving averages
+    const sess30 = movingAverage(sessions, 30);
+    const sess90 = movingAverage(sessions, 90);
+    const tu30   = movingAverage(totalUsers, 30);
+    const tu90   = movingAverage(totalUsers, 90);
+    const nu30   = movingAverage(newUsers, 30);
+    const nu90   = movingAverage(newUsers, 90);
+    const conv30 = movingAverage(conversions, 30);
+    const conv90 = movingAverage(conversions, 90);
+    const pv30   = movingAverage(pageviews, 30);
+    const pv90   = movingAverage(pageviews, 90);
 
     const closeRate = qc30.map((q, i) => (q == null || oc30[i] == null || q === 0 ? null : oc30[i] / q));
     const cr90 = qc90.map((q, i) => (q == null || oc90[i] == null || q === 0 ? null : oc90[i] / q));
@@ -336,8 +360,14 @@ export default function DashboardView({
       aovShipDaily:  shipped[i] > 0 ? shippedDollars[i] / shipped[i] : null,
       aovO30: aovO30[i], aovO90: aovO90[i],
       aovS30: aovS30[i], aovS90: aovS90[i],
+      // GA4 raw + DMAs
+      sessions: sessions[i], sess30: sess30[i], sess90: sess90[i],
+      totalUsers: totalUsers[i], tu30: tu30[i], tu90: tu90[i],
+      newUsers: newUsers[i], nu30: nu30[i], nu90: nu90[i],
+      conversions: conversions[i], conv30: conv30[i], conv90: conv90[i],
+      pageviews: pageviews[i], pv30: pv30[i], pv90: pv90[i],
     }));
-  }, [daily, weekdayOnly]);
+  }, [daily, ga4Daily, weekdayOnly]);
 
   const chartData = useMemo(() => {
     if (!fullSeries.length) return [];
@@ -405,7 +435,9 @@ export default function DashboardView({
     const last = chartData[chartData.length - 1];
     const sum = (f) => chartData.reduce((s, d) => s + (d[f] || 0), 0);
 
-    // Snapshot of both DMAs for one row.
+    const hasGa4 = (ga4Daily?.length ?? 0) > 0;
+
+    // Snapshot of both DMAs for one row (+ GA4 traffic when available).
     const snap = (row) => row && ({
       date: row.date,
       dma30: {
@@ -413,12 +445,20 @@ export default function DashboardView({
         quote_count: row.qc30, orders_count: row.oc30, shipped_count: row.sc30,
         close_rate: row.closeRate, capture_rate: row.captureRate,
         aov_orders: row.aovO30, aov_shipped: row.aovS30,
+        ...(hasGa4 ? {
+          sessions: row.sess30, total_users: row.tu30,
+          new_users: row.nu30, conversions: row.conv30, pageviews: row.pv30,
+        } : {}),
       },
       dma90: {
         quote_dollars: row.q90, orders_dollars: row.o90, shipped_dollars: row.s90,
         quote_count: row.qc90, orders_count: row.oc90, shipped_count: row.sc90,
         close_rate: row.cr90, capture_rate: row.capt90,
         aov_orders: row.aovO90, aov_shipped: row.aovS90,
+        ...(hasGa4 ? {
+          sessions: row.sess90, total_users: row.tu90,
+          new_users: row.nu90, conversions: row.conv90, pageviews: row.pv90,
+        } : {}),
       },
     });
 
@@ -477,11 +517,13 @@ export default function DashboardView({
           ? { best_lag_days: leadLagResults.ordersToShippedDollars.bestLag, r: +leadLagResults.ordersToShippedDollars.bestR.toFixed(3) }
           : null,
       } : null,
-      // GA4 web traffic: placeholder until the GA4 fetcher is wired in. The
-      // system prompt tells the model to skip speculation when this is null.
-      ga4: null,
+      // GA4 is now populated inline with the other metrics inside metrics_at
+      // (sessions, total_users, new_users, conversions, pageviews — on both
+      // dma30 and dma90 for every anchor). This flag tells the AI whether
+      // to trust those fields or skip them.
+      ga4: (ga4Daily?.length ?? 0) > 0 ? { present: true } : null,
     };
-  }, [chartData, fullSeries, aiContext, range, selectedYears, weekdayOnly, leadLagResults]);
+  }, [chartData, fullSeries, ga4Daily, aiContext, range, selectedYears, weekdayOnly, leadLagResults]);
 
   const handleAIAnalysis = async () => {
     const snapshot = buildAISnapshot();
@@ -684,6 +726,31 @@ export default function DashboardView({
               <DMALineChart title="Close Rate DMA (count)" data={chartData}
                 field30="closeRate" field90="cr90" formatter={fmtPct} showDaily={showDaily} />
             </div>
+
+            {ga4Daily && ga4Daily.length > 0 && (
+              <>
+                <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, marginTop: 8, fontWeight: 600 }}>
+                  Website Traffic (GA4)
+                </h2>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+                  <DMALineChart title="Sessions DMA" data={chartData}
+                    fieldRaw="sessions" field30="sess30" field90="sess90" formatter={fmtNum} showDaily={showDaily} />
+                  <DMALineChart title="Total Users DMA" data={chartData}
+                    fieldRaw="totalUsers" field30="tu30" field90="tu90" formatter={fmtNum} showDaily={showDaily} />
+                </div>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+                  <DMALineChart title="New Users DMA" data={chartData}
+                    fieldRaw="newUsers" field30="nu30" field90="nu90" formatter={fmtNum} showDaily={showDaily} />
+                  <DMALineChart title="Conversions DMA" data={chartData}
+                    fieldRaw="conversions" field30="conv30" field90="conv90" formatter={fmtNum} showDaily={showDaily} />
+                </div>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+                  <DMALineChart title="Pageviews DMA" data={chartData}
+                    fieldRaw="pageviews" field30="pv30" field90="pv90" formatter={fmtNum} showDaily={showDaily} />
+                  <div style={{ flex: '1 1 480px', minWidth: 0 }} />
+                </div>
+              </>
+            )}
           </>
         )}
       </main>

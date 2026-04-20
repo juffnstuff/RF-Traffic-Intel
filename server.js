@@ -26,6 +26,7 @@ const hasNS = !!(process.env.NS_ACCOUNT_ID && process.env.NS_CONSUMER_KEY &&
                   process.env.NS_CONSUMER_SECRET && process.env.NS_TOKEN_ID &&
                   process.env.NS_TOKEN_SECRET);
 const hasAI = !!process.env.ANTHROPIC_API_KEY;
+const hasGA4 = !!(process.env.GA4_PROPERTY_ID && process.env.GOOGLE_CREDENTIALS_JSON);
 
 // ── API Routes ───────────────────────────────────────────────────────
 
@@ -176,7 +177,12 @@ State the 30-vs-90 posture for quote $, orders $, and shipped $ in paragraph 1; 
   - "quotes_to_orders_count" — quote count → order count. Forecasts transaction volume.
   - "quotes_to_orders_dollars" — quote $ → order $. Forecasts revenue. **Use this as the primary forecasting signal in paragraph 3 — revenue is what the user cares about. Mention the count variant only if it disagrees materially.**
   - "orders_to_shipped_count" / "orders_to_shipped_dollars" — same, for orders → ship.
-- "ga4" — website traffic from Google Analytics 4. If present, use it as an upstream leading indicator of quotes (traffic → quotes → orders → ship). If null, acknowledge the source is coming but don't speculate about what it would say.
+- "ga4" — website traffic from Google Analytics 4. When ga4 is not null, the metrics_at snapshots include additional fields on both dma30 and dma90 at every anchor: sessions, total_users, new_users, conversions, pageviews. Use these as the UPSTREAM leading indicator in the funnel (traffic → quotes → orders → ship):
+  * Read the 30-vs-90 posture on sessions / total_users / new_users the same way as every other metric — above means growing traffic, below means cooling.
+  * YoY on sessions is the cleanest "are we growing" signal (controls for seasonality).
+  * If traffic is up but quote $ is flat or down, flag the conversion gap (people visiting but not requesting). If traffic is down but quotes are holding, the existing pipeline is carrying the business.
+  * On the filtered page, when the user has selected SEM campaigns in the filters list, the GA4 metrics you see are already scoped to ONLY those campaigns — treat sessions/conversions as campaign-attributable traffic.
+  If ga4 is null, GA4 isn't connected yet — skip traffic commentary and say so briefly.
 
 RubberForm's known seasonal pattern — the "M curve":
 - January → slow start of the year, climbing off the December low.
@@ -234,7 +240,12 @@ Paragraph 1 — What's happening. The headline on sales and pipeline right now.
 
 Paragraph 2 — Quality of demand. Close rate and capture rate — use the 30-vs-90 posture to describe direction ("capture rate 30 DMA sits above its 90 DMA — improving dollar conversion"), then name the today.dma30 values. Then AOV: state the 30-vs-90 posture for aov_orders and aov_shipped; rising aov with flat count means deals are getting bigger, falling means smaller. Cite today's numbers.
 
-Paragraph 3 — Open-quote conversion likelihood. This is the headline number the user cares about. Use lead_lag.quotes_to_orders_dollars (the $ correlation) as the primary signal: (a) state the expected order $ from the currently-open quote pipeline over the next N days using its best_lag_days (compute with the formulas above); (b) calibrate confidence from r using the scale above, in plain words — "high confidence", "a reasonable guide", "too noisy to forecast reliably"; (c) if quotes_to_orders_count tells a meaningfully different story (e.g. count r is strong but $ r is weak, suggesting deal-size volatility, or vice versa), call that out in one sentence; (d) end with one concrete watchlist item — a metric that's diverging, a lag that's unusually short/long, or a filter combination worth drilling into. If the primary $ r is weak (< 0.4), skip the projected numbers and instead explain what's making the signal unreliable and what the user could do to sharpen it (longer range, fewer filters, more data).
+Paragraph 3 — Open-quote conversion likelihood + upstream traffic signal. This is the forward-looking paragraph.
+- Primary: use lead_lag.quotes_to_orders_dollars to project expected order $ over the next N days (best_lag_days) from the current quote pipeline, using the formulas above. Calibrate confidence from r in plain words — "high confidence", "a reasonable guide", "too noisy to forecast reliably".
+- If quotes_to_orders_count disagrees materially with the $ variant (e.g. count r is strong but $ r is weak, suggesting deal-size volatility), call that out in one sentence.
+- If ga4 is present, add one sentence on traffic's position in the funnel: is sessions 30 DMA > 90 DMA (upstream growth)? has traffic diverged from quotes (a leading-lagging gap)? If the user has filtered to specific SEM campaigns, frame the read as "this campaign's traffic is / isn't feeding the quote pipeline at the normal rate".
+- End with one concrete watchlist item — a diverging metric, an unusual lag, a filter combination worth drilling into.
+- If the primary $ r is weak (< 0.4), skip the projected numbers and instead explain what's making the signal unreliable and what could sharpen it (longer range, fewer filters, more data).
 
 Style rules:
 - 2–3 sentences per paragraph, max.
@@ -316,6 +327,82 @@ app.get('/api/by-part-group', async (req, res) => {
     });
   } catch (e) {
     console.error('by-part-group error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GA4 aggregate daily — for Overview's traffic charts.
+app.get('/api/ga4', async (req, res) => {
+  if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
+  try {
+    const { getGa4Daily, zerofillDaily } = await import('./db.js');
+    let daily = await getGa4Daily();
+    if (!daily || daily.length === 0) {
+      return res.status(404).json({ error: 'No GA4 data yet. Run a GA4 fetch first.' });
+    }
+    daily = zerofillDaily(daily);
+    const { start, end } = req.query;
+    if (start || end) {
+      daily = daily.filter(d => (!start || d.date >= start) && (!end || d.date <= end));
+    }
+    res.json({ generated: new Date().toISOString(), source: 'ga4', daily });
+  } catch (e) {
+    console.error('ga4 error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GA4 per-campaign, optionally filtered to specific campaign names.
+app.get('/api/ga4-by-campaign', async (req, res) => {
+  if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
+  try {
+    const { getGa4DailyFiltered, zerofillDaily } = await import('./db.js');
+    const campaigns = (req.query.campaigns || '').split(',').map(s => s.trim()).filter(Boolean);
+    let daily = await getGa4DailyFiltered({ campaigns });
+    if (!daily || daily.length === 0) {
+      return res.json({ generated: new Date().toISOString(), source: 'ga4', campaigns, daily: [] });
+    }
+    daily = zerofillDaily(daily);
+    const { start, end } = req.query;
+    if (start || end) {
+      daily = daily.filter(d => (!start || d.date >= start) && (!end || d.date <= end));
+    }
+    res.json({ generated: new Date().toISOString(), source: 'ga4', campaigns, daily });
+  } catch (e) {
+    console.error('ga4-by-campaign error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Campaign picker options (for the Filtered tab's campaign chips).
+app.get('/api/ga4-campaigns', async (req, res) => {
+  if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
+  try {
+    const { getGa4CampaignOptions } = await import('./db.js');
+    const campaigns = await getGa4CampaignOptions();
+    res.json({ campaigns });
+  } catch (e) {
+    console.error('ga4-campaigns error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/refresh/ga4', async (req, res) => {
+  if (!hasGA4) return res.status(400).json({ error: 'GA4 credentials not configured' });
+  const mode = req.query.mode || 'incremental';
+  try {
+    console.log(`🔄  Manual GA4 refresh (${mode})...`);
+    const { fetchGa4 } = await import('./fetchers/fetch-ga4.js');
+    let since = null;
+    if (mode !== 'full') {
+      const d = new Date();
+      d.setDate(d.getDate() - 60);
+      since = d.toISOString().slice(0, 10);
+    }
+    const result = await fetchGa4({ since });
+    res.json({ success: true, message: `GA4 ${mode} refresh complete`, ...result });
+  } catch (e) {
+    console.error('GA4 refresh failed:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -421,8 +508,10 @@ function loadFromCache() {
 app.listen(PORT, async () => {
   console.log(`\n🚀  RF Traffic Intelligence Server`);
   console.log(`    http://localhost:${PORT}`);
-  console.log(`    DB: ${hasDB ? 'PostgreSQL connected' : 'not configured (using JSON cache)'}`);
-  console.log(`    NS: ${hasNS ? 'credentials set' : 'not configured'}\n`);
+  console.log(`    DB:   ${hasDB ? 'PostgreSQL connected' : 'not configured (using JSON cache)'}`);
+  console.log(`    NS:   ${hasNS ? 'credentials set' : 'not configured'}`);
+  console.log(`    GA4:  ${hasGA4 ? 'credentials set' : 'not configured'}`);
+  console.log(`    AI:   ${hasAI ? 'Anthropic key set' : 'not configured'}\n`);
 
   // Initialize database
   if (hasDB) {
@@ -444,7 +533,7 @@ app.listen(PORT, async () => {
             console.log(`✅  Backfill complete: ${r.daily.length} days`);
           }
 
-          const { getDimRowCount } = await import('./db.js');
+          const { getDimRowCount, getGa4RowCount } = await import('./db.js');
           const dimCount = await getDimRowCount();
           console.log(`    DB dim rows: ${dimCount}`);
           if (dimCount === 0 && hasNS) {
@@ -452,6 +541,15 @@ app.listen(PORT, async () => {
             const { fetchNetSuiteDim } = await import('./fetchers/fetch-netsuite-dim.js');
             const r = await fetchNetSuiteDim({ since: null });
             console.log(`✅  Dim backfill complete: ${r.rows} rows`);
+          }
+
+          const ga4Count = await getGa4RowCount();
+          console.log(`    DB ga4 rows: ${ga4Count}`);
+          if (ga4Count === 0 && hasGA4) {
+            console.log('📦  GA4 table empty — starting full backfill (2y)...');
+            const { fetchGa4 } = await import('./fetchers/fetch-ga4.js');
+            const r = await fetchGa4({ since: null });
+            console.log(`✅  GA4 backfill complete: ${r.aggregate} agg + ${r.byCampaign} campaign rows`);
           }
         } catch (e) {
           console.error('⚠️  Startup backfill failed:', e.message);
@@ -487,6 +585,11 @@ app.listen(PORT, async () => {
 
         const { fetchNetSuiteDim } = await import('./fetchers/fetch-netsuite-dim.js');
         await fetchNetSuiteDim({ since });
+
+        if (hasGA4) {
+          const { fetchGa4 } = await import('./fetchers/fetch-ga4.js');
+          await fetchGa4({ since });
+        }
 
         console.log('✅  Cron refresh complete');
       } catch (e) {
