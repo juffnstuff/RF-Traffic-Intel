@@ -5,8 +5,7 @@ import {
   BarChart, Bar, Cell, ReferenceLine,
 } from 'recharts';
 import { movingAverage, leadLag, weekdaysOnly } from './utils/analytics';
-
-const RELATIVE_RANGES = { '3m': 90, '6m': 180 };
+import { RELATIVE_RANGES, RangeDropdown, YearsDropdown } from './FilterControls';
 
 function fmtNum(n) {
   if (n == null || Number.isNaN(n)) return '—';
@@ -269,7 +268,7 @@ export default function DashboardView({
 }) {
   const [range, setRange] = useState('6m');
   const [selectedYears, setSelectedYears] = useState([]);
-  const [weekdayOnly, setWeekdayOnly] = useState(true);
+  const [weekdayOnly, setWeekdayOnly] = useState(false);
   const [showDaily, setShowDaily] = useState(false);
   const [aiText, setAiText] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
@@ -396,27 +395,66 @@ export default function DashboardView({
     };
   }, [chartData]);
 
-  // Build the compact JSON snapshot Claude reads. Uses current_30 (latest 30 DMA)
-  // vs prior_30 (30 DMA from 30 rows earlier) so the model can state direction.
+  // Build the compact JSON snapshot Claude reads. Gives explicit anchor points
+  // (today / 30d / 90d / YoY) with both 30 DMA and 90 DMA values so the model
+  // can talk about short-term momentum, quarterly trend, and seasonal YoY
+  // context — and read the 30-vs-90 posture on each metric as growth or
+  // contraction.
   const buildAISnapshot = useCallback(() => {
     if (chartData.length === 0) return null;
     const last = chartData[chartData.length - 1];
-    const prior = chartData[Math.max(0, chartData.length - 31)];
     const sum = (f) => chartData.reduce((s, d) => s + (d[f] || 0), 0);
-    const pick = (row) => ({
-      quote_dollars: row.q30, orders_dollars: row.o30, shipped_dollars: row.s30,
-      quote_count: row.qc30, orders_count: row.oc30, shipped_count: row.sc30,
-      close_rate: row.closeRate, capture_rate: row.captureRate,
-      aov_orders: row.aovO30, aov_shipped: row.aovS30,
+
+    // Snapshot of both DMAs for one row.
+    const snap = (row) => row && ({
+      date: row.date,
+      dma30: {
+        quote_dollars: row.q30, orders_dollars: row.o30, shipped_dollars: row.s30,
+        quote_count: row.qc30, orders_count: row.oc30, shipped_count: row.sc30,
+        close_rate: row.closeRate, capture_rate: row.captureRate,
+        aov_orders: row.aovO30, aov_shipped: row.aovS30,
+      },
+      dma90: {
+        quote_dollars: row.q90, orders_dollars: row.o90, shipped_dollars: row.s90,
+        quote_count: row.qc90, orders_count: row.oc90, shipped_count: row.sc90,
+        close_rate: row.cr90, capture_rate: row.capt90,
+        aov_orders: row.aovO90, aov_shipped: row.aovS90,
+      },
     });
+
+    // Find the row in fullSeries closest to (anchorDate - daysAgo). We search
+    // fullSeries (not chartData) so comparisons reach outside the current
+    // range window — the "year_ago" read only works if we have ≥1 yr history.
+    const findBackFromSeries = (anchorIso, daysAgo) => {
+      if (!fullSeries.length) return null;
+      const target = new Date(anchorIso);
+      target.setDate(target.getDate() - daysAgo);
+      const targetMs = target.getTime();
+      let best = null;
+      let bestDiff = Infinity;
+      for (const row of fullSeries) {
+        const diff = Math.abs(new Date(row.date).getTime() - targetMs);
+        if (diff < bestDiff) { bestDiff = diff; best = row; }
+      }
+      // Require the match to be within ±7 days — otherwise data doesn't reach
+      // back that far and the comparison would be misleading.
+      return bestDiff <= 7 * 86400 * 1000 ? best : null;
+    };
+
     return {
       page: aiContext.page,
       filters: aiContext.filters || null,
       range: selectedYears.length > 0 ? selectedYears.join(',') : range,
       days_visible: chartData.length,
       weekday_only: weekdayOnly,
-      current_30: pick(last),
-      prior_30: pick(prior),
+      // Explicit anchor points — replace the old ambiguous "current_30 vs
+      // prior_30" pair with four clearly-labeled snapshots.
+      metrics_at: {
+        today:            snap(last),
+        thirty_days_ago:  snap(findBackFromSeries(last.date, 30)),
+        ninety_days_ago:  snap(findBackFromSeries(last.date, 90)),
+        year_ago:         snap(findBackFromSeries(last.date, 365)),
+      },
       period_totals: {
         quote_dollars: sum('quotes_total'),
         orders_dollars: sum('orders_total'),
@@ -443,7 +481,7 @@ export default function DashboardView({
       // system prompt tells the model to skip speculation when this is null.
       ga4: null,
     };
-  }, [chartData, aiContext, range, selectedYears, weekdayOnly, leadLagResults]);
+  }, [chartData, fullSeries, aiContext, range, selectedYears, weekdayOnly, leadLagResults]);
 
   const handleAIAnalysis = async () => {
     const snapshot = buildAISnapshot();
@@ -476,32 +514,17 @@ export default function DashboardView({
         <div style={{ color: '#64748b', fontSize: 11 }}>
           {subtitle || <>{sourceLabel} — {chartData.length} days</>}
         </div>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-          {[...Object.keys(RELATIVE_RANGES), 'all'].map(r => {
-            const active = selectedYears.length === 0 && range === r;
-            return (
-              <button key={r} onClick={() => { setSelectedYears([]); setRange(r); }} style={{
-                background: active ? '#f59e0b' : '#334155',
-                color: active ? '#0f172a' : '#e2e8f0',
-                border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
-              }}>{r}</button>
-            );
-          })}
-          <span style={{ width: 1, height: 18, background: '#475569', margin: '0 4px' }} />
-          {availableYears.map(y => {
-            const active = selectedYears.includes(y);
-            return (
-              <button
-                key={y}
-                onClick={() => setSelectedYears(prev => prev.includes(y) ? prev.filter(v => v !== y) : [...prev, y].sort())}
-                style={{
-                  background: active ? '#f59e0b' : '#334155',
-                  color: active ? '#0f172a' : '#e2e8f0',
-                  border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
-                }}
-              >{y}</button>
-            );
-          })}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <RangeDropdown
+            range={range}
+            disabled={selectedYears.length > 0}
+            onChange={r => { setSelectedYears([]); setRange(r); }}
+          />
+          <YearsDropdown
+            selected={selectedYears}
+            available={availableYears}
+            onChange={setSelectedYears}
+          />
           <label style={{ color: '#94a3b8', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, marginLeft: 6 }}>
             <input type="checkbox" checked={weekdayOnly} onChange={e => setWeekdayOnly(e.target.checked)} />
             Weekdays

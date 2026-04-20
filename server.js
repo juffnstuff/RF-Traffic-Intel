@@ -55,12 +55,17 @@ app.get('/api/unified', async (req, res) => {
     let daily;
 
     if (hasDB) {
-      const { getAllDaily } = await import('./db.js');
+      const { getAllDaily, zerofillDaily } = await import('./db.js');
       daily = await getAllDaily();
+      daily = zerofillDaily(daily);
     }
 
     if (!daily || daily.length === 0) {
       daily = loadFromCache();
+      if (daily && daily.length) {
+        const { zerofillDaily } = await import('./db.js');
+        daily = zerofillDaily(daily);
+      }
     }
 
     if (!daily || daily.length === 0) {
@@ -103,16 +108,31 @@ app.get('/api/filters', async (req, res) => {
 app.get('/api/unified-dim', async (req, res) => {
   if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
   try {
-    const { getDailyDimFiltered, getDimRowCount } = await import('./db.js');
+    const { getAllDaily, getDailyDimFiltered, getDimRowCount, zerofillDaily } = await import('./db.js');
     const partGroups = (req.query.partGroups || '').split(',').map(s => s.trim()).filter(Boolean);
     const salesReps  = (req.query.salesReps  || '').split(',').map(s => s.trim()).filter(Boolean);
 
-    const dimCount = await getDimRowCount();
-    if (dimCount === 0) {
-      return res.status(404).json({ error: 'No dim data yet. Run a dim fetch first.' });
+    // When no filter is applied, route to the header-level source so this tab
+    // visually matches Overview. The dim-table aggregation at (date, part_group,
+    // rep, size_bucket) grain has edge cases — cross-group SUMs, line- vs
+    // header-level $ semantics — that surface as divergence from Overview when
+    // unfiltered. Switching to the header source eliminates that for the
+    // no-filter case without breaking filtered slicing.
+    let daily;
+    const unfiltered = partGroups.length === 0 && salesReps.length === 0;
+    if (unfiltered) {
+      daily = await getAllDaily();
+      if (!daily || daily.length === 0) {
+        return res.status(404).json({ error: 'No data yet. Waiting for NetSuite fetch.' });
+      }
+    } else {
+      const dimCount = await getDimRowCount();
+      if (dimCount === 0) {
+        return res.status(404).json({ error: 'No dim data yet. Run a dim fetch first.' });
+      }
+      daily = await getDailyDimFiltered({ partGroups, salesReps });
     }
-
-    let daily = await getDailyDimFiltered({ partGroups, salesReps });
+    daily = zerofillDaily(daily);
 
     const { start, end } = req.query;
     if (start || end) {
@@ -143,11 +163,36 @@ Metric glossary:
 - "close_rate" — 30 DMA of orders_count / quotes_count. A volume-based conversion metric.
 - "capture_rate" — 30 DMA of orders_dollars / adjusted quotes_dollars (excluding quotes marked "RF Alternate Solution" as lost reason). A dollar-weighted conversion metric.
 - "aov_orders" / "aov_shipped" — average order value = dollars / count, on the 30 DMA.
+
+Moving averages — CRITICAL interpretation rule:
+Every chart on the dashboard plots two moving averages: a 30-day (30 DMA) and a 90-day (90 DMA). In the snapshot you receive BOTH values at every anchor point (today, thirty_days_ago, ninety_days_ago, year_ago). The structural relationship between them is the primary read on whether a metric is growing or contracting — do not ignore it.
+  - 30 DMA > 90 DMA ⇒ growth posture. Recent pace is running hotter than the longer-term baseline; the metric is trending up.
+  - 30 DMA < 90 DMA ⇒ contraction posture. Recent pace is cooling relative to the longer-term baseline; the metric is trending down.
+  - 30 DMA ≈ 90 DMA ⇒ flat / inflection; watch for a crossover.
+  - A recent crossover (30 crossing above 90 after being below, or vice versa) is a meaningful trend change and should be called out explicitly. To detect it, compare today's 30-vs-90 with thirty_days_ago's 30-vs-90: if the sign flipped, that's a crossover.
+State the 30-vs-90 posture for quote $, orders $, and shipped $ in paragraph 1; reference it for the ratio metrics (close rate, capture rate) and AOV in paragraph 2. Use the user's own language: "30 DMA running above 90 DMA — growth" or "30 DMA has crossed below 90 DMA — contraction".
+
 - "lead_lag" — Pearson r at the best lag (0–45 days) on the smoothed (30 DMA) series. Four variants:
   - "quotes_to_orders_count" — quote count → order count. Forecasts transaction volume.
   - "quotes_to_orders_dollars" — quote $ → order $. Forecasts revenue. **Use this as the primary forecasting signal in paragraph 3 — revenue is what the user cares about. Mention the count variant only if it disagrees materially.**
   - "orders_to_shipped_count" / "orders_to_shipped_dollars" — same, for orders → ship.
 - "ga4" — website traffic from Google Analytics 4. If present, use it as an upstream leading indicator of quotes (traffic → quotes → orders → ship). If null, acknowledge the source is coming but don't speculate about what it would say.
+
+RubberForm's known seasonal pattern — the "M curve":
+- January → slow start of the year, climbing off the December low.
+- February–May → steady ramp; demand builds through spring.
+- May–July → first peak of the year; typical high-water mark.
+- July–September → slight summer dip between the two peaks.
+- October–November → second peak; late-year push before holidays.
+- December → sharp drop for the holidays; the annual low.
+
+Apply this to every trend read you do:
+- Before labeling a move as "up" or "down" in a narrative sense, check what the seasonal curve would predict for that month-pair and say whether the observed move matches or departs from it.
+- Examples of expected moves (do NOT call these trends): Feb→Mar up, May→Jun plateau, Jul→Aug mild dip, Oct→Nov climb, Nov→Dec sharp drop.
+- Examples of genuine signal worth flagging: Q1 ramp that's flat or weaker than prior years; Oct–Nov that fails to exceed the May–Jul peak; a drop in months where the curve says up.
+- When projecting forward from lead-lag in paragraph 3, temper or amplify the projection by the seasonal direction of the lag-window months (e.g. "on a 14-day lag we're landing in late July — expect the summer dip to pull that number down from the raw projection").
+
+Use "current_date" and "prior_date" in the snapshot to know exactly which months are in play for current_30 vs prior_30. Today's calendar month is "current_date".
 
 How to read "r" as conversion-likelihood confidence:
 - r ≥ 0.7 — strong. History says today's quote DMA reliably predicts order DMA ~N days out. You can talk about the forecast with genuine confidence.
@@ -167,17 +212,27 @@ Snapshot fields:
 - "range" — "3m" / "6m" / "all" / a custom year set like "2024,2025".
 - "days_visible" — number of days in the current view.
 - "weekday_only" — true means weekends are excluded.
-- "current_30" — the latest 30 DMA value for each metric.
-- "prior_30" — the 30 DMA value 30 days earlier.
+- "metrics_at" — four anchor snapshots (each with its own \`date\` + \`dma30\` + \`dma90\` blocks):
+    * "today"            — most recent reading. This is "now" in the narrative.
+    * "thirty_days_ago"  — one month back. Use for short-term momentum (MoM).
+    * "ninety_days_ago"  — one quarter back. Use for medium-term trend (QoQ).
+    * "year_ago"         — ~365 calendar days back. Use for year-over-year seasonal context. MAY BE NULL if we don't have a year of history (e.g. a newly-added part group, or a short visible range). If null, fall back to the other anchors and say so.
+  When discussing a percentage change, state WHICH comparison you're using — never say "prior" generically. Example: "quote $ up 12% YoY" or "quote $ up 4% MoM but flat YoY". YoY is the primary check because it controls for seasonality; MoM and QoQ are pace indicators.
 - "period_totals" — summed raw daily values over the visible range.
 - "lead_lag" — see above.
 - "ga4" — may be null.
 
 Write 3 short paragraphs, plain prose, no headers, no bullets, no markdown:
 
-Paragraph 1 — What's happening. The headline on sales and pipeline right now. Name the 30 DMA figures for quote $ and orders $, and say whether they're up or down vs prior_30 (percent change). If shipped $ differs meaningfully from orders $, mention it. If page=filtered, open by naming the filter set (e.g. "For Speed Bumps across reps Backman and Johnson…").
+Paragraph 1 — What's happening. The headline on sales and pipeline right now.
+- Name the today.dma30 figures for quote $ and orders $.
+- State the 30-vs-90 posture for each: "30 DMA above 90 DMA" = growth, "30 DMA below 90 DMA" = contraction. If a crossover has occurred in the last ~30 days (detect by comparing today's 30-vs-90 sign to thirty_days_ago's 30-vs-90 sign), call it out explicitly — that's a real inflection.
+- Give percent changes explicitly, naming each comparison: "up 18% YoY", "up 6% QoQ", "flat MoM". Lead with YoY when available; if year_ago is null, say so and use QoQ or MoM.
+- Cross-check the MoM / QoQ / YoY moves against the M curve: if the move is what the seasonal pattern would predict, say so ("up 11% MoM — tracking the typical Feb→Mar ramp"); if it departs from the pattern, call that out ("up only 3% MoM — the Feb→Mar ramp is running well below the seasonal norm").
+- If shipped $ diverges meaningfully from orders $ (posture or direction), mention it.
+- If page=filtered, open by naming the filter set (e.g. "For Speed Bumps across reps Backman and Johnson…").
 
-Paragraph 2 — Quality of demand. Close rate and capture rate — which way they're moving and what that implies. Then AOV: rising aov_orders with flat count means deals are getting bigger; falling means smaller. Be specific: cite the current close, capture, and AOV numbers.
+Paragraph 2 — Quality of demand. Close rate and capture rate — use the 30-vs-90 posture to describe direction ("capture rate 30 DMA sits above its 90 DMA — improving dollar conversion"), then name the today.dma30 values. Then AOV: state the 30-vs-90 posture for aov_orders and aov_shipped; rising aov with flat count means deals are getting bigger, falling means smaller. Cite today's numbers.
 
 Paragraph 3 — Open-quote conversion likelihood. This is the headline number the user cares about. Use lead_lag.quotes_to_orders_dollars (the $ correlation) as the primary signal: (a) state the expected order $ from the currently-open quote pipeline over the next N days using its best_lag_days (compute with the formulas above); (b) calibrate confidence from r using the scale above, in plain words — "high confidence", "a reasonable guide", "too noisy to forecast reliably"; (c) if quotes_to_orders_count tells a meaningfully different story (e.g. count r is strong but $ r is weak, suggesting deal-size volatility, or vice versa), call that out in one sentence; (d) end with one concrete watchlist item — a metric that's diverging, a lag that's unusually short/long, or a filter combination worth drilling into. If the primary $ r is weak (< 0.4), skip the projected numbers and instead explain what's making the signal unreliable and what the user could do to sharpen it (longer range, fewer filters, more data).
 
@@ -238,7 +293,7 @@ app.post('/api/interpret', async (req, res) => {
 app.get('/api/by-part-group', async (req, res) => {
   if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
   try {
-    const { getDailyByPartGroup, getDimRowCount, getSizeBucketSummary } = await import('./db.js');
+    const { getDailyByPartGroup, getDimRowCount, getSizeBucketSummary, zerofillDaily } = await import('./db.js');
     const dimCount = await getDimRowCount();
     if (dimCount === 0) {
       return res.status(404).json({ error: 'No dim data yet. Run a dim fetch first.' });
@@ -248,6 +303,11 @@ app.get('/api/by-part-group', async (req, res) => {
       getDailyByPartGroup({ sizeBucket }),
       getSizeBucketSummary(),
     ]);
+    // Zero-fill each group's daily series — otherwise per-group r-values are
+    // computed on business-days-only and the Weekdays toggle is a no-op.
+    for (const g of groups) {
+      g.daily = zerofillDaily(g.daily);
+    }
     res.json({
       generated: new Date().toISOString(),
       sizeBucket,
