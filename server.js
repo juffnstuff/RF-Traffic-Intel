@@ -28,6 +28,24 @@ const hasNS = !!(process.env.NS_ACCOUNT_ID && process.env.NS_CONSUMER_KEY &&
 const hasAI = !!process.env.ANTHROPIC_API_KEY;
 const hasGA4 = !!(process.env.GA4_PROPERTY_ID && process.env.GOOGLE_CREDENTIALS_JSON);
 
+// In-process lock so we don't end up with multiple fetchers hitting NetSuite
+// concurrently. The startup hook and the manual /api/refresh/* endpoints
+// share this set — if 'dim' is already running and the user clicks the
+// Refresh button, the endpoint returns 409 instead of launching a second
+// competing fetcher (which fights for NetSuite's concurrency budget and
+// takes far longer).
+const runningFetches = new Set();
+async function withFetchLock(name, fn) {
+  if (runningFetches.has(name)) {
+    const err = new Error(`A ${name} fetch is already in progress — wait for it to complete.`);
+    err.statusCode = 409;
+    throw err;
+  }
+  runningFetches.add(name);
+  try { return await fn(); }
+  finally { runningFetches.delete(name); }
+}
+
 // ── API Routes ───────────────────────────────────────────────────────
 
 app.get('/api/health', async (req, res) => {
@@ -430,19 +448,21 @@ app.post('/api/refresh/ga4', async (req, res) => {
   if (!hasGA4) return res.status(400).json({ error: 'GA4 credentials not configured' });
   const mode = req.query.mode || 'incremental';
   try {
-    console.log(`🔄  Manual GA4 refresh (${mode})...`);
-    const { fetchGa4 } = await import('./fetchers/fetch-ga4.js');
-    let since = null;
-    if (mode !== 'full') {
-      const d = new Date();
-      d.setDate(d.getDate() - 60);
-      since = d.toISOString().slice(0, 10);
-    }
-    const result = await fetchGa4({ since });
+    const result = await withFetchLock('ga4', async () => {
+      console.log(`🔄  Manual GA4 refresh (${mode})...`);
+      const { fetchGa4 } = await import('./fetchers/fetch-ga4.js');
+      let since = null;
+      if (mode !== 'full') {
+        const d = new Date();
+        d.setDate(d.getDate() - 60);
+        since = d.toISOString().slice(0, 10);
+      }
+      return fetchGa4({ since });
+    });
     res.json({ success: true, message: `GA4 ${mode} refresh complete`, ...result });
   } catch (e) {
     console.error('GA4 refresh failed:', e);
-    res.status(500).json({ error: e.message });
+    res.status(e.statusCode || 500).json({ error: e.message });
   }
 });
 
@@ -450,19 +470,21 @@ app.post('/api/refresh/netsuite-dim', async (req, res) => {
   if (!hasNS) return res.status(400).json({ error: 'NetSuite credentials not configured' });
   const mode = req.query.mode || 'incremental';
   try {
-    console.log(`🔄  Manual dim refresh (${mode})...`);
-    const { fetchNetSuiteDim } = await import('./fetchers/fetch-netsuite-dim.js');
-    let since = null;
-    if (mode !== 'full') {
-      const d = new Date();
-      d.setDate(d.getDate() - 60);
-      since = d.toISOString().slice(0, 10);
-    }
-    const result = await fetchNetSuiteDim({ since });
+    const result = await withFetchLock('netsuite-dim', async () => {
+      console.log(`🔄  Manual dim refresh (${mode})...`);
+      const { fetchNetSuiteDim } = await import('./fetchers/fetch-netsuite-dim.js');
+      let since = null;
+      if (mode !== 'full') {
+        const d = new Date();
+        d.setDate(d.getDate() - 60);
+        since = d.toISOString().slice(0, 10);
+      }
+      return fetchNetSuiteDim({ since });
+    });
     res.json({ success: true, message: `Dim ${mode} refresh complete`, rows: result.rows });
   } catch (e) {
     console.error('Dim refresh failed:', e);
-    res.status(500).json({ error: e.message });
+    res.status(e.statusCode || 500).json({ error: e.message });
   }
 });
 
@@ -478,17 +500,18 @@ app.post('/api/refresh/netsuite', async (req, res) => {
 
   const mode = req.query.mode || 'incremental';
   try {
-    console.log(`🔄  Manual refresh (${mode})...`);
-    const { fetchNetSuite } = await import('./fetchers/fetch-netsuite.js');
+    const result = await withFetchLock('netsuite-header', async () => {
+      console.log(`🔄  Manual refresh (${mode})...`);
+      const { fetchNetSuite } = await import('./fetchers/fetch-netsuite.js');
 
-    let since = null;
-    if (mode !== 'full') {
-      const d = new Date();
-      d.setDate(d.getDate() - 60);
-      since = d.toISOString().slice(0, 10);
-    }
-
-    const result = await fetchNetSuite({ since });
+      let since = null;
+      if (mode !== 'full') {
+        const d = new Date();
+        d.setDate(d.getDate() - 60);
+        since = d.toISOString().slice(0, 10);
+      }
+      return fetchNetSuite({ since });
+    });
     res.json({
       success: true,
       message: `NetSuite ${mode} refresh complete`,
@@ -496,7 +519,7 @@ app.post('/api/refresh/netsuite', async (req, res) => {
     });
   } catch (e) {
     console.error('Refresh failed:', e);
-    res.status(500).json({ error: e.message });
+    res.status(e.statusCode || 500).json({ error: e.message });
   }
 });
 
@@ -566,20 +589,24 @@ app.listen(PORT, async () => {
       (async () => {
         try {
           if (count === 0 && hasNS) {
-            console.log('📦  Database empty — starting full historical backfill...');
-            const { fetchNetSuite } = await import('./fetchers/fetch-netsuite.js');
-            const r = await fetchNetSuite({ since: null });
-            console.log(`✅  Backfill complete: ${r.daily.length} days`);
+            await withFetchLock('netsuite-header', async () => {
+              console.log('📦  Database empty — starting full historical backfill...');
+              const { fetchNetSuite } = await import('./fetchers/fetch-netsuite.js');
+              const r = await fetchNetSuite({ since: null });
+              console.log(`✅  Backfill complete: ${r.daily.length} days`);
+            });
           }
 
           const { getDimRowCount, getGa4RowCount } = await import('./db.js');
           const dimCount = await getDimRowCount();
           console.log(`    DB dim rows: ${dimCount}`);
           if (dimCount === 0 && hasNS) {
-            console.log('📦  Dim table empty — starting line-level backfill...');
-            const { fetchNetSuiteDim } = await import('./fetchers/fetch-netsuite-dim.js');
-            const r = await fetchNetSuiteDim({ since: null });
-            console.log(`✅  Dim backfill complete: ${r.rows} rows`);
+            await withFetchLock('netsuite-dim', async () => {
+              console.log('📦  Dim table empty — starting line-level backfill...');
+              const { fetchNetSuiteDim } = await import('./fetchers/fetch-netsuite-dim.js');
+              const r = await fetchNetSuiteDim({ since: null });
+              console.log(`✅  Dim backfill complete: ${r.rows} rows`);
+            });
           }
 
           const ga4Count = await getGa4RowCount();
@@ -597,10 +624,12 @@ app.listen(PORT, async () => {
             }
           }
           if (needsGa4Fetch && hasGA4) {
-            console.log('📦  GA4 backfill — starting full backfill (2y)...');
-            const { fetchGa4 } = await import('./fetchers/fetch-ga4.js');
-            const r = await fetchGa4({ since: null });
-            console.log(`✅  GA4 backfill complete: ${r.aggregate} agg + ${r.byCampaign} campaign + ${r.byChannel} channel rows`);
+            await withFetchLock('ga4', async () => {
+              console.log('📦  GA4 backfill — starting full backfill (2y)...');
+              const { fetchGa4 } = await import('./fetchers/fetch-ga4.js');
+              const r = await fetchGa4({ since: null });
+              console.log(`✅  GA4 backfill complete: ${r.aggregate} agg + ${r.byCampaign} campaign + ${r.byChannel} channel rows`);
+            });
           }
         } catch (e) {
           console.error('⚠️  Startup backfill failed:', e.message);
