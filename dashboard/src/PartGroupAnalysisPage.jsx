@@ -64,7 +64,7 @@ export default function PartGroupAnalysisPage() {
   const [error, setError] = useState(null);
   const [range, setRange] = useState('6m');
   const [selectedYears, setSelectedYears] = useState([]);
-  const [weekdayOnly, setWeekdayOnly] = useState(true);
+  const [weekdayOnly, setWeekdayOnly] = useState(false);
   const [sort, setSort] = useState({ key: 'total_dollars', dir: 'desc' });
 
   const loadData = useCallback(() => {

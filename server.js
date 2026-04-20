@@ -55,12 +55,17 @@ app.get('/api/unified', async (req, res) => {
     let daily;
 
     if (hasDB) {
-      const { getAllDaily } = await import('./db.js');
+      const { getAllDaily, zerofillDaily } = await import('./db.js');
       daily = await getAllDaily();
+      daily = zerofillDaily(daily);
     }
 
     if (!daily || daily.length === 0) {
       daily = loadFromCache();
+      if (daily && daily.length) {
+        const { zerofillDaily } = await import('./db.js');
+        daily = zerofillDaily(daily);
+      }
     }
 
     if (!daily || daily.length === 0) {
@@ -103,7 +108,7 @@ app.get('/api/filters', async (req, res) => {
 app.get('/api/unified-dim', async (req, res) => {
   if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
   try {
-    const { getDailyDimFiltered, getDimRowCount } = await import('./db.js');
+    const { getDailyDimFiltered, getDimRowCount, zerofillDaily } = await import('./db.js');
     const partGroups = (req.query.partGroups || '').split(',').map(s => s.trim()).filter(Boolean);
     const salesReps  = (req.query.salesReps  || '').split(',').map(s => s.trim()).filter(Boolean);
 
@@ -113,6 +118,7 @@ app.get('/api/unified-dim', async (req, res) => {
     }
 
     let daily = await getDailyDimFiltered({ partGroups, salesReps });
+    daily = zerofillDaily(daily);
 
     const { start, end } = req.query;
     if (start || end) {
@@ -273,7 +279,7 @@ app.post('/api/interpret', async (req, res) => {
 app.get('/api/by-part-group', async (req, res) => {
   if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
   try {
-    const { getDailyByPartGroup, getDimRowCount, getSizeBucketSummary } = await import('./db.js');
+    const { getDailyByPartGroup, getDimRowCount, getSizeBucketSummary, zerofillDaily } = await import('./db.js');
     const dimCount = await getDimRowCount();
     if (dimCount === 0) {
       return res.status(404).json({ error: 'No dim data yet. Run a dim fetch first.' });
@@ -283,6 +289,11 @@ app.get('/api/by-part-group', async (req, res) => {
       getDailyByPartGroup({ sizeBucket }),
       getSizeBucketSummary(),
     ]);
+    // Zero-fill each group's daily series — otherwise per-group r-values are
+    // computed on business-days-only and the Weekdays toggle is a no-op.
+    for (const g of groups) {
+      g.daily = zerofillDaily(g.daily);
+    }
     res.json({
       generated: new Date().toISOString(),
       sizeBucket,

@@ -149,6 +149,38 @@ export async function logFetch(status, rowsUpserted, error) {
   `, [status, rowsUpserted, error]);
 }
 
+/**
+ * Zero-fill missing calendar days in a daily array.
+ *
+ * NetSuite's GROUP BY only produces rows for days with activity, so the DB
+ * has no rows for weekends, holidays, or any zero-activity day. That makes
+ * the dashboard's "30 DMA" effectively a 30-business-day average regardless
+ * of the Weekdays toggle. Zero-filling here gives every consumer a dense
+ * calendar-day series, so rolling averages are proper calendar-day means and
+ * the Weekdays filter does what it says.
+ *
+ * Shape of the zero row is inferred from the first input row: every key
+ * other than `date` is copied with value 0.
+ */
+export function zerofillDaily(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  const sorted = [...rows].sort((a, b) => a.date.localeCompare(b.date));
+  const byDate = new Map(sorted.map(r => [r.date, r]));
+  const zeroShape = Object.fromEntries(
+    Object.keys(sorted[0]).filter(k => k !== 'date').map(k => [k, 0])
+  );
+
+  const filled = [];
+  const cur = new Date(sorted[0].date + 'T00:00:00Z');
+  const end = new Date(sorted[sorted.length - 1].date + 'T00:00:00Z');
+  while (cur <= end) {
+    const iso = cur.toISOString().slice(0, 10);
+    filled.push(byDate.has(iso) ? byDate.get(iso) : { date: iso, ...zeroShape });
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return filled;
+}
+
 // ── Dim (line-level) helpers ─────────────────────────────────────────
 
 export async function upsertDailyDimRows(rows, { replaceSince = null } = {}) {

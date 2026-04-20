@@ -268,7 +268,7 @@ export default function DashboardView({
 }) {
   const [range, setRange] = useState('6m');
   const [selectedYears, setSelectedYears] = useState([]);
-  const [weekdayOnly, setWeekdayOnly] = useState(true);
+  const [weekdayOnly, setWeekdayOnly] = useState(false);
   const [showDaily, setShowDaily] = useState(false);
   const [aiText, setAiText] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
