@@ -108,16 +108,30 @@ app.get('/api/filters', async (req, res) => {
 app.get('/api/unified-dim', async (req, res) => {
   if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
   try {
-    const { getDailyDimFiltered, getDimRowCount, zerofillDaily } = await import('./db.js');
+    const { getAllDaily, getDailyDimFiltered, getDimRowCount, zerofillDaily } = await import('./db.js');
     const partGroups = (req.query.partGroups || '').split(',').map(s => s.trim()).filter(Boolean);
     const salesReps  = (req.query.salesReps  || '').split(',').map(s => s.trim()).filter(Boolean);
 
-    const dimCount = await getDimRowCount();
-    if (dimCount === 0) {
-      return res.status(404).json({ error: 'No dim data yet. Run a dim fetch first.' });
+    // When no filter is applied, route to the header-level source so this tab
+    // visually matches Overview. The dim-table aggregation at (date, part_group,
+    // rep, size_bucket) grain has edge cases — cross-group SUMs, line- vs
+    // header-level $ semantics — that surface as divergence from Overview when
+    // unfiltered. Switching to the header source eliminates that for the
+    // no-filter case without breaking filtered slicing.
+    let daily;
+    const unfiltered = partGroups.length === 0 && salesReps.length === 0;
+    if (unfiltered) {
+      daily = await getAllDaily();
+      if (!daily || daily.length === 0) {
+        return res.status(404).json({ error: 'No data yet. Waiting for NetSuite fetch.' });
+      }
+    } else {
+      const dimCount = await getDimRowCount();
+      if (dimCount === 0) {
+        return res.status(404).json({ error: 'No dim data yet. Run a dim fetch first.' });
+      }
+      daily = await getDailyDimFiltered({ partGroups, salesReps });
     }
-
-    let daily = await getDailyDimFiltered({ partGroups, salesReps });
     daily = zerofillDaily(daily);
 
     const { start, end } = req.query;
