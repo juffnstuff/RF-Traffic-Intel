@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { movingAverage, leadLag, weekdaysOnly } from './utils/analytics';
+import { movingAverage, leadLag, leadLagDetrended, weekdaysOnly } from './utils/analytics';
 import { RELATIVE_RANGES, RangeDropdown, YearsDropdown, useLocalStorageState, clearAllFilters } from './FilterControls';
 
 const MIN_DAYS_FOR_R = 60;  // hide a row's r if it has fewer days than this
@@ -122,13 +122,22 @@ export default function PartGroupAnalysisPage() {
       const orders_d = slice.map(d => d.orders_total || 0);
       const shipped_d = slice.map(d => d.shipped_total || 0);
 
-      // Smooth before correlating — same approach as the main dashboard.
+      // Smooth before correlating — same approach as the main dashboard. We
+      // compute BOTH 30 DMA and 90 DMA so we can use the detrended lead-lag
+      // (30 DMA minus 90 DMA) — same fix as DashboardView to avoid
+      // trend-alignment artifacts on part groups with strong trends.
       const qc30 = movingAverage(quotes, 30);
+      const qc90 = movingAverage(quotes, 90);
       const oc30 = movingAverage(orders, 30);
+      const oc90 = movingAverage(orders, 90);
       const sc30 = movingAverage(shipped, 30);
+      const sc90 = movingAverage(shipped, 90);
       const q30  = movingAverage(quotes_d, 30);
+      const q90  = movingAverage(quotes_d, 90);
       const o30  = movingAverage(orders_d, 30);
+      const o90  = movingAverage(orders_d, 90);
       const s30  = movingAverage(shipped_d, 30);
+      const s90  = movingAverage(shipped_d, 90);
 
       const enough = days >= MIN_DAYS_FOR_R;
       const totals = {
@@ -143,10 +152,10 @@ export default function PartGroupAnalysisPage() {
         days,
         total_dollars: totals.quotes_total,
         period_orders_dollars: totals.orders_total,
-        qto_count:    enough ? leadLag(qc30, oc30) : null,
-        qto_dollars:  enough ? leadLag(q30,  o30)  : null,
-        ots_count:    enough ? leadLag(oc30, sc30) : null,
-        ots_dollars:  enough ? leadLag(o30,  s30)  : null,
+        qto_count:    enough ? leadLagDetrended(qc30, qc90, oc30, oc90) : null,
+        qto_dollars:  enough ? leadLagDetrended(q30,  q90,  o30,  o90)  : null,
+        ots_count:    enough ? leadLagDetrended(oc30, oc90, sc30, sc90) : null,
+        ots_dollars:  enough ? leadLagDetrended(o30,  o90,  s30,  s90)  : null,
       };
     });
   }, [groups, range, selectedYears, weekdayOnly]);
@@ -281,9 +290,10 @@ export default function PartGroupAnalysisPage() {
             {sizeBucket && <span style={{ color: '#f59e0b', marginLeft: 6 }}>· {sizeBucket}</span>}
           </div>
           <div style={{ color: '#94a3b8', fontSize: 11, lineHeight: 1.5 }}>
-            Each row is one part group, computed independently on its own 30 DMA-smoothed series.
-            "Lag" is the day-offset where the correlation peaks; "r" is the correlation strength
-            at that lag. <span style={{ color: '#22c55e' }}>●</span> = strong (≥0.7),
+            Each row is one part group, computed independently on its own <em>detrended</em> momentum series
+            (30 DMA minus 90 DMA) to avoid trend-alignment artifacts. "Lag" is the day-offset where the
+            correlation peaks; "r" is the correlation strength at that lag.
+            <span style={{ color: '#22c55e' }}> ●</span> = strong (≥0.7),
             <span style={{ color: '#fbbf24' }}> ●</span> = moderate (0.4–0.7),
             <span style={{ color: '#94a3b8' }}> ●</span> = weak/noisy (&lt;0.4).
             Rows with fewer than {MIN_DAYS_FOR_R} days of activity show "—" because r isn't reliable on small samples.

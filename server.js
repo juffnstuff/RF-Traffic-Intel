@@ -173,10 +173,11 @@ Every chart on the dashboard plots two moving averages: a 30-day (30 DMA) and a 
   - A recent crossover (30 crossing above 90 after being below, or vice versa) is a meaningful trend change and should be called out explicitly. To detect it, compare today's 30-vs-90 with thirty_days_ago's 30-vs-90: if the sign flipped, that's a crossover.
 State the 30-vs-90 posture for quote $, orders $, and shipped $ in paragraph 1; reference it for the ratio metrics (close rate, capture rate) and AOV in paragraph 2. Use the user's own language: "30 DMA running above 90 DMA — growth" or "30 DMA has crossed below 90 DMA — contraction".
 
-- "lead_lag" — Pearson r at the best lag (0–45 days) on the smoothed (30 DMA) series. Four variants:
+- "lead_lag" — Pearson r at the best lag (0–45 days) on DETRENDED momentum: (30 DMA − 90 DMA). This removes slow trends (anything with period > 90 days) and captures short-term co-movement — the "is A speeding up or slowing down relative to its own baseline at the same time as B" signal. A high r here is a real lead-lag relationship, not just two series that happen to trend in the same direction. Variants:
   - "quotes_to_orders_count" — quote count → order count. Forecasts transaction volume.
   - "quotes_to_orders_dollars" — quote $ → order $. Forecasts revenue. **Use this as the primary forecasting signal in paragraph 3 — revenue is what the user cares about. Mention the count variant only if it disagrees materially.**
   - "orders_to_shipped_count" / "orders_to_shipped_dollars" — same, for orders → ship.
+  - "sessions_to_quotes_count" / "sessions_to_quotes_dollars" / "conversions_to_quotes_count" — when GA4 is present. These are the upstream-funnel leading indicators (web activity → quote requests). Expect short lags (typically under 21 days); a best lag at the scan boundary (0 or 45) still deserves suspicion even with detrending.
 - "ga4" — website traffic from Google Analytics 4. When ga4 is not null, the metrics_at snapshots include additional fields on both dma30 and dma90 at every anchor: sessions, total_users, new_users, conversions, pageviews. Use these as the UPSTREAM leading indicator in the funnel (traffic → quotes → orders → ship):
   * Read the 30-vs-90 posture on sessions / total_users / new_users the same way as every other metric — above means growing traffic, below means cooling.
   * YoY on sessions is the cleanest "are we growing" signal (controls for seasonality).

@@ -80,6 +80,27 @@ export function leadLag(leading, lagging, maxLag = 45) {
 }
 
 /**
+ * Lead-lag correlation on DETRENDED series. Subtracting the 90 DMA from the
+ * 30 DMA removes slow-moving trends (longer than the 90-day baseline) while
+ * preserving the 30–90 day oscillations where real lead-lag relationships
+ * actually live.
+ *
+ * Without detrending, Pearson on raw 30-DMA series measures trend alignment
+ * rather than short-term co-movement — two series with opposing long-term
+ * trends produce strong inverse r at pretty much every lag, and the algorithm
+ * reports the scan boundary as the "best" lag. That's the "all bars red,
+ * best lag = 45d" pattern. This variant eliminates that artifact.
+ */
+export function leadLagDetrended(leading30, leading90, lagging30, lagging90, maxLag = 45) {
+  const detrend = (short, long) =>
+    short.map((v, i) => {
+      const w = long[i];
+      return (v == null || w == null) ? null : v - w;
+    });
+  return leadLag(detrend(leading30, leading90), detrend(lagging30, lagging90), maxLag);
+}
+
+/**
  * Filter daily rows to weekdays only.
  */
 export function weekdaysOnly(daily) {

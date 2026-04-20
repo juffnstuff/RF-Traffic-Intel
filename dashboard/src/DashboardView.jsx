@@ -4,7 +4,7 @@ import {
   Tooltip, Legend, CartesianGrid,
   BarChart, Bar, Cell, ReferenceLine,
 } from 'recharts';
-import { movingAverage, leadLag, weekdaysOnly } from './utils/analytics';
+import { movingAverage, leadLag, leadLagDetrended, weekdaysOnly } from './utils/analytics';
 import { RELATIVE_RANGES, RangeDropdown, YearsDropdown, useLocalStorageState, clearAllFilters } from './FilterControls';
 
 function fmtNum(n) {
@@ -408,24 +408,24 @@ export default function DashboardView({
 
   const leadLagResults = useMemo(() => {
     if (chartData.length < 30) return {};
-    // Correlate the 30-DMA-smoothed series rather than raw daily — far less
-    // noise, more stable best-lag across views, and matches what the user
-    // sees on the line charts. Pearson skips null pairs so leading-window
-    // nulls (before the MA fills) don't pollute the result.
-    const qc30 = chartData.map(d => d.qc30);
-    const oc30 = chartData.map(d => d.oc30);
-    const sc30 = chartData.map(d => d.sc30);
-    const q30  = chartData.map(d => d.q30);
-    const o30  = chartData.map(d => d.o30);
-    const s30  = chartData.map(d => d.s30);
+    // Correlate 30-DMA MINUS 90-DMA (detrended) so long-term opposing trends
+    // don't produce artifactual inverse-at-every-lag readings. This reveals
+    // the real short-term co-movement that lead-lag analysis is for.
+    const pluck = (f30, f90) => [chartData.map(d => d[f30]), chartData.map(d => d[f90])];
+    const [qc30, qc90] = pluck('qc30', 'qc90');
+    const [oc30, oc90] = pluck('oc30', 'oc90');
+    const [sc30, sc90] = pluck('sc30', 'sc90');
+    const [q30,  q90]  = pluck('q30',  'q90');
+    const [o30,  o90]  = pluck('o30',  'o90');
+    const [s30,  s90]  = pluck('s30',  's90');
 
     const out = {
       // Count-based — "how many transactions" predicts "how many transactions"
-      quotesToOrdersCount:  leadLag(qc30, oc30),
-      ordersToShippedCount: leadLag(oc30, sc30),
+      quotesToOrdersCount:  leadLagDetrended(qc30, qc90, oc30, oc90),
+      ordersToShippedCount: leadLagDetrended(oc30, oc90, sc30, sc90),
       // Dollar-based — "how much $" predicts "how much $" (revenue forecasting)
-      quotesToOrdersDollars:  leadLag(q30, o30),
-      ordersToShippedDollars: leadLag(o30, s30),
+      quotesToOrdersDollars:  leadLagDetrended(q30, q90, o30, o90),
+      ordersToShippedDollars: leadLagDetrended(o30, o90, s30, s90),
     };
 
     // Traffic → Quotes — only when GA4 is populated. This is the funnel
@@ -433,11 +433,11 @@ export default function DashboardView({
     // by how many days?
     const hasGa4 = (ga4Daily?.length ?? 0) > 0;
     if (hasGa4) {
-      const sess30 = chartData.map(d => d.sess30);
-      const conv30 = chartData.map(d => d.conv30);
-      out.sessionsToQuotesCount  = leadLag(sess30, qc30);
-      out.sessionsToQuotesDollars = leadLag(sess30, q30);
-      out.conversionsToQuotesCount = leadLag(conv30, qc30);
+      const [sess30, sess90] = pluck('sess30', 'sess90');
+      const [conv30, conv90] = pluck('conv30', 'conv90');
+      out.sessionsToQuotesCount   = leadLagDetrended(sess30, sess90, qc30, qc90);
+      out.sessionsToQuotesDollars = leadLagDetrended(sess30, sess90, q30,  q90);
+      out.conversionsToQuotesCount = leadLagDetrended(conv30, conv90, qc30, qc90);
     }
 
     return out;
@@ -705,8 +705,8 @@ export default function DashboardView({
             </h2>
             <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
               How many days of delay give the tightest predictive link between the two series.
-              Computed on the 30 DMA — same lines you see on the dollar/count charts above.
-              Count r forecasts transaction volume; $ r forecasts revenue.
+              Computed on <em>detrended</em> momentum (30 DMA minus 90 DMA) so opposing long-term trends don't
+              produce fake inverse correlations. Count r forecasts transaction volume; $ r forecasts revenue.
             </div>
 
             {leadLagResults.sessionsToQuotesCount && (
