@@ -43,6 +43,7 @@ function num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 
 const DATE_DIM       = { name: 'date' };
 const CAMPAIGN_DIM   = { name: 'sessionCampaignName' };
+const CHANNEL_DIM    = { name: 'sessionDefaultChannelGroup' };
 
 const METRICS_AGG = [
   { name: 'sessions' },
@@ -148,16 +149,45 @@ export async function fetchGa4({ since = null } = {}) {
   }).filter(r => r.date);
   console.log(`    ${campRows.length} campaign-day rows`);
 
-  // ── 3. Persist ───────────────────────────────────────────────────────
+  // ── 3. Per-channel daily (organic / paid / direct / referral / etc.) ──
+  console.log('  → daily by channel...');
+  const [chanResp] = await client.runReport({
+    property: `properties/${propertyId}`,
+    dateRanges: [{ startDate, endDate }],
+    dimensions: [DATE_DIM, CHANNEL_DIM],
+    metrics: METRICS_CAMPAIGN,
+    orderBys: [{ dimension: { dimensionName: 'date' } }],
+    limit: 250000,
+  });
+  const chanRows = (chanResp.rows || []).map(r => {
+    const date = parseGa4Date(r.dimensionValues?.[0]?.value);
+    const channel = r.dimensionValues?.[1]?.value ?? '';
+    const m = r.metricValues || [];
+    return {
+      date,
+      channel,
+      sessions:          num(m[0]?.value),
+      total_users:       num(m[1]?.value),
+      new_users:         num(m[2]?.value),
+      engaged_sessions:  num(m[3]?.value),
+      screen_page_views: num(m[4]?.value),
+      conversions:       num(m[5]?.value),
+      total_revenue:     num(m[6]?.value),
+    };
+  }).filter(r => r.date);
+  console.log(`    ${chanRows.length} channel-day rows`);
+
+  // ── 4. Persist ───────────────────────────────────────────────────────
   if (process.env.DATABASE_URL) {
-    const { upsertGa4Daily, upsertGa4DailyByCampaign } = await import('../db.js');
-    const aggInserted = await upsertGa4Daily(aggRows, { replaceSince: since });
+    const { upsertGa4Daily, upsertGa4DailyByCampaign, upsertGa4DailyByChannel } = await import('../db.js');
+    const aggInserted  = await upsertGa4Daily(aggRows, { replaceSince: since });
     const campInserted = await upsertGa4DailyByCampaign(campRows, { replaceSince: since });
-    console.log(`✅  Upserted ${aggInserted} aggregate + ${campInserted} campaign rows into PostgreSQL`);
-    return { aggregate: aggInserted, byCampaign: campInserted };
+    const chanInserted = await upsertGa4DailyByChannel(chanRows, { replaceSince: since });
+    console.log(`✅  Upserted ${aggInserted} aggregate + ${campInserted} campaign + ${chanInserted} channel rows into PostgreSQL`);
+    return { aggregate: aggInserted, byCampaign: campInserted, byChannel: chanInserted };
   } else {
     console.log('⚠️  DATABASE_URL not set — GA4 data not persisted');
-    return { aggregate: aggRows.length, byCampaign: campRows.length };
+    return { aggregate: aggRows.length, byCampaign: campRows.length, byChannel: chanRows.length };
   }
 }
 

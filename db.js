@@ -49,25 +49,32 @@ export async function initDB() {
     )
   `);
 
-  // Auto-migrate: if the dim table exists without the size_bucket column, drop
-  // it so the new schema gets created below. An empty dim table triggers an
-  // auto-backfill on startup (see server.js), so the user doesn't have to do
-  // anything manual — the first post-deploy load repopulates with buckets.
+  // Auto-migrate: if the dim table exists without the size_bucket or is_first
+  // columns, drop it so the new schema gets created below. An empty dim table
+  // triggers an auto-backfill on startup (see server.js), so the user doesn't
+  // have to do anything manual — the first post-deploy load repopulates with
+  // the current schema.
   const tableCheck = await p.query(`SELECT to_regclass('netsuite_daily_dim') as t`);
   if (tableCheck.rows[0].t) {
     const colCheck = await p.query(`
-      SELECT 1 FROM information_schema.columns
-      WHERE table_name = 'netsuite_daily_dim' AND column_name = 'size_bucket'
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'netsuite_daily_dim'
+        AND column_name IN ('size_bucket', 'is_first')
     `);
-    if (colCheck.rows.length === 0) {
-      console.log('⚠️  Migrating netsuite_daily_dim → adding size_bucket dimension (will trigger refetch)');
+    const present = new Set(colCheck.rows.map(r => r.column_name));
+    if (!present.has('size_bucket') || !present.has('is_first')) {
+      console.log('⚠️  Migrating netsuite_daily_dim — dropping for schema update (triggers refetch)');
       await p.query(`DROP TABLE netsuite_daily_dim`);
     }
   }
 
-  // Line-level aggregation by (date, trantype, part_group, salesrep, size_bucket)
-  // trantype values: 'quote', 'quote_adj', 'order', 'shipped'
-  // size_bucket values: 'Under $5K', '$5K-$25K', '$25K-$100K', '$100K+'
+  // Line-level aggregation by (date, trantype, part_group, salesrep, size_bucket, is_first)
+  //   trantype:    'quote', 'quote_adj', 'order', 'shipped'
+  //   size_bucket: 'Under $5K', '$5K-$25K', '$25K-$100K', '$100K+'
+  //   is_first:    'Y' when the transaction was flagged as the customer's first
+  //                 (custbody_rf_firstquote for quotes, custbody_rf_firstorder
+  //                 for orders/shipped); 'N' otherwise. Lets the dashboard split
+  //                 net-new business from repeat business.
   await p.query(`
     CREATE TABLE IF NOT EXISTS netsuite_daily_dim (
       date DATE NOT NULL,
@@ -76,16 +83,18 @@ export async function initDB() {
       salesrep_id TEXT NOT NULL DEFAULT '',
       salesrep_name TEXT,
       size_bucket TEXT NOT NULL DEFAULT 'Under $5K',
+      is_first CHAR(1) NOT NULL DEFAULT 'N',
       txn_count INTEGER DEFAULT 0,
       line_total NUMERIC(15,2) DEFAULT 0,
       updated_at TIMESTAMPTZ DEFAULT NOW(),
-      PRIMARY KEY (date, trantype, part_group, salesrep_id, size_bucket)
+      PRIMARY KEY (date, trantype, part_group, salesrep_id, size_bucket, is_first)
     )
   `);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_date ON netsuite_daily_dim(date)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_partgroup ON netsuite_daily_dim(part_group)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_salesrep ON netsuite_daily_dim(salesrep_id)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_size ON netsuite_daily_dim(size_bucket)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_first ON netsuite_daily_dim(is_first)`);
 
   // GA4 aggregate daily — one row per date, whole-account totals.
   await p.query(`
@@ -123,6 +132,28 @@ export async function initDB() {
   `);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_campaign_date ON ga4_daily_by_campaign(date)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_campaign_name ON ga4_daily_by_campaign(campaign_name)`);
+
+  // GA4 daily traffic dimensioned by sessionDefaultChannelGroup. Lets the
+  // dashboard split organic / paid / direct / referral / social / etc. —
+  // each channel typically has very different conversion behavior, so
+  // aggregating them together obscures the real funnel signal.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS ga4_daily_by_channel (
+      date DATE NOT NULL,
+      channel TEXT NOT NULL,
+      sessions INTEGER DEFAULT 0,
+      total_users INTEGER DEFAULT 0,
+      new_users INTEGER DEFAULT 0,
+      engaged_sessions INTEGER DEFAULT 0,
+      screen_page_views INTEGER DEFAULT 0,
+      conversions INTEGER DEFAULT 0,
+      total_revenue NUMERIC(15,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, channel)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_channel_date ON ga4_daily_by_channel(date)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_channel_name ON ga4_daily_by_channel(channel)`);
 
   console.log('✅  Database tables ready');
 }
@@ -232,9 +263,9 @@ export async function upsertDailyDimRows(rows, { replaceSince = null } = {}) {
     for (const r of rows) {
       await client.query(`
         INSERT INTO netsuite_daily_dim
-          (date, trantype, part_group, salesrep_id, salesrep_name, size_bucket, txn_count, line_total, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-        ON CONFLICT (date, trantype, part_group, salesrep_id, size_bucket) DO UPDATE SET
+          (date, trantype, part_group, salesrep_id, salesrep_name, size_bucket, is_first, txn_count, line_total, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        ON CONFLICT (date, trantype, part_group, salesrep_id, size_bucket, is_first) DO UPDATE SET
           salesrep_name = EXCLUDED.salesrep_name,
           txn_count     = EXCLUDED.txn_count,
           line_total    = EXCLUDED.line_total,
@@ -245,6 +276,7 @@ export async function upsertDailyDimRows(rows, { replaceSince = null } = {}) {
         r.salesrep_id ?? '',
         r.salesrep_name ?? null,
         r.size_bucket ?? 'Under $5K',
+        r.is_first ?? 'N',
         r.txn_count ?? 0,
         r.line_total ?? 0,
       ]);
@@ -300,7 +332,7 @@ export const SIZE_BUCKETS = ['Under $5K', '$5K-$25K', '$25K-$100K', '$100K+'];
  * independently. Rolls up across sales reps within each part group.
  * Optional sizeBucket filter narrows to one size-band.
  */
-export async function getDailyByPartGroup({ sizeBucket } = {}) {
+export async function getDailyByPartGroup({ sizeBucket, customerType = 'all' } = {}) {
   const p = getPool();
   const where = [`part_group <> ''`];
   const params = [];
@@ -308,6 +340,8 @@ export async function getDailyByPartGroup({ sizeBucket } = {}) {
     params.push(sizeBucket);
     where.push(`size_bucket = $${params.length}`);
   }
+  if (customerType === 'new')    where.push(`is_first = 'Y'`);
+  if (customerType === 'repeat') where.push(`is_first = 'N'`);
   const sql = `
     SELECT
       part_group,
@@ -361,9 +395,13 @@ export async function getSizeBucketSummary() {
 
 /**
  * Return daily rows (same shape as getAllDaily) aggregated from the dim table
- * with optional filters on part_group and salesrep_id (arrays).
+ * with optional filters on part_group, salesrep_id, and customerType.
+ *
+ * customerType: 'all' | 'new' | 'repeat'  (defaults to 'all')
+ *   'new'    → only rows where is_first = 'Y' (customer's first quote/order)
+ *   'repeat' → only rows where is_first = 'N' (existing-customer activity)
  */
-export async function getDailyDimFiltered({ partGroups = [], salesReps = [] } = {}) {
+export async function getDailyDimFiltered({ partGroups = [], salesReps = [], customerType = 'all' } = {}) {
   const p = getPool();
   const where = [];
   const params = [];
@@ -375,6 +413,8 @@ export async function getDailyDimFiltered({ partGroups = [], salesReps = [] } = 
     params.push(salesReps.map(String));
     where.push(`salesrep_id = ANY($${params.length})`);
   }
+  if (customerType === 'new')    where.push(`is_first = 'Y'`);
+  if (customerType === 'repeat') where.push(`is_first = 'N'`);
   const whereSQL = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
   const sql = `
@@ -563,4 +603,94 @@ export async function getGa4RowCount() {
   const p = getPool();
   const { rows } = await p.query('SELECT COUNT(*) as cnt FROM ga4_daily');
   return parseInt(rows[0].cnt, 10);
+}
+
+// ── GA4 by-channel helpers ──────────────────────────────────────────
+
+export async function upsertGa4DailyByChannel(rows, { replaceSince = null } = {}) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    if (replaceSince) {
+      await client.query(`DELETE FROM ga4_daily_by_channel WHERE date >= $1`, [replaceSince]);
+    }
+    let upserted = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO ga4_daily_by_channel
+          (date, channel, sessions, total_users, new_users, engaged_sessions,
+           screen_page_views, conversions, total_revenue, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        ON CONFLICT (date, channel) DO UPDATE SET
+          sessions = EXCLUDED.sessions,
+          total_users = EXCLUDED.total_users,
+          new_users = EXCLUDED.new_users,
+          engaged_sessions = EXCLUDED.engaged_sessions,
+          screen_page_views = EXCLUDED.screen_page_views,
+          conversions = EXCLUDED.conversions,
+          total_revenue = EXCLUDED.total_revenue,
+          updated_at = NOW()
+      `, [
+        r.date, r.channel,
+        r.sessions ?? 0, r.total_users ?? 0, r.new_users ?? 0,
+        r.engaged_sessions ?? 0, r.screen_page_views ?? 0,
+        r.conversions ?? 0, r.total_revenue ?? 0,
+      ]);
+      upserted++;
+    }
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getGa4DailyByChannel({ channels = [] } = {}) {
+  const p = getPool();
+  const where = [];
+  const params = [];
+  if (channels.length > 0) {
+    params.push(channels);
+    where.push(`channel = ANY($${params.length})`);
+  }
+  const whereSQL = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  const { rows } = await p.query(`
+    SELECT
+      date::text,
+      SUM(sessions)::int          as sessions,
+      SUM(total_users)::int       as total_users,
+      SUM(new_users)::int         as new_users,
+      SUM(engaged_sessions)::int  as engaged_sessions,
+      SUM(screen_page_views)::int as screen_page_views,
+      SUM(conversions)::int       as conversions,
+      SUM(total_revenue)::float   as total_revenue
+    FROM ga4_daily_by_channel
+    ${whereSQL}
+    GROUP BY date
+    ORDER BY date ASC
+  `, params);
+  return rows;
+}
+
+export async function getGa4ChannelOptions() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT channel,
+      SUM(sessions)::int as sessions,
+      SUM(conversions)::int as conversions
+    FROM ga4_daily_by_channel
+    WHERE channel <> ''
+    GROUP BY channel
+    ORDER BY sessions DESC
+  `);
+  return rows.map(r => ({
+    value: r.channel,
+    sessions: r.sessions,
+    conversions: r.conversions,
+  }));
 }

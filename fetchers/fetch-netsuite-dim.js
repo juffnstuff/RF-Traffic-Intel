@@ -160,8 +160,19 @@ const SIZE_BUCKET_CASE = `CASE
     ELSE '$100K+'
   END`;
 
+// "Is this the customer's first quote / order?" flags custbody_rf_firstquote
+// (estimates) and custbody_rf_firstorder (sales orders + shipped SOs).
+// Returns 'Y' or 'N'. Unset / NULL treated as 'N'.
+function firstFlagCase(trantype) {
+  const field = (trantype === 'quote' || trantype === 'quote_adj')
+    ? 'custbody_rf_firstquote'
+    : 'custbody_rf_firstorder'; // order + shipped both key off the SO's first-order flag
+  return `CASE WHEN t.${field} = 'T' THEN 'Y' ELSE 'N' END`;
+}
+
 async function runDimQuery({ recordType, dateCol, extraWhere = '', since, trantype }) {
   const dateFilter = buildFilter(since, dateCol);
+  const firstCase = firstFlagCase(trantype);
   // Line amounts on sales-side transactions are stored negative in NetSuite's
   // credit-natural convention; negate so the dashboard shows positive $.
   const sql = `
@@ -171,6 +182,7 @@ async function runDimQuery({ recordType, dateCol, extraWhere = '', since, tranty
       COALESCE(TO_CHAR(t.employee), '') as salesrep_id,
       BUILTIN.DF(t.employee) as salesrep_name,
       ${SIZE_BUCKET_CASE} as size_bucket,
+      ${firstCase} as is_first,
       COUNT(DISTINCT t.id) as txn_cnt,
       -SUM(tl.foreignamount) as line_total
     FROM transaction t
@@ -179,7 +191,7 @@ async function runDimQuery({ recordType, dateCol, extraWhere = '', since, tranty
       ${baseLineConditions()}
       ${extraWhere}
       ${dateFilter}
-    GROUP BY ${dateCol}, BUILTIN.DF(i.custitem1), t.employee, BUILTIN.DF(t.employee), ${SIZE_BUCKET_CASE}
+    GROUP BY ${dateCol}, BUILTIN.DF(i.custitem1), t.employee, BUILTIN.DF(t.employee), ${SIZE_BUCKET_CASE}, ${firstCase}
   `.trim();
 
   console.log(`  → ${trantype}...`);
@@ -193,6 +205,7 @@ async function runDimQuery({ recordType, dateCol, extraWhere = '', since, tranty
     salesrep_id: r.salesrep_id ?? r.SALESREP_ID ?? '',
     salesrep_name: r.salesrep_name ?? r.SALESREP_NAME ?? null,
     size_bucket: r.size_bucket ?? r.SIZE_BUCKET ?? 'Under $5K',
+    is_first: r.is_first ?? r.IS_FIRST ?? 'N',
     txn_count: Number(r.txn_cnt ?? r.TXN_CNT) || 0,
     line_total: Number(r.line_total ?? r.LINE_TOTAL) || 0,
   })).filter(r => r.date);

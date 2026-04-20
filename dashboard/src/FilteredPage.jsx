@@ -41,11 +41,14 @@ function MultiSelectChips({ label, options, selected, onToggle, onClear, emptyHi
 export default function FilteredPage() {
   const [filterOptions, setFilterOptions] = useState({ partGroups: [], salesReps: [] });
   const [ga4Campaigns, setGa4Campaigns] = useState([]);
+  const [ga4Channels, setGa4Channels] = useState([]);
 
   // Filter state persists across tab switches and page reloads.
   const [selectedPartGroups, setSelectedPartGroups] = useLocalStorageState('filter.partGroups', []);
   const [selectedSalesReps, setSelectedSalesReps]   = useLocalStorageState('filter.salesReps', []);
   const [selectedCampaigns, setSelectedCampaigns]   = useLocalStorageState('filter.campaigns', []);
+  const [selectedChannels, setSelectedChannels]     = useLocalStorageState('filter.channels', []);
+  const [customerType, setCustomerType]             = useLocalStorageState('filter.customerType', 'all');  // 'all' | 'new' | 'repeat'
 
   const [data, setData] = useState(null);
   const [ga4, setGa4] = useState(null);
@@ -62,6 +65,10 @@ export default function FilteredPage() {
       .then(r => r.ok ? r.json() : null)
       .then(j => setGa4Campaigns(j?.campaigns || []))
       .catch(() => setGa4Campaigns([]));
+    fetch('/api/ga4-channels')
+      .then(r => r.ok ? r.json() : null)
+      .then(j => setGa4Channels(j?.channels || []))
+      .catch(() => setGa4Channels([]));
   }, []);
 
   const loadData = useCallback(() => {
@@ -69,11 +76,19 @@ export default function FilteredPage() {
     const params = new URLSearchParams();
     if (selectedPartGroups.length) params.set('partGroups', selectedPartGroups.join(','));
     if (selectedSalesReps.length) params.set('salesReps', selectedSalesReps.join(','));
+    if (customerType !== 'all') params.set('customerType', customerType);
     const qs = params.toString();
 
-    const ga4Url = selectedCampaigns.length
-      ? `/api/ga4-by-campaign?campaigns=${encodeURIComponent(selectedCampaigns.join(','))}`
-      : `/api/ga4`;
+    // GA4 precedence: campaign filter wins over channel filter (campaigns are
+    // more specific); fall back to aggregate when neither is active.
+    let ga4Url;
+    if (selectedCampaigns.length) {
+      ga4Url = `/api/ga4-by-campaign?campaigns=${encodeURIComponent(selectedCampaigns.join(','))}`;
+    } else if (selectedChannels.length) {
+      ga4Url = `/api/ga4-by-channel?channels=${encodeURIComponent(selectedChannels.join(','))}`;
+    } else {
+      ga4Url = `/api/ga4`;
+    }
 
     Promise.all([
       fetch(`/api/unified-dim${qs ? '?' + qs : ''}`).then(r => { if (!r.ok) throw new Error(`API ${r.status}`); return r.json(); }),
@@ -86,7 +101,7 @@ export default function FilteredPage() {
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }, [selectedPartGroups, selectedSalesReps, selectedCampaigns]);
+  }, [selectedPartGroups, selectedSalesReps, selectedCampaigns, selectedChannels, customerType]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -116,6 +131,8 @@ export default function FilteredPage() {
     setSelectedPartGroups([]);
     setSelectedSalesReps([]);
     setSelectedCampaigns([]);
+    setSelectedChannels([]);
+    setCustomerType('all');
     // DashboardView.clearAllFilters already wipes localStorage; its Clear
     // button resets the time-range state internally.
   };
@@ -151,9 +168,53 @@ export default function FilteredPage() {
           keyField="value" nameField="value" countField="sessions"
           emptyHint="No active GA4 campaigns in the last 30 days."
         />
+        <MultiSelectDropdown
+          label="Traffic Channel"
+          options={ga4Channels}
+          selected={selectedChannels}
+          onChange={setSelectedChannels}
+          keyField="value" nameField="value" countField="sessions"
+          emptyHint="No GA4 channels yet — waiting for GA4 fetch."
+        />
+
+        {/* Customer Type — segmented control. 'new' isolates first-time
+            quote/order activity (custbody_rf_firstquote / firstorder), so
+            repeat business doesn't wash out the GA4→quote leading signal. */}
+        <div style={{ display: 'inline-flex', background: '#334155', borderRadius: 4, overflow: 'hidden', border: '1px solid #475569' }}>
+          <span style={{ color: '#94a3b8', fontSize: 11, padding: '4px 10px', borderRight: '1px solid #475569', alignSelf: 'center' }}>
+            Customer
+          </span>
+          {[
+            { key: 'all', label: 'All' },
+            { key: 'new', label: 'New only' },
+            { key: 'repeat', label: 'Repeat' },
+          ].map(opt => {
+            const active = customerType === opt.key;
+            return (
+              <button
+                key={opt.key}
+                onClick={() => setCustomerType(opt.key)}
+                title={
+                  opt.key === 'new'    ? 'First quote or first order per customer (custbody_rf_firstquote/firstorder)' :
+                  opt.key === 'repeat' ? 'Existing-customer activity (not flagged first)' :
+                                          'All activity'
+                }
+                style={{
+                  background: active ? '#f59e0b' : 'transparent',
+                  color: active ? '#0f172a' : '#e2e8f0',
+                  border: 'none', padding: '4px 10px', cursor: 'pointer',
+                  fontSize: 12, fontWeight: 600,
+                  borderLeft: '1px solid #475569',
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
       </div>
     </div>
-  ), [filterOptions, ga4Campaigns, selectedPartGroups, selectedSalesReps, selectedCampaigns]);
+  ), [filterOptions, ga4Campaigns, ga4Channels, selectedPartGroups, selectedSalesReps, selectedCampaigns, selectedChannels, customerType]);
 
   if (loading && !data) {
     return <div style={{ padding: 'clamp(16px, 4vw, 40px)', color: '#94a3b8' }}>Loading filtered data...</div>;
@@ -176,9 +237,11 @@ export default function FilteredPage() {
   }
 
   const summary =
+    `${customerType === 'all' ? 'all customers' : customerType === 'new' ? 'new customers only' : 'repeat only'} · ` +
     `${selectedPartGroups.length || 'all'} part groups · ` +
     `${selectedSalesReps.length || 'all'} reps · ` +
-    `${selectedCampaigns.length || 'all'} campaigns`;
+    `${selectedCampaigns.length || 'all'} campaigns · ` +
+    `${selectedChannels.length || 'all'} channels`;
 
   return (
     <DashboardView
@@ -193,12 +256,14 @@ export default function FilteredPage() {
       aiContext={{
         page: 'filtered',
         filters: {
+          customer_type: customerType,    // 'all' | 'new' | 'repeat'
           part_groups: selectedPartGroups,
           sales_reps: selectedSalesReps.map(id => {
             const rep = filterOptions.salesReps.find(r => String(r.id) === String(id));
             return rep ? { id, name: rep.name } : { id };
           }),
           campaigns: selectedCampaigns,
+          channels: selectedChannels,
         },
       }}
     />

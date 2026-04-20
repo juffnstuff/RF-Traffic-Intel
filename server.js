@@ -110,17 +110,16 @@ app.get('/api/unified-dim', async (req, res) => {
   if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
   try {
     const { getAllDaily, getDailyDimFiltered, getDimRowCount, zerofillDaily } = await import('./db.js');
-    const partGroups = (req.query.partGroups || '').split(',').map(s => s.trim()).filter(Boolean);
-    const salesReps  = (req.query.salesReps  || '').split(',').map(s => s.trim()).filter(Boolean);
+    const partGroups   = (req.query.partGroups || '').split(',').map(s => s.trim()).filter(Boolean);
+    const salesReps    = (req.query.salesReps  || '').split(',').map(s => s.trim()).filter(Boolean);
+    const customerType = ['new', 'repeat'].includes(req.query.customerType) ? req.query.customerType : 'all';
 
-    // When no filter is applied, route to the header-level source so this tab
-    // visually matches Overview. The dim-table aggregation at (date, part_group,
-    // rep, size_bucket) grain has edge cases — cross-group SUMs, line- vs
-    // header-level $ semantics — that surface as divergence from Overview when
-    // unfiltered. Switching to the header source eliminates that for the
-    // no-filter case without breaking filtered slicing.
+    // When no filter is applied (including customerType=all), route to the
+    // header-level source so this tab visually matches Overview. The dim-table
+    // aggregation at (date, part_group, rep, size_bucket, is_first) grain has
+    // edge cases that surface as divergence from Overview when unfiltered.
     let daily;
-    const unfiltered = partGroups.length === 0 && salesReps.length === 0;
+    const unfiltered = partGroups.length === 0 && salesReps.length === 0 && customerType === 'all';
     if (unfiltered) {
       daily = await getAllDaily();
       if (!daily || daily.length === 0) {
@@ -131,7 +130,7 @@ app.get('/api/unified-dim', async (req, res) => {
       if (dimCount === 0) {
         return res.status(404).json({ error: 'No dim data yet. Run a dim fetch first.' });
       }
-      daily = await getDailyDimFiltered({ partGroups, salesReps });
+      daily = await getDailyDimFiltered({ partGroups, salesReps, customerType });
     }
     daily = zerofillDaily(daily);
 
@@ -178,6 +177,10 @@ State the 30-vs-90 posture for quote $, orders $, and shipped $ in paragraph 1; 
   - "quotes_to_orders_dollars" — quote $ → order $. Forecasts revenue. **Use this as the primary forecasting signal in paragraph 3 — revenue is what the user cares about. Mention the count variant only if it disagrees materially.**
   - "orders_to_shipped_count" / "orders_to_shipped_dollars" — same, for orders → ship.
   - "sessions_to_quotes_count" / "sessions_to_quotes_dollars" / "conversions_to_quotes_count" — when GA4 is present. These are the upstream-funnel leading indicators (web activity → quote requests). Expect short lags (typically under 21 days); a best lag at the scan boundary (0 or 45) still deserves suspicion even with detrending.
+
+  **Boundary-lag caveat:** whenever a pair's best_lag_days is ≤ 1 or ≥ 40, treat the r value as unreliable for forecasting regardless of magnitude. Best lag at the scan edge usually means the real relationship is outside the 0–45 day scan range, or the two series have a cycle roughly matching the window length. Call this out in paragraph 3 and avoid projecting a specific number from that pair; recommend a longer range or a channel / customer-type split.
+
+When the filters.customer_type is 'new' on the filtered page, the user is isolating first-time quote / first-time order activity (via NetSuite's custbody_rf_firstquote / custbody_rf_firstorder flags). This is the most meaningful view for GA4→quote analysis because repeat customers typically don't come through search / ads. When analyzing a 'new' view, the Sessions→Quotes r should be taken more seriously — and if it's still weak, the most common next step is to split by Traffic Channel (filters.channels) to see which channel(s) actually drive new-customer quotes.
 - "ga4" — website traffic from Google Analytics 4. When ga4 is not null, the metrics_at snapshots include additional fields on both dma30 and dma90 at every anchor: sessions, total_users, new_users, conversions, pageviews. Use these as the UPSTREAM leading indicator in the funnel (traffic → quotes → orders → ship):
   * Read the 30-vs-90 posture on sessions / total_users / new_users the same way as every other metric — above means growing traffic, below means cooling.
   * YoY on sessions is the cleanest "are we growing" signal (controls for seasonality).
@@ -310,9 +313,10 @@ app.get('/api/by-part-group', async (req, res) => {
     if (dimCount === 0) {
       return res.status(404).json({ error: 'No dim data yet. Run a dim fetch first.' });
     }
-    const sizeBucket = (req.query.sizeBucket || '').trim() || null;
+    const sizeBucket   = (req.query.sizeBucket || '').trim() || null;
+    const customerType = ['new', 'repeat'].includes(req.query.customerType) ? req.query.customerType : 'all';
     const [groups, sizeBuckets] = await Promise.all([
-      getDailyByPartGroup({ sizeBucket }),
+      getDailyByPartGroup({ sizeBucket, customerType }),
       getSizeBucketSummary(),
     ]);
     // Zero-fill each group's daily series — otherwise per-group r-values are
@@ -384,6 +388,40 @@ app.get('/api/ga4-campaigns', async (req, res) => {
     res.json({ campaigns });
   } catch (e) {
     console.error('ga4-campaigns error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GA4 per-channel, optionally filtered to specific channel groupings.
+app.get('/api/ga4-by-channel', async (req, res) => {
+  if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
+  try {
+    const { getGa4DailyByChannel, zerofillDaily } = await import('./db.js');
+    const channels = (req.query.channels || '').split(',').map(s => s.trim()).filter(Boolean);
+    let daily = await getGa4DailyByChannel({ channels });
+    if (!daily || daily.length === 0) {
+      return res.json({ generated: new Date().toISOString(), source: 'ga4', channels, daily: [] });
+    }
+    daily = zerofillDaily(daily);
+    const { start, end } = req.query;
+    if (start || end) {
+      daily = daily.filter(d => (!start || d.date >= start) && (!end || d.date <= end));
+    }
+    res.json({ generated: new Date().toISOString(), source: 'ga4', channels, daily });
+  } catch (e) {
+    console.error('ga4-by-channel error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/ga4-channels', async (req, res) => {
+  if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
+  try {
+    const { getGa4ChannelOptions } = await import('./db.js');
+    const channels = await getGa4ChannelOptions();
+    res.json({ channels });
+  } catch (e) {
+    console.error('ga4-channels error:', e);
     res.status(500).json({ error: e.message });
   }
 });

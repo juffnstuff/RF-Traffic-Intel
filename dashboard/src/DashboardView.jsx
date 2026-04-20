@@ -174,16 +174,27 @@ function LeadLagCard({ title, subtitle, result }) {
   if (!result) return null;
   const { bestLag, bestR, correlations } = result;
   const absR = Math.abs(bestR);
+  const maxLag = correlations.length - 1;
 
   // Confidence scale matches the AI analysis prompt — keep these in sync.
   const strength = absR >= 0.7 ? 'Strong' : absR >= 0.4 ? 'Moderate' : 'Weak';
   const strengthColor = absR >= 0.7 ? '#22c55e' : absR >= 0.4 ? '#fbbf24' : '#94a3b8';
   const inverse = bestR < 0;
-  const confidenceBlurb = absR >= 0.7
-    ? 'Reliable forecast signal.'
-    : absR >= 0.4
-    ? 'Reasonable guide — treat projections as a range.'
-    : 'Too noisy to forecast — try a longer range or fewer filters.';
+
+  // Boundary flag: best lag pinned to 0 or the scan maximum is a strong hint
+  // that the real relationship is outside our scan range, or that the series
+  // have a cycle close to the window length. Even moderate/strong r values
+  // with best-lag at the edge shouldn't be treated as reliable forecasts.
+  const atBoundary = absR >= 0.4 && (bestLag <= 1 || bestLag >= maxLag - 4);
+
+  const confidenceBlurb = atBoundary
+    ? '⚠ Best lag at scan edge — may be a cycle mismatch or a relationship longer than 45d. Not a reliable forecast; try a different range or channel split.'
+    : absR >= 0.7
+      ? 'Reliable forecast signal.'
+      : absR >= 0.4
+        ? 'Reasonable guide — treat projections as a range.'
+        : 'Too noisy to forecast — try a longer range or fewer filters.';
+  const blurbColor = atBoundary ? '#fbbf24' : '#94a3b8';
 
   const data = correlations.map((r, lag) => ({ lag, r: +r.toFixed(3) }));
 
@@ -204,7 +215,7 @@ function LeadLagCard({ title, subtitle, result }) {
         </div>
       </div>
 
-      <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 2, marginBottom: 6 }}>
+      <div style={{ color: blurbColor, fontSize: 11, marginTop: 2, marginBottom: 6 }}>
         {confidenceBlurb}
       </div>
 
