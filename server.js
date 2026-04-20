@@ -584,11 +584,23 @@ app.listen(PORT, async () => {
 
           const ga4Count = await getGa4RowCount();
           console.log(`    DB ga4 rows: ${ga4Count}`);
-          if (ga4Count === 0 && hasGA4) {
-            console.log('📦  GA4 table empty — starting full backfill (2y)...');
+
+          // Trigger a full GA4 fetch when either the aggregate table OR the
+          // newer channel/campaign tables are empty — the fetcher writes all
+          // three per run so a single call catches up any missing table.
+          let needsGa4Fetch = ga4Count === 0;
+          if (!needsGa4Fetch) {
+            const { rows } = await (await import('./db.js')).getPool().query(`SELECT COUNT(*)::int as cnt FROM ga4_daily_by_channel`);
+            if (rows[0].cnt === 0) {
+              console.log('📦  GA4 by-channel table empty — refreshing full GA4 history to populate it...');
+              needsGa4Fetch = true;
+            }
+          }
+          if (needsGa4Fetch && hasGA4) {
+            console.log('📦  GA4 backfill — starting full backfill (2y)...');
             const { fetchGa4 } = await import('./fetchers/fetch-ga4.js');
             const r = await fetchGa4({ since: null });
-            console.log(`✅  GA4 backfill complete: ${r.aggregate} agg + ${r.byCampaign} campaign rows`);
+            console.log(`✅  GA4 backfill complete: ${r.aggregate} agg + ${r.byCampaign} campaign + ${r.byChannel} channel rows`);
           }
         } catch (e) {
           console.error('⚠️  Startup backfill failed:', e.message);
