@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { movingAverage, leadLag, weekdaysOnly } from './utils/analytics';
-import { RELATIVE_RANGES, RangeDropdown, YearsDropdown } from './FilterControls';
+import { RELATIVE_RANGES, RangeDropdown, YearsDropdown, useLocalStorageState, clearAllFilters } from './FilterControls';
 
 const MIN_DAYS_FOR_R = 60;  // hide a row's r if it has fewer days than this
 
@@ -58,14 +58,16 @@ function HeaderCell({ label, sortKey, currentSort, onSort, align = 'left', tip }
 
 export default function PartGroupAnalysisPage() {
   const [groups, setGroups] = useState(null);
-  const [sizeBuckets, setSizeBuckets] = useState([]);  // [{bucket, quote_count, quote_total}]
-  const [sizeBucket, setSizeBucket] = useState(null);  // null = "All sizes"
+  const [sizeBuckets, setSizeBuckets] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [range, setRange] = useState('6m');
-  const [selectedYears, setSelectedYears] = useState([]);
-  const [weekdayOnly, setWeekdayOnly] = useState(false);
-  const [sort, setSort] = useState({ key: 'total_dollars', dir: 'desc' });
+
+  // Persist across tab switches + page reloads.
+  const [sizeBucket, setSizeBucket]       = useLocalStorageState('pgR.sizeBucket', null);
+  const [range, setRange]                 = useLocalStorageState('range', '6m');
+  const [selectedYears, setSelectedYears] = useLocalStorageState('years', []);
+  const [weekdayOnly, setWeekdayOnly]     = useLocalStorageState('weekdayOnly', false);
+  const [sort, setSort]                   = useLocalStorageState('pgR.sort', { key: 'total_dollars', dir: 'desc' });
 
   const loadData = useCallback(() => {
     setLoading(true);
@@ -209,6 +211,23 @@ export default function PartGroupAnalysisPage() {
             <input type="checkbox" checked={weekdayOnly} onChange={e => setWeekdayOnly(e.target.checked)} />
             Weekdays
           </label>
+          {(sizeBucket !== null || selectedYears.length > 0 || range !== '6m' || weekdayOnly) && (
+            <button
+              onClick={() => {
+                setSizeBucket(null);
+                setSelectedYears([]);
+                setRange('6m');
+                setWeekdayOnly(false);
+                clearAllFilters();
+              }}
+              style={{
+                background: '#7f1d1d', color: '#fecaca', border: 'none', borderRadius: 4,
+                padding: '4px 10px', fontSize: 11, cursor: 'pointer', fontWeight: 600, marginLeft: 6,
+              }}
+            >
+              Clear all filters
+            </button>
+          )}
         </div>
       </div>
 

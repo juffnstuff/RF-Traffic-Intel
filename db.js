@@ -529,7 +529,14 @@ export async function getGa4DailyFiltered({ campaigns = [] } = {}) {
   return rows;
 }
 
-export async function getGa4CampaignOptions() {
+/**
+ * Campaign options for the filter dropdown.
+ *
+ * Returns only campaigns that had at least one session in the last 30 days.
+ * That filters paused / retired PPC campaigns so the dropdown stays focused
+ * on what's currently running.
+ */
+export async function getGa4CampaignOptions({ activeDays = 30 } = {}) {
   const p = getPool();
   const { rows } = await p.query(`
     SELECT campaign_name,
@@ -541,8 +548,9 @@ export async function getGa4CampaignOptions() {
       AND campaign_name <> '(not set)'
       AND campaign_name <> '(direct)'
     GROUP BY campaign_name
+    HAVING MAX(date) >= CURRENT_DATE - ($1::int || ' days')::interval
     ORDER BY sessions DESC
-  `);
+  `, [activeDays]);
   return rows.map(r => ({
     value: r.campaign_name,
     sessions: r.sessions,

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import DashboardView from './DashboardView';
+import { MultiSelectDropdown, useLocalStorageState, clearAllFilters } from './FilterControls';
 
 function MultiSelectChips({ label, options, selected, onToggle, onClear, emptyHint, keyField = 'value', nameField = 'value' }) {
   const selectedSet = new Set(selected);
@@ -40,9 +41,12 @@ function MultiSelectChips({ label, options, selected, onToggle, onClear, emptyHi
 export default function FilteredPage() {
   const [filterOptions, setFilterOptions] = useState({ partGroups: [], salesReps: [] });
   const [ga4Campaigns, setGa4Campaigns] = useState([]);
-  const [selectedPartGroups, setSelectedPartGroups] = useState([]);
-  const [selectedSalesReps, setSelectedSalesReps] = useState([]);
-  const [selectedCampaigns, setSelectedCampaigns] = useState([]);
+
+  // Filter state persists across tab switches and page reloads.
+  const [selectedPartGroups, setSelectedPartGroups] = useLocalStorageState('filter.partGroups', []);
+  const [selectedSalesReps, setSelectedSalesReps]   = useLocalStorageState('filter.salesReps', []);
+  const [selectedCampaigns, setSelectedCampaigns]   = useLocalStorageState('filter.campaigns', []);
+
   const [data, setData] = useState(null);
   const [ga4, setGa4] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -54,7 +58,6 @@ export default function FilteredPage() {
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`API ${r.status}`)))
       .then(setFilterOptions)
       .catch(e => console.error('filter options load failed:', e));
-    // GA4 campaigns — optional, silent fail if GA4 isn't wired yet.
     fetch('/api/ga4-campaigns')
       .then(r => r.ok ? r.json() : null)
       .then(j => setGa4Campaigns(j?.campaigns || []))
@@ -68,13 +71,8 @@ export default function FilteredPage() {
     if (selectedSalesReps.length) params.set('salesReps', selectedSalesReps.join(','));
     const qs = params.toString();
 
-    // If any campaign is selected, pull GA4 filtered to those campaigns;
-    // otherwise pull aggregate GA4 so the Traffic charts still render.
-    const ga4Qs = selectedCampaigns.length
-      ? '?campaigns=' + encodeURIComponent(selectedCampaigns.join(','))
-      : '';
     const ga4Url = selectedCampaigns.length
-      ? `/api/ga4-by-campaign${ga4Qs}`
+      ? `/api/ga4-by-campaign?campaigns=${encodeURIComponent(selectedCampaigns.join(','))}`
       : `/api/ga4`;
 
     Promise.all([
@@ -114,7 +112,16 @@ export default function FilteredPage() {
     }
   };
 
-  const toggle = (setter) => (val) => setter(prev => prev.includes(val) ? prev.filter(v => v !== val) : [...prev, val]);
+  const handleClearFilters = () => {
+    setSelectedPartGroups([]);
+    setSelectedSalesReps([]);
+    setSelectedCampaigns([]);
+    // DashboardView.clearAllFilters already wipes localStorage; its Clear
+    // button resets the time-range state internally.
+  };
+
+  const toggle = (setter) => (val) =>
+    setter(prev => prev.includes(val) ? prev.filter(v => v !== val) : [...prev, val]);
 
   const filterPanel = useMemo(() => (
     <div style={{ padding: '14px clamp(12px, 4vw, 32px)', borderBottom: '1px solid #1e293b', background: '#0b1220' }}>
@@ -127,24 +134,24 @@ export default function FilteredPage() {
         emptyHint="No part groups yet — run a dim fetch."
         keyField="value" nameField="value"
       />
-      <MultiSelectChips
-        label="Sales Rep"
-        options={filterOptions.salesReps}
-        selected={selectedSalesReps}
-        onToggle={toggle(setSelectedSalesReps)}
-        onClear={() => setSelectedSalesReps([])}
-        emptyHint="No sales reps yet — run a dim fetch."
-        keyField="id" nameField="name"
-      />
-      <MultiSelectChips
-        label="SEM Campaign (GA4)"
-        options={ga4Campaigns}
-        selected={selectedCampaigns}
-        onToggle={toggle(setSelectedCampaigns)}
-        onClear={() => setSelectedCampaigns([])}
-        emptyHint="No GA4 campaigns yet — waiting for GA4 fetch."
-        keyField="value" nameField="value"
-      />
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginTop: 4 }}>
+        <MultiSelectDropdown
+          label="Sales Rep"
+          options={filterOptions.salesReps}
+          selected={selectedSalesReps}
+          onChange={setSelectedSalesReps}
+          keyField="id" nameField="name"
+          emptyHint="No sales reps yet — run a dim fetch."
+        />
+        <MultiSelectDropdown
+          label="SEM Campaign"
+          options={ga4Campaigns}
+          selected={selectedCampaigns}
+          onChange={setSelectedCampaigns}
+          keyField="value" nameField="value" countField="sessions"
+          emptyHint="No active GA4 campaigns in the last 30 days."
+        />
+      </div>
     </div>
   ), [filterOptions, ga4Campaigns, selectedPartGroups, selectedSalesReps, selectedCampaigns]);
 
@@ -182,6 +189,7 @@ export default function FilteredPage() {
       onRefresh={handleRefresh}
       refreshing={refreshing}
       sourceLabel="netsuite-dim"
+      onClearFilters={handleClearFilters}
       aiContext={{
         page: 'filtered',
         filters: {

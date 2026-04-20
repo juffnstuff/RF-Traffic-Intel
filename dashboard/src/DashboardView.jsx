@@ -5,7 +5,7 @@ import {
   BarChart, Bar, Cell, ReferenceLine,
 } from 'recharts';
 import { movingAverage, leadLag, weekdaysOnly } from './utils/analytics';
-import { RELATIVE_RANGES, RangeDropdown, YearsDropdown } from './FilterControls';
+import { RELATIVE_RANGES, RangeDropdown, YearsDropdown, useLocalStorageState, clearAllFilters } from './FilterControls';
 
 function fmtNum(n) {
   if (n == null || Number.isNaN(n)) return '—';
@@ -266,11 +266,14 @@ export default function DashboardView({
   refreshing = false,
   sourceLabel = '',
   aiContext = { page: 'overview' },   // { page, filters? } — metadata for the interpret call
+  onClearFilters,                      // optional — parent callback for additional state to clear
 }) {
-  const [range, setRange] = useState('6m');
-  const [selectedYears, setSelectedYears] = useState([]);
-  const [weekdayOnly, setWeekdayOnly] = useState(false);
-  const [showDaily, setShowDaily] = useState(false);
+  // Shared time-filter state persists across tabs and page reloads so
+  // switching tabs or refreshing the browser doesn't clear the user's view.
+  const [range, setRange] = useLocalStorageState('range', '6m');
+  const [selectedYears, setSelectedYears] = useLocalStorageState('years', []);
+  const [weekdayOnly, setWeekdayOnly] = useLocalStorageState('weekdayOnly', false);
+  const [showDaily, setShowDaily] = useLocalStorageState('showDaily', false);
   const [aiText, setAiText] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState(null);
@@ -415,7 +418,8 @@ export default function DashboardView({
     const q30  = chartData.map(d => d.q30);
     const o30  = chartData.map(d => d.o30);
     const s30  = chartData.map(d => d.s30);
-    return {
+
+    const out = {
       // Count-based — "how many transactions" predicts "how many transactions"
       quotesToOrdersCount:  leadLag(qc30, oc30),
       ordersToShippedCount: leadLag(oc30, sc30),
@@ -423,7 +427,21 @@ export default function DashboardView({
       quotesToOrdersDollars:  leadLag(q30, o30),
       ordersToShippedDollars: leadLag(o30, s30),
     };
-  }, [chartData]);
+
+    // Traffic → Quotes — only when GA4 is populated. This is the funnel
+    // upstream read: does web traffic reliably precede quote activity, and
+    // by how many days?
+    const hasGa4 = (ga4Daily?.length ?? 0) > 0;
+    if (hasGa4) {
+      const sess30 = chartData.map(d => d.sess30);
+      const conv30 = chartData.map(d => d.conv30);
+      out.sessionsToQuotesCount  = leadLag(sess30, qc30);
+      out.sessionsToQuotesDollars = leadLag(sess30, q30);
+      out.conversionsToQuotesCount = leadLag(conv30, qc30);
+    }
+
+    return out;
+  }, [chartData, ga4Daily]);
 
   // Build the compact JSON snapshot Claude reads. Gives explicit anchor points
   // (today / 30d / 90d / YoY) with both 30 DMA and 90 DMA values so the model
@@ -516,6 +534,15 @@ export default function DashboardView({
         orders_to_shipped_dollars: leadLagResults.ordersToShippedDollars
           ? { best_lag_days: leadLagResults.ordersToShippedDollars.bestLag, r: +leadLagResults.ordersToShippedDollars.bestR.toFixed(3) }
           : null,
+        sessions_to_quotes_count: leadLagResults.sessionsToQuotesCount
+          ? { best_lag_days: leadLagResults.sessionsToQuotesCount.bestLag, r: +leadLagResults.sessionsToQuotesCount.bestR.toFixed(3) }
+          : null,
+        sessions_to_quotes_dollars: leadLagResults.sessionsToQuotesDollars
+          ? { best_lag_days: leadLagResults.sessionsToQuotesDollars.bestLag, r: +leadLagResults.sessionsToQuotesDollars.bestR.toFixed(3) }
+          : null,
+        conversions_to_quotes_count: leadLagResults.conversionsToQuotesCount
+          ? { best_lag_days: leadLagResults.conversionsToQuotesCount.bestLag, r: +leadLagResults.conversionsToQuotesCount.bestR.toFixed(3) }
+          : null,
       } : null,
       // GA4 is now populated inline with the other metrics inside metrics_at
       // (sessions, total_users, new_users, conversions, pageviews — on both
@@ -581,6 +608,25 @@ export default function DashboardView({
           }}>
             {aiLoading ? 'Analyzing...' : '✨ AI Analysis'}
           </button>
+          {(range !== '6m' || selectedYears.length > 0 || weekdayOnly || showDaily || onClearFilters) && (
+            <button
+              onClick={() => {
+                setRange('6m');
+                setSelectedYears([]);
+                setWeekdayOnly(false);
+                setShowDaily(false);
+                clearAllFilters();
+                if (onClearFilters) onClearFilters();
+              }}
+              title="Reset time range, year toggles, weekday filter, and any parent filters"
+              style={{
+                background: '#7f1d1d', color: '#fecaca', border: 'none', borderRadius: 4,
+                padding: '5px 12px', cursor: 'pointer', fontSize: 11, fontWeight: 600,
+              }}
+            >
+              Clear filters
+            </button>
+          )}
           {onRefresh && (
             <>
               <button onClick={() => onRefresh('incremental')} disabled={refreshing} style={{
@@ -661,6 +707,35 @@ export default function DashboardView({
               How many days of delay give the tightest predictive link between the two series.
               Computed on the 30 DMA — same lines you see on the dollar/count charts above.
               Count r forecasts transaction volume; $ r forecasts revenue.
+            </div>
+
+            {leadLagResults.sessionsToQuotesCount && (
+              <>
+                <div style={{ fontSize: 11, color: '#a78bfa', marginBottom: 8, fontWeight: 600, letterSpacing: 0.3 }}>
+                  UPSTREAM — web traffic as a leading indicator of quotes
+                </div>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+                  <LeadLagCard
+                    title="Sessions → Quotes (count)"
+                    subtitle="How many days web sessions typically lead quote count"
+                    result={leadLagResults.sessionsToQuotesCount}
+                  />
+                  <LeadLagCard
+                    title="Sessions → Quotes ($)"
+                    subtitle="How many days web sessions typically lead quote $"
+                    result={leadLagResults.sessionsToQuotesDollars}
+                  />
+                  <LeadLagCard
+                    title="Conversions → Quotes (count)"
+                    subtitle="How many days GA4 conversions typically lead quote count"
+                    result={leadLagResults.conversionsToQuotesCount}
+                  />
+                </div>
+              </>
+            )}
+
+            <div style={{ fontSize: 11, color: '#a78bfa', marginBottom: 8, fontWeight: 600, letterSpacing: 0.3 }}>
+              PIPELINE — transaction flow
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
               <LeadLagCard
