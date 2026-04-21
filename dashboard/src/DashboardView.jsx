@@ -75,18 +75,8 @@ const LINE_COLORS = {
   ma90: '#a78bfa',
 };
 
-function DMALineChart({
-  title, data, field30, field90, fieldRaw, formatter = fmtNum, currentValue, showDaily = true,
-  activeDate, onHoverDate,
-}) {
+function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmtNum, currentValue, showDaily = true }) {
   const latest30 = data.length > 0 ? data[data.length - 1]?.[field30] : null;
-
-  // When a date is active (user hovering any chart on the page), swap the
-  // headline number to the value at that date so the user can read every
-  // chart's reading at a single point in time.
-  const activeRow = activeDate ? data.find(d => d.date === activeDate) : null;
-  const displayValue = activeRow ? activeRow[field30] : (currentValue ?? latest30);
-  const displayLabel = activeRow ? `on ${fmtAxisDate(activeDate)}` : '30 DMA';
 
   // One tick per month-start date in the visible data. If the view spans many
   // months, thin so labels don't collide (~18 ticks max for a typical tile).
@@ -113,22 +103,13 @@ function DMALineChart({
         <div>
           <div style={{ color: '#cbd5e1', fontSize: 11 }}>{title}</div>
           <div style={{ color: '#f8fafc', fontSize: 22, fontWeight: 700 }}>
-            {formatter(displayValue)}
-            <span style={{ fontSize: 11, color: activeRow ? '#fbbf24' : '#94a3b8', marginLeft: 6 }}>
-              {displayLabel}
-            </span>
+            {formatter(currentValue ?? latest30)}
+            <span style={{ fontSize: 11, color: '#94a3b8', marginLeft: 6 }}>30 DMA</span>
           </div>
         </div>
       </div>
       <ResponsiveContainer width="100%" height={220}>
-        <LineChart
-          data={data}
-          margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
-          onMouseMove={(state) => {
-            if (state?.activeLabel && onHoverDate) onHoverDate(state.activeLabel);
-          }}
-          onMouseLeave={() => onHoverDate && onHoverDate(null)}
-        >
+        <LineChart data={data} syncId="rf-dashboard-charts" syncMethod="value" margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#64748b" strokeOpacity={0.4} />
           <XAxis
             dataKey="date" tickFormatter={fmtAxisDate}
@@ -141,9 +122,6 @@ function DMALineChart({
             tick={{ fill: '#cbd5e1', fontSize: 10 }}
             axisLine={false} tickLine={false} width={55}
           />
-          {activeDate && (
-            <ReferenceLine x={activeDate} stroke="#fbbf24" strokeDasharray="3 3" strokeOpacity={0.55} />
-          )}
           <Tooltip content={<ChartTooltip formatter={formatter} />} />
           {fieldRaw && showDaily && (
             <Line
@@ -310,13 +288,6 @@ export default function DashboardView({
   const [selectedYears, setSelectedYears] = useLocalStorageState('years', []);
   const [weekdayOnly, setWeekdayOnly] = useLocalStorageState('weekdayOnly', false);
   const [showDaily, setShowDaily] = useLocalStorageState('showDaily', false);
-
-  // React-managed cross-chart hover sync. Recharts' built-in syncId + touch
-  // events have a known iOS bug where the previous chart's state gets stuck
-  // when the user moves to a different chart. Managing the active date in
-  // React state is bulletproof — every chart reads from the same source and
-  // renders a ReferenceLine + updated headline value accordingly.
-  const [activeDate, setActiveDate] = useState(null);
   const [aiText, setAiText] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState(null);
@@ -812,21 +783,21 @@ export default function DashboardView({
             </h2>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart title="Total Quote DMA (by quote creation date)" data={chartData}
-                fieldRaw="quotesDollars" field30="q30" field90="q90" formatter={fmtMoney} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                fieldRaw="quotesDollars" field30="q30" field90="q90" formatter={fmtMoney} showDaily={showDaily} />
               <DMALineChart title="Total Sales Order DMA (by date converted)" data={chartData}
-                fieldRaw="ordersDollars" field30="o30" field90="o90" formatter={fmtMoney} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                fieldRaw="ordersDollars" field30="o30" field90="o90" formatter={fmtMoney} showDaily={showDaily} />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart title="Total Shipped DMA (by actual ship date)" data={chartData}
-                fieldRaw="shippedDollars" field30="s30" field90="s90" formatter={fmtMoney} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                fieldRaw="shippedDollars" field30="s30" field90="s90" formatter={fmtMoney} showDaily={showDaily} />
               <DMALineChart title="Capture Rate DMA (sales order$ / quote$)" data={chartData}
-                field30="captureRate" field90="capt90" formatter={fmtPct} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                field30="captureRate" field90="capt90" formatter={fmtPct} showDaily={showDaily} />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
               <DMALineChart title="Avg Order Value DMA (orders$ / orders count)" data={chartData}
-                fieldRaw="aovOrderDaily" field30="aovO30" field90="aovO90" formatter={fmtMoney} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                fieldRaw="aovOrderDaily" field30="aovO30" field90="aovO90" formatter={fmtMoney} showDaily={showDaily} />
               <DMALineChart title="Avg Shipped Value DMA (shipped$ / shipped count)" data={chartData}
-                fieldRaw="aovShipDaily" field30="aovS30" field90="aovS90" formatter={fmtMoney} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                fieldRaw="aovShipDaily" field30="aovS30" field90="aovS90" formatter={fmtMoney} showDaily={showDaily} />
             </div>
 
             <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
@@ -834,15 +805,15 @@ export default function DashboardView({
             </h2>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart title="Quote Count DMA" data={chartData}
-                fieldRaw="quotes" field30="qc30" field90="qc90" formatter={fmtNum} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                fieldRaw="quotes" field30="qc30" field90="qc90" formatter={fmtNum} showDaily={showDaily} />
               <DMALineChart title="Sales Order Count DMA" data={chartData}
-                fieldRaw="orders" field30="oc30" field90="oc90" formatter={fmtNum} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                fieldRaw="orders" field30="oc30" field90="oc90" formatter={fmtNum} showDaily={showDaily} />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <DMALineChart title="Shipped Order Count DMA (by actual ship date)" data={chartData}
-                fieldRaw="shipped" field30="sc30" field90="sc90" formatter={fmtNum} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                fieldRaw="shipped" field30="sc30" field90="sc90" formatter={fmtNum} showDaily={showDaily} />
               <DMALineChart title="Close Rate DMA (count)" data={chartData}
-                field30="closeRate" field90="cr90" formatter={fmtPct} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                field30="closeRate" field90="cr90" formatter={fmtPct} showDaily={showDaily} />
             </div>
 
             {ga4Daily && ga4Daily.length > 0 && (
@@ -852,19 +823,19 @@ export default function DashboardView({
                 </h2>
                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
                   <DMALineChart title="Sessions DMA" data={chartData}
-                    fieldRaw="sessions" field30="sess30" field90="sess90" formatter={fmtNum} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                    fieldRaw="sessions" field30="sess30" field90="sess90" formatter={fmtNum} showDaily={showDaily} />
                   <DMALineChart title="Total Users DMA" data={chartData}
-                    fieldRaw="totalUsers" field30="tu30" field90="tu90" formatter={fmtNum} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                    fieldRaw="totalUsers" field30="tu30" field90="tu90" formatter={fmtNum} showDaily={showDaily} />
                 </div>
                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
                   <DMALineChart title="New Users DMA" data={chartData}
-                    fieldRaw="newUsers" field30="nu30" field90="nu90" formatter={fmtNum} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                    fieldRaw="newUsers" field30="nu30" field90="nu90" formatter={fmtNum} showDaily={showDaily} />
                   <DMALineChart title="Conversions DMA" data={chartData}
-                    fieldRaw="conversions" field30="conv30" field90="conv90" formatter={fmtNum} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                    fieldRaw="conversions" field30="conv30" field90="conv90" formatter={fmtNum} showDaily={showDaily} />
                 </div>
                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
                   <DMALineChart title="Pageviews DMA" data={chartData}
-                    fieldRaw="pageviews" field30="pv30" field90="pv90" formatter={fmtNum} showDaily={showDaily} activeDate={activeDate} onHoverDate={setActiveDate} />
+                    fieldRaw="pageviews" field30="pv30" field90="pv90" formatter={fmtNum} showDaily={showDaily} />
                   <div style={{ flex: '1 1 480px', minWidth: 0 }} />
                 </div>
               </>
