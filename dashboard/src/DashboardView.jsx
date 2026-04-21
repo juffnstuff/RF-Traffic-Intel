@@ -109,7 +109,7 @@ function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmt
         </div>
       </div>
       <ResponsiveContainer width="100%" height={220}>
-        <LineChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+        <LineChart data={data} syncId="rf-dashboard-charts" margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#64748b" strokeOpacity={0.4} />
           <XAxis
             dataKey="date" tickFormatter={fmtAxisDate}
