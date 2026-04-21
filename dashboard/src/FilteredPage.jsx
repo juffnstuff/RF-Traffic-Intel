@@ -1,54 +1,21 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import DashboardView from './DashboardView';
-import { MultiSelectDropdown, useLocalStorageState, clearAllFilters } from './FilterControls';
-
-function MultiSelectChips({ label, options, selected, onToggle, onClear, emptyHint, keyField = 'value', nameField = 'value' }) {
-  const selectedSet = new Set(selected);
-  return (
-    <div style={{ marginBottom: 10 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
-        <div style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 600 }}>{label}</div>
-        <div style={{ color: '#64748b', fontSize: 11 }}>
-          {selected.length > 0 ? `${selected.length} selected` : 'all'}
-        </div>
-        {selected.length > 0 && (
-          <button onClick={onClear} style={{
-            background: 'transparent', color: '#94a3b8', border: '1px solid #334155',
-            borderRadius: 4, padding: '2px 8px', fontSize: 10, cursor: 'pointer',
-          }}>clear</button>
-        )}
-      </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxHeight: 110, overflowY: 'auto', paddingRight: 4 }}>
-        {options.length === 0 && <div style={{ color: '#64748b', fontSize: 11 }}>{emptyHint}</div>}
-        {options.map(opt => {
-          const key = opt[keyField];
-          const name = opt[nameField];
-          const active = selectedSet.has(String(key));
-          return (
-            <button key={key} onClick={() => onToggle(String(key))} style={{
-              background: active ? '#f59e0b' : '#1e293b',
-              color: active ? '#0f172a' : '#e2e8f0',
-              border: active ? 'none' : '1px solid #334155',
-              borderRadius: 4, padding: '3px 9px', cursor: 'pointer', fontSize: 11, fontWeight: 600,
-            }}>{name || '(blank)'}</button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
+import { MultiSelectDropdown, useLocalStorageState } from './FilterControls';
 
 export default function FilteredPage() {
   const [filterOptions, setFilterOptions] = useState({ partGroups: [], salesReps: [] });
   const [ga4Campaigns, setGa4Campaigns] = useState([]);
   const [ga4Channels, setGa4Channels] = useState([]);
+  const [sizeBuckets, setSizeBuckets] = useState([]);
 
   // Filter state persists across tab switches and page reloads.
   const [selectedPartGroups, setSelectedPartGroups] = useLocalStorageState('filter.partGroups', []);
   const [selectedSalesReps, setSelectedSalesReps]   = useLocalStorageState('filter.salesReps', []);
   const [selectedCampaigns, setSelectedCampaigns]   = useLocalStorageState('filter.campaigns', []);
   const [selectedChannels, setSelectedChannels]     = useLocalStorageState('filter.channels', []);
-  const [customerType, setCustomerType]             = useLocalStorageState('filter.customerType', 'all');  // 'all' | 'new' | 'repeat'
+  const [customerType, setCustomerType]             = useLocalStorageState('filter.customerType', 'all');
+  // Size bucket is single-select (a quote is in exactly one bucket); null = "All sizes".
+  const [sizeBucket, setSizeBucket]                 = useLocalStorageState('filter.sizeBucket', null);
 
   const [data, setData] = useState(null);
   const [ga4, setGa4] = useState(null);
@@ -69,14 +36,19 @@ export default function FilteredPage() {
       .then(r => r.ok ? r.json() : null)
       .then(j => setGa4Channels(j?.channels || []))
       .catch(() => setGa4Channels([]));
+    fetch('/api/size-buckets')
+      .then(r => r.ok ? r.json() : null)
+      .then(j => setSizeBuckets(j?.buckets || []))
+      .catch(() => setSizeBuckets([]));
   }, []);
 
   const loadData = useCallback(() => {
     setLoading(true);
     const params = new URLSearchParams();
     if (selectedPartGroups.length) params.set('partGroups', selectedPartGroups.join(','));
-    if (selectedSalesReps.length) params.set('salesReps', selectedSalesReps.join(','));
-    if (customerType !== 'all') params.set('customerType', customerType);
+    if (selectedSalesReps.length)  params.set('salesReps',  selectedSalesReps.join(','));
+    if (customerType !== 'all')    params.set('customerType', customerType);
+    if (sizeBucket)                params.set('sizeBucket', sizeBucket);
     const qs = params.toString();
 
     // GA4 precedence: campaign filter wins over channel filter (campaigns are
@@ -101,7 +73,7 @@ export default function FilteredPage() {
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }, [selectedPartGroups, selectedSalesReps, selectedCampaigns, selectedChannels, customerType]);
+  }, [selectedPartGroups, selectedSalesReps, selectedCampaigns, selectedChannels, customerType, sizeBucket]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -115,6 +87,7 @@ export default function FilteredPage() {
           loadData();
           fetch('/api/filters').then(r => r.json()).then(setFilterOptions).catch(() => {});
           fetch('/api/ga4-campaigns').then(r => r.ok ? r.json() : null).then(j => setGa4Campaigns(j?.campaigns || [])).catch(() => {});
+          fetch('/api/size-buckets').then(r => r.ok ? r.json() : null).then(j => setSizeBuckets(j?.buckets || [])).catch(() => {});
           setRefreshing(false);
         }, 500);
       } else {
@@ -133,25 +106,63 @@ export default function FilteredPage() {
     setSelectedCampaigns([]);
     setSelectedChannels([]);
     setCustomerType('all');
-    // DashboardView.clearAllFilters already wipes localStorage; its Clear
-    // button resets the time-range state internally.
+    setSizeBucket(null);
   };
-
-  const toggle = (setter) => (val) =>
-    setter(prev => prev.includes(val) ? prev.filter(v => v !== val) : [...prev, val]);
 
   const filterPanel = useMemo(() => (
     <div style={{ padding: '14px clamp(12px, 4vw, 32px)', borderBottom: '1px solid #1e293b', background: '#0b1220' }}>
-      <MultiSelectChips
-        label="Part Group"
-        options={filterOptions.partGroups}
-        selected={selectedPartGroups}
-        onToggle={toggle(setSelectedPartGroups)}
-        onClear={() => setSelectedPartGroups([])}
-        emptyHint="No part groups yet — run a dim fetch."
-        keyField="value" nameField="value"
-      />
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginTop: 4 }}>
+      {/* Quote-size bucket — single-select chips, matches the Part Group
+          r-Analysis UI so the user has one consistent control. */}
+      <div style={{
+        display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 10,
+      }}>
+        <div style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 600, marginRight: 4 }}>
+          Quote size:
+        </div>
+        <button
+          onClick={() => setSizeBucket(null)}
+          style={{
+            background: sizeBucket === null ? '#f59e0b' : '#334155',
+            color: sizeBucket === null ? '#0f172a' : '#e2e8f0',
+            border: 'none', borderRadius: 4, padding: '5px 12px',
+            cursor: 'pointer', fontSize: 12, fontWeight: 600,
+          }}
+        >All sizes</button>
+        {sizeBuckets.map(b => {
+          const active = sizeBucket === b.bucket;
+          return (
+            <button
+              key={b.bucket}
+              onClick={() => setSizeBucket(b.bucket)}
+              title={`${b.quote_count.toLocaleString()} quotes · $${(b.quote_total / 1e6).toFixed(1)}M total`}
+              style={{
+                background: active ? '#f59e0b' : '#334155',
+                color: active ? '#0f172a' : '#e2e8f0',
+                border: 'none', borderRadius: 4, padding: '5px 12px',
+                cursor: 'pointer', fontSize: 12, fontWeight: 600,
+              }}
+            >
+              {b.bucket}
+              <span style={{ opacity: 0.7, fontSize: 10, marginLeft: 6, fontWeight: 500 }}>
+                {b.quote_count.toLocaleString()}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* All other filters on one row: Part Group, Sales Rep, SEM Campaign,
+          Traffic Channel, Customer Type. Part Group now lives in a dropdown
+          too, matching the other pickers. */}
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <MultiSelectDropdown
+          label="Part Group"
+          options={filterOptions.partGroups}
+          selected={selectedPartGroups}
+          onChange={setSelectedPartGroups}
+          keyField="value" nameField="value"
+          emptyHint="No part groups yet — run a dim fetch."
+        />
         <MultiSelectDropdown
           label="Sales Rep"
           options={filterOptions.salesReps}
@@ -214,7 +225,7 @@ export default function FilteredPage() {
         </div>
       </div>
     </div>
-  ), [filterOptions, ga4Campaigns, ga4Channels, selectedPartGroups, selectedSalesReps, selectedCampaigns, selectedChannels, customerType]);
+  ), [filterOptions, ga4Campaigns, ga4Channels, sizeBuckets, selectedPartGroups, selectedSalesReps, selectedCampaigns, selectedChannels, customerType, sizeBucket]);
 
   if (loading && !data) {
     return <div style={{ padding: 'clamp(16px, 4vw, 40px)', color: '#94a3b8' }}>Loading filtered data...</div>;
@@ -238,6 +249,7 @@ export default function FilteredPage() {
 
   const summary =
     `${customerType === 'all' ? 'all customers' : customerType === 'new' ? 'new customers only' : 'repeat only'} · ` +
+    `${sizeBucket || 'all sizes'} · ` +
     `${selectedPartGroups.length || 'all'} part groups · ` +
     `${selectedSalesReps.length || 'all'} reps · ` +
     `${selectedCampaigns.length || 'all'} campaigns · ` +
@@ -256,7 +268,8 @@ export default function FilteredPage() {
       aiContext={{
         page: 'filtered',
         filters: {
-          customer_type: customerType,    // 'all' | 'new' | 'repeat'
+          customer_type: customerType,
+          size_bucket: sizeBucket,
           part_groups: selectedPartGroups,
           sales_reps: selectedSalesReps.map(id => {
             const rep = filterOptions.salesReps.find(r => String(r.id) === String(id));

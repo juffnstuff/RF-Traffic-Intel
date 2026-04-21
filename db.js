@@ -395,13 +395,14 @@ export async function getSizeBucketSummary() {
 
 /**
  * Return daily rows (same shape as getAllDaily) aggregated from the dim table
- * with optional filters on part_group, salesrep_id, and customerType.
+ * with optional filters on part_group, salesrep_id, customerType, and size
+ * bucket.
  *
  * customerType: 'all' | 'new' | 'repeat'  (defaults to 'all')
  *   'new'    → only rows where is_first = 'Y' (customer's first quote/order)
  *   'repeat' → only rows where is_first = 'N' (existing-customer activity)
  */
-export async function getDailyDimFiltered({ partGroups = [], salesReps = [], customerType = 'all' } = {}) {
+export async function getDailyDimFiltered({ partGroups = [], salesReps = [], customerType = 'all', sizeBucket = null } = {}) {
   const p = getPool();
   const where = [];
   const params = [];
@@ -412,6 +413,10 @@ export async function getDailyDimFiltered({ partGroups = [], salesReps = [], cus
   if (salesReps.length > 0) {
     params.push(salesReps.map(String));
     where.push(`salesrep_id = ANY($${params.length})`);
+  }
+  if (sizeBucket) {
+    params.push(sizeBucket);
+    where.push(`size_bucket = $${params.length}`);
   }
   if (customerType === 'new')    where.push(`is_first = 'Y'`);
   if (customerType === 'repeat') where.push(`is_first = 'N'`);

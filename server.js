@@ -131,13 +131,15 @@ app.get('/api/unified-dim', async (req, res) => {
     const partGroups   = (req.query.partGroups || '').split(',').map(s => s.trim()).filter(Boolean);
     const salesReps    = (req.query.salesReps  || '').split(',').map(s => s.trim()).filter(Boolean);
     const customerType = ['new', 'repeat'].includes(req.query.customerType) ? req.query.customerType : 'all';
+    const sizeBucket   = (req.query.sizeBucket || '').trim() || null;
 
     // When no filter is applied (including customerType=all), route to the
     // header-level source so this tab visually matches Overview. The dim-table
     // aggregation at (date, part_group, rep, size_bucket, is_first) grain has
     // edge cases that surface as divergence from Overview when unfiltered.
     let daily;
-    const unfiltered = partGroups.length === 0 && salesReps.length === 0 && customerType === 'all';
+    const unfiltered = partGroups.length === 0 && salesReps.length === 0
+                    && customerType === 'all' && !sizeBucket;
     if (unfiltered) {
       daily = await getAllDaily();
       if (!daily || daily.length === 0) {
@@ -148,7 +150,7 @@ app.get('/api/unified-dim', async (req, res) => {
       if (dimCount === 0) {
         return res.status(404).json({ error: 'No dim data yet. Run a dim fetch first.' });
       }
-      daily = await getDailyDimFiltered({ partGroups, salesReps, customerType });
+      daily = await getDailyDimFiltered({ partGroups, salesReps, customerType, sizeBucket });
     }
     daily = zerofillDaily(daily);
 
@@ -393,6 +395,20 @@ app.get('/api/ga4-by-campaign', async (req, res) => {
     res.json({ generated: new Date().toISOString(), source: 'ga4', campaigns, daily });
   } catch (e) {
     console.error('ga4-by-campaign error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Size-bucket picker options — used by both filtered views (Filtered tab +
+// Part Group r-Analysis) to render the bucket chips with per-bucket volume.
+app.get('/api/size-buckets', async (req, res) => {
+  if (!hasDB) return res.status(400).json({ error: 'Database not configured' });
+  try {
+    const { getSizeBucketSummary } = await import('./db.js');
+    const buckets = await getSizeBucketSummary();
+    res.json({ buckets });
+  } catch (e) {
+    console.error('size-buckets error:', e);
     res.status(500).json({ error: e.message });
   }
 });
