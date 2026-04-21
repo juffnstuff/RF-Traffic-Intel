@@ -61,6 +61,10 @@ function buildOAuthHeader({ method, baseUrl, queryParams, accountId, consumerKey
   return `OAuth realm="${accountId}", ${headerParts}`;
 }
 
+// Pagination safety cap — dim queries are wider than the header fetch so the
+// default is higher. Throws at the cap instead of silently truncating.
+const MAX_ROWS = Number(process.env.NS_DIM_MAX_ROWS) || 500000;
+
 async function runSuiteQL(sql) {
   const accountId = requireEnv('NS_ACCOUNT_ID');
   const consumerKey = requireEnv('NS_CONSUMER_KEY');
@@ -75,6 +79,7 @@ async function runSuiteQL(sql) {
   let offset = 0;
   const limit = 1000;
   let hasMore = true;
+  let warned = false;
   const MAX_ATTEMPTS = 6;
 
   while (hasMore) {
@@ -114,7 +119,13 @@ async function runSuiteQL(sql) {
     hasMore = data.hasMore === true;
     offset += limit;
 
-    if (offset > 500000) break;
+    if (!warned && hasMore && offset >= MAX_ROWS * 0.8) {
+      console.warn(`    ⚠️  approaching dim row cap (${offset}/${MAX_ROWS}) — raise NS_DIM_MAX_ROWS if the result looks truncated`);
+      warned = true;
+    }
+    if (hasMore && offset >= MAX_ROWS) {
+      throw new Error(`SuiteQL row cap hit at ${offset} dim rows — raise NS_DIM_MAX_ROWS (currently ${MAX_ROWS}) to fetch the remainder.`);
+    }
   }
   return rows;
 }

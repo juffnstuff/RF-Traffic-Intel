@@ -14,7 +14,14 @@
  */
 
 import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { BetaAnalyticsDataClient } from '@google-analytics/data';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CACHE_DIR = path.join(__dirname, '..', 'data', 'cache');
+const CACHE_PATH = path.join(CACHE_DIR, 'ga4-daily.json');
 
 function requireEnv(name) {
   const v = process.env[name]?.trim();
@@ -206,6 +213,20 @@ export async function fetchGa4({ since = null } = {}) {
   console.log(`    ${chanRows.length} channel-day rows`);
 
   // ── 4. Persist ───────────────────────────────────────────────────────
+  // Always write a JSON cache so there's a fallback when DATABASE_URL is unset
+  // or the DB is unreachable. Mirrors fetch-netsuite.js's cache behavior.
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+  fs.writeFileSync(CACHE_PATH, JSON.stringify({
+    generated: new Date().toISOString(),
+    source: 'ga4',
+    propertyId,
+    since,
+    aggregate: aggRows,
+    byCampaign: campRows,
+    byChannel: chanRows,
+  }, null, 2));
+  console.log(`✅  Wrote GA4 cache: ${aggRows.length} agg + ${campRows.length} campaign + ${chanRows.length} channel rows`);
+
   if (process.env.DATABASE_URL) {
     const { upsertGa4Daily, upsertGa4DailyByCampaign, upsertGa4DailyByChannel } = await import('../db.js');
     const aggInserted  = await upsertGa4Daily(aggRows, { replaceSince: since });
@@ -213,10 +234,8 @@ export async function fetchGa4({ since = null } = {}) {
     const chanInserted = await upsertGa4DailyByChannel(chanRows, { replaceSince: since });
     console.log(`✅  Upserted ${aggInserted} aggregate + ${campInserted} campaign + ${chanInserted} channel rows into PostgreSQL`);
     return { aggregate: aggInserted, byCampaign: campInserted, byChannel: chanInserted };
-  } else {
-    console.log('⚠️  DATABASE_URL not set — GA4 data not persisted');
-    return { aggregate: aggRows.length, byCampaign: campRows.length, byChannel: chanRows.length };
   }
+  return { aggregate: aggRows.length, byCampaign: campRows.length, byChannel: chanRows.length };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
