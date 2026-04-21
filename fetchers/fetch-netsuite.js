@@ -151,6 +151,19 @@ function parseNSDate(s) {
   return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
 }
 
+function assertIsoDate(s) {
+  if (s == null) return;
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    throw new Error(`Invalid 'since' date: expected YYYY-MM-DD, got ${JSON.stringify(s)}`);
+  }
+}
+
+function redactAccountId(id) {
+  if (!id) return '(unset)';
+  const s = String(id);
+  return s.length <= 4 ? '***' : `${s.slice(0, 3)}***${s.slice(-2)}`;
+}
+
 function buildFilter(sinceDateStr, col) {
   if (!sinceDateStr) return '';
   return `AND ${col} >= TO_DATE('${sinceDateStr}', 'YYYY-MM-DD')`;
@@ -161,9 +174,10 @@ function buildFilter(sinceDateStr, col) {
  * @param {string|null} opts.since  — ISO date string or null for full history
  */
 export async function fetchNetSuite({ since = null } = {}) {
+  assertIsoDate(since);
   const mode = since ? `incremental (since ${since})` : 'full history';
   console.log(`🔎  NetSuite fetch — ${mode}`);
-  console.log(`    Account: ${process.env.NS_ACCOUNT_ID}`);
+  console.log(`    Account: ${redactAccountId(process.env.NS_ACCOUNT_ID)}`);
 
   // Quotes bucketed by estimate creation date
   const quoteCreatedFilter = buildFilter(since, 'TRUNC(t.createddate)');

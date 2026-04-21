@@ -22,15 +22,43 @@ function requireEnv(name) {
   return v;
 }
 
-function buildClient() {
-  const raw = requireEnv('GOOGLE_CREDENTIALS_JSON');
-  let credentials;
+// Parse credentials eagerly so malformed JSON fails at module-load instead of
+// mid-fetch. `null` when the env var is unset (server gates GA4 imports on
+// hasGA4, so this only surfaces an error for the "env present but malformed" case).
+const GA4_CREDENTIALS = (() => {
+  const raw = process.env.GOOGLE_CREDENTIALS_JSON?.trim();
+  if (!raw) return null;
   try {
-    credentials = JSON.parse(raw);
-  } catch (e) {
+    return JSON.parse(raw);
+  } catch {
     throw new Error('GOOGLE_CREDENTIALS_JSON is not valid JSON. Paste the full service-account key file contents.');
   }
-  return new BetaAnalyticsDataClient({ credentials });
+})();
+
+function buildClient() {
+  if (!GA4_CREDENTIALS) throw new Error('Missing env var: GOOGLE_CREDENTIALS_JSON');
+  return new BetaAnalyticsDataClient({ credentials: GA4_CREDENTIALS });
+}
+
+async function runReportWithRetry(client, request, label) {
+  const MAX_ATTEMPTS = 4;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await client.runReport(request);
+    } catch (e) {
+      const status = Number(e.code ?? e.status);
+      const retriable = !Number.isFinite(status)
+        || status === 429
+        || (status >= 500 && status < 600)
+        || e.code === 'ETIMEDOUT'
+        || e.code === 'ECONNRESET'
+        || e.code === 'ENOTFOUND';
+      if (!retriable || attempt >= MAX_ATTEMPTS - 1) throw e;
+      const waitMs = Math.min(30000, 1000 * (2 ** attempt) + Math.floor(Math.random() * 500));
+      console.log(`    ⏳ ${label} failed (${e.message}); retrying in ${Math.round(waitMs / 1000)}s (${attempt + 1}/${MAX_ATTEMPTS})`);
+      await new Promise(r => setTimeout(r, waitMs));
+    }
+  }
 }
 
 function parseGa4Date(s) {
@@ -95,14 +123,14 @@ export async function fetchGa4({ since = null } = {}) {
 
   // ── 1. Aggregate daily ───────────────────────────────────────────────
   console.log('  → aggregate daily metrics...');
-  const [aggResp] = await client.runReport({
+  const [aggResp] = await runReportWithRetry(client, {
     property: `properties/${propertyId}`,
     dateRanges: [{ startDate, endDate }],
     dimensions: [DATE_DIM],
     metrics: METRICS_AGG,
     orderBys: [{ dimension: { dimensionName: 'date' } }],
     limit: 100000,
-  });
+  }, 'aggregate');
   const aggRows = (aggResp.rows || []).map(r => {
     const date = parseGa4Date(r.dimensionValues?.[0]?.value);
     const m = r.metricValues || [];
@@ -123,14 +151,14 @@ export async function fetchGa4({ since = null } = {}) {
 
   // ── 2. Per-campaign daily ────────────────────────────────────────────
   console.log('  → daily by campaign...');
-  const [campResp] = await client.runReport({
+  const [campResp] = await runReportWithRetry(client, {
     property: `properties/${propertyId}`,
     dateRanges: [{ startDate, endDate }],
     dimensions: [DATE_DIM, CAMPAIGN_DIM],
     metrics: METRICS_CAMPAIGN,
     orderBys: [{ dimension: { dimensionName: 'date' } }],
     limit: 250000,
-  });
+  }, 'campaign');
   const campRows = (campResp.rows || []).map(r => {
     const date = parseGa4Date(r.dimensionValues?.[0]?.value);
     const campaign_name = r.dimensionValues?.[1]?.value ?? '';
@@ -151,14 +179,14 @@ export async function fetchGa4({ since = null } = {}) {
 
   // ── 3. Per-channel daily (organic / paid / direct / referral / etc.) ──
   console.log('  → daily by channel...');
-  const [chanResp] = await client.runReport({
+  const [chanResp] = await runReportWithRetry(client, {
     property: `properties/${propertyId}`,
     dateRanges: [{ startDate, endDate }],
     dimensions: [DATE_DIM, CHANNEL_DIM],
     metrics: METRICS_CAMPAIGN,
     orderBys: [{ dimension: { dimensionName: 'date' } }],
     limit: 250000,
-  });
+  }, 'channel');
   const chanRows = (chanResp.rows || []).map(r => {
     const date = parseGa4Date(r.dimensionValues?.[0]?.value);
     const channel = r.dimensionValues?.[1]?.value ?? '';

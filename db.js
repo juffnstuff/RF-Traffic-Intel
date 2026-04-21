@@ -322,9 +322,17 @@ export async function getFilterOptions() {
   };
 }
 
-// Ordered list of size buckets (small → large). Must match the CASE in the
-// fetcher — keep these in sync.
-export const SIZE_BUCKETS = ['Under $5K', '$5K-$25K', '$25K-$100K', '$100K+'];
+// Single source of truth for size buckets. `max` is the exclusive upper bound
+// on |t.total| in $; the last bucket has max=null and catches everything above.
+// The SQL CASE in fetch-netsuite-dim.js is derived from this — do not define
+// thresholds or labels in two places.
+export const SIZE_BUCKET_CONFIG = [
+  { label: 'Under $5K',   max: 5000   },
+  { label: '$5K-$25K',    max: 25000  },
+  { label: '$25K-$100K',  max: 100000 },
+  { label: '$100K+',      max: null   },
+];
+export const SIZE_BUCKETS = SIZE_BUCKET_CONFIG.map(b => b.label);
 
 /**
  * Return per-part-group daily rows from the dim table. Used by the

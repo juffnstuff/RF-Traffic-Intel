@@ -21,6 +21,7 @@
 import 'dotenv/config';
 import crypto from 'crypto';
 import fetch from 'node-fetch';
+import { SIZE_BUCKET_CONFIG } from '../db.js';
 
 function requireEnv(name) {
   const v = process.env[name]?.trim();
@@ -126,6 +127,13 @@ function parseNSDate(s) {
   return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
 }
 
+function assertIsoDate(s) {
+  if (s == null) return;
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    throw new Error(`Invalid 'since' date: expected YYYY-MM-DD, got ${JSON.stringify(s)}`);
+  }
+}
+
 function buildFilter(sinceDateStr, col) {
   if (!sinceDateStr) return '';
   return `AND ${col} >= TO_DATE('${sinceDateStr}', 'YYYY-MM-DD')`;
@@ -153,12 +161,14 @@ function baseLineConditions() {
 // quote-size distribution analysis: 66% under $5K, 26% $5K-$25K, 7% $25K-$100K,
 // 1% over $100K. For salesorders / shipped we bucket by the SO's own total
 // (quote-to-SO linkage isn't modeled here — this is a macro-level slice).
-const SIZE_BUCKET_CASE = `CASE
-    WHEN ABS(COALESCE(t.total, 0)) < 5000   THEN 'Under $5K'
-    WHEN ABS(COALESCE(t.total, 0)) < 25000  THEN '$5K-$25K'
-    WHEN ABS(COALESCE(t.total, 0)) < 100000 THEN '$25K-$100K'
-    ELSE '$100K+'
-  END`;
+// Generated from SIZE_BUCKET_CONFIG in db.js so labels + thresholds stay in sync.
+const SIZE_BUCKET_CASE = (() => {
+  const whens = SIZE_BUCKET_CONFIG
+    .filter(b => b.max != null)
+    .map(b => `WHEN ABS(COALESCE(t.total, 0)) < ${b.max} THEN '${b.label}'`);
+  const last = SIZE_BUCKET_CONFIG.find(b => b.max == null);
+  return `CASE\n    ${whens.join('\n    ')}\n    ELSE '${last.label}'\n  END`;
+})();
 
 // "Is this the customer's first quote / order?" flags custbody_rf_firstquote
 // (estimates) and custbody_rf_firstorder (sales orders + shipped SOs).
@@ -216,6 +226,7 @@ async function runDimQuery({ recordType, dateCol, extraWhere = '', since, tranty
  * @param {string|null} opts.since — ISO date string or null for full history
  */
 export async function fetchNetSuiteDim({ since = null } = {}) {
+  assertIsoDate(since);
   const mode = since ? `incremental (since ${since})` : 'full history';
   console.log(`🔎  NetSuite dim fetch — ${mode}`);
 
