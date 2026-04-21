@@ -707,3 +707,73 @@ export async function getGa4ChannelOptions() {
     conversions: r.conversions,
   }));
 }
+
+// Per-channel daily rows (NOT aggregated across channels). The frontend
+// pivots this into a stacked chart + per-channel conversion table.
+export async function getGa4ChannelsDaily() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT
+      date::text,
+      channel,
+      sessions,
+      total_users,
+      new_users,
+      engaged_sessions,
+      screen_page_views,
+      conversions,
+      total_revenue::float as total_revenue
+    FROM ga4_daily_by_channel
+    WHERE channel <> ''
+    ORDER BY date ASC, channel ASC
+  `);
+  return rows;
+}
+
+// Per-campaign aggregate stats over [since, until] (both optional, ISO dates).
+// Returns one row per campaign sorted by sessions DESC, including conversion
+// rate and the number of active days in the window for the campaign.
+export async function getGa4CampaignStats({ since = null, until = null } = {}) {
+  const p = getPool();
+  const where = [
+    `campaign_name <> ''`,
+    `campaign_name <> '(not set)'`,
+    `campaign_name <> '(direct)'`,
+  ];
+  const params = [];
+  if (since) { params.push(since); where.push(`date >= $${params.length}::date`); }
+  if (until) { params.push(until); where.push(`date <= $${params.length}::date`); }
+  const { rows } = await p.query(`
+    SELECT
+      campaign_name,
+      SUM(sessions)::int          as sessions,
+      SUM(total_users)::int       as total_users,
+      SUM(new_users)::int         as new_users,
+      SUM(engaged_sessions)::int  as engaged_sessions,
+      SUM(screen_page_views)::int as pageviews,
+      SUM(conversions)::int       as conversions,
+      SUM(total_revenue)::float   as total_revenue,
+      COUNT(DISTINCT date)::int   as active_days,
+      MIN(date)::text             as first_seen,
+      MAX(date)::text             as last_seen
+    FROM ga4_daily_by_campaign
+    WHERE ${where.join(' AND ')}
+    GROUP BY campaign_name
+    ORDER BY sessions DESC
+  `, params);
+  return rows.map(r => ({
+    campaign_name: r.campaign_name,
+    sessions: r.sessions,
+    total_users: r.total_users,
+    new_users: r.new_users,
+    engaged_sessions: r.engaged_sessions,
+    pageviews: r.pageviews,
+    conversions: r.conversions,
+    total_revenue: r.total_revenue,
+    active_days: r.active_days,
+    first_seen: r.first_seen,
+    last_seen: r.last_seen,
+    conversion_rate: r.sessions > 0 ? r.conversions / r.sessions : null,
+    engagement_rate: r.sessions > 0 ? r.engaged_sessions / r.sessions : null,
+  }));
+}

@@ -7,30 +7,30 @@ import {
 import { movingAverage, leadLag, leadLagDetrended, weekdaysOnly } from './utils/analytics';
 import { RELATIVE_RANGES, RangeDropdown, YearsDropdown, useLocalStorageState, clearAllFilters } from './FilterControls';
 
-function fmtNum(n) {
+export function fmtNum(n) {
   if (n == null || Number.isNaN(n)) return '—';
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
   if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
   return n.toFixed(0);
 }
-function fmtMoney(n) {
+export function fmtMoney(n) {
   if (n == null || Number.isNaN(n)) return '—';
   if (n >= 1000000) return '$' + (n / 1000000).toFixed(2) + 'M';
   if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'K';
   return '$' + n.toFixed(0);
 }
-function fmtPct(n) {
+export function fmtPct(n) {
   if (n == null || Number.isNaN(n)) return '—';
   return (n * 100).toFixed(1) + '%';
 }
-function fmtDate(d) {
+export function fmtDate(d) {
   if (!d) return '';
   const parts = d.split('-');
   if (parts.length !== 3) return d;
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   return `${months[parseInt(parts[1],10)-1]} ${parseInt(parts[2],10)}, ${parts[0]}`;
 }
-function fmtAxisDate(d) {
+export function fmtAxisDate(d) {
   if (!d) return '';
   const parts = d.split('-');
   if (parts.length !== 3) return d;
@@ -38,7 +38,7 @@ function fmtAxisDate(d) {
   return `${months[parseInt(parts[1],10)-1]} ${parts[0].slice(2)}`;
 }
 
-function StatCard({ label, value, sub, small }) {
+export function StatCard({ label, value, sub, small }) {
   return (
     <div style={{
       background: '#334155', borderRadius: 8, padding: '14px 16px',
@@ -75,7 +75,7 @@ const LINE_COLORS = {
   ma90: '#a78bfa',
 };
 
-function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmtNum, currentValue, showDaily = true }) {
+export function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmtNum, currentValue, showDaily = true }) {
   const latest30 = data.length > 0 ? data[data.length - 1]?.[field30] : null;
 
   // One tick per month-start date in the visible data. If the view spans many
