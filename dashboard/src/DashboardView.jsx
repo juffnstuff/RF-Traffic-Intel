@@ -109,7 +109,7 @@ function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmt
         </div>
       </div>
       <ResponsiveContainer width="100%" height={220}>
-        <LineChart data={data} syncId="rf-dashboard-charts" margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+        <LineChart data={data} syncId="rf-dashboard-charts" syncMethod="value" margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#64748b" strokeOpacity={0.4} />
           <XAxis
             dataKey="date" tickFormatter={fmtAxisDate}
@@ -127,18 +127,21 @@ function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmt
             <Line
               type="monotone" dataKey={fieldRaw} name="Daily"
               stroke={LINE_COLORS.daily} strokeWidth={1} strokeOpacity={0.4}
-              dot={false} activeDot={{ r: 3, fill: LINE_COLORS.daily }}
+              dot={false} isAnimationActive={false}
+              activeDot={{ r: 3, fill: LINE_COLORS.daily }}
             />
           )}
           <Line
             type="monotone" dataKey={field30} name="30 DMA"
             stroke={LINE_COLORS.ma30} strokeWidth={2.5}
-            dot={false} activeDot={{ r: 5, fill: LINE_COLORS.ma30, stroke: '#0f172a', strokeWidth: 2 }}
+            dot={false} isAnimationActive={false}
+            activeDot={{ r: 5, fill: LINE_COLORS.ma30, stroke: '#0f172a', strokeWidth: 2 }}
           />
           <Line
             type="monotone" dataKey={field90} name="90 DMA"
             stroke={LINE_COLORS.ma90} strokeWidth={2} strokeDasharray="4 3"
-            dot={false} activeDot={{ r: 4, fill: LINE_COLORS.ma90, stroke: '#0f172a', strokeWidth: 2 }}
+            dot={false} isAnimationActive={false}
+            activeDot={{ r: 4, fill: LINE_COLORS.ma90, stroke: '#0f172a', strokeWidth: 2 }}
           />
           <Legend wrapperStyle={{ fontSize: 10, color: '#cbd5e1', paddingTop: 8 }} iconType="plainline" />
         </LineChart>
