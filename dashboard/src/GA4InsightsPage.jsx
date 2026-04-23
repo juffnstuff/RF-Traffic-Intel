@@ -22,6 +22,14 @@ function fmtDuration(secs) {
   return `${m}m ${r.toString().padStart(2, '0')}s`;
 }
 
+// Unitless ratio to 2 decimals, e.g. 1.43 or 0.67. GA4's conversions/sessions
+// can exceed 1 because a session can fire multiple key events, so formatting
+// it as a percent misleads readers.
+function fmtRatio(n) {
+  if (n == null || Number.isNaN(n)) return '—';
+  return Number(n).toFixed(2);
+}
+
 // Palette for the stacked channel-mix chart. Picked to be distinguishable on
 // the dark background and degrade gracefully when "Other" catches the long tail.
 const CHANNEL_COLORS = [
@@ -132,7 +140,7 @@ function ChannelTable({ rows }) {
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Sessions</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>New users</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Conversions</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Conv. rate</th>
+            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Conv / session</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Engaged %</th>
           </tr>
         </thead>
@@ -143,7 +151,7 @@ function ChannelTable({ rows }) {
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtNum(r.sessions)}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtNum(r.new_users)}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtNum(r.conversions)}</td>
-              <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtPct(r.conversion_rate)}</td>
+              <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtRatio(r.conversion_rate)}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtPct(r.engagement_rate)}</td>
             </tr>
           ))}
@@ -173,7 +181,7 @@ function CampaignTable({ rows }) {
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Users</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>New users</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Conversions</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Conv. rate</th>
+            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Conv / session</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Engaged %</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Revenue</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Active days</th>
@@ -189,7 +197,7 @@ function CampaignTable({ rows }) {
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtNum(r.total_users)}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtNum(r.new_users)}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtNum(r.conversions)}</td>
-              <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtPct(r.conversion_rate)}</td>
+              <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtRatio(r.conversion_rate)}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtPct(r.engagement_rate)}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtMoney(r.total_revenue)}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right', color: '#94a3b8' }}>{r.active_days}</td>
@@ -483,7 +491,7 @@ export default function GA4InsightsPage() {
               kpi.users > 0 ? `${Math.round(kpi.newUsers / kpi.users * 100)}% of users` : null
             } />
             <StatCard label="Conversions" value={fmtNum(kpi.conversions)} sub="in range" />
-            <StatCard label="Conversion rate" value={fmtPct(kpi.conversionRate)} sub="conversions / sessions" />
+            <StatCard label="Conv / session" value={fmtRatio(kpi.conversionRate)} sub="events per session — can exceed 1" />
             <StatCard label="Engagement rate" value={fmtPct(kpi.engagementRate)} sub="engaged / sessions" />
             <StatCard label="Bounce rate" value={fmtPct(kpi.bounceRate)} sub="weighted by sessions" />
             <StatCard label="Avg session" value={fmtDuration(kpi.avgSessionDuration)} sub="weighted by sessions" />
@@ -508,9 +516,9 @@ export default function GA4InsightsPage() {
               <DMALineChart title="Conversions DMA" data={chartData}
                 fieldRaw="conversions" field30="conv30" field90="conv90"
                 formatter={fmtNum} showDaily={showDaily} />
-              <DMALineChart title="Conversion rate DMA (conversions / sessions)" data={chartData}
+              <DMALineChart title="Conv / session DMA (GA4 key events)" data={chartData}
                 fieldRaw="conversionRate" field30="cr30" field90="cr90"
-                formatter={fmtPct} showDaily={showDaily} />
+                formatter={fmtRatio} showDaily={showDaily} />
             </div>
 
             <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
