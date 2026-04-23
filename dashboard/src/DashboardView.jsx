@@ -23,6 +23,12 @@ export function fmtPct(n) {
   if (n == null || Number.isNaN(n)) return '—';
   return (n * 100).toFixed(1) + '%';
 }
+// Unitless ratio to 2 decimals (e.g. 1.43, 0.67). For metrics like CPA ratios
+// or GA4 conversions/sessions where values can legitimately exceed 1.
+export function fmtRatio(n) {
+  if (n == null || Number.isNaN(n)) return '—';
+  return Number(n).toFixed(2);
+}
 export function fmtDate(d) {
   if (!d) return '';
   const parts = d.split('-');

@@ -155,6 +155,112 @@ export async function initDB() {
   await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_channel_date ON ga4_daily_by_channel(date)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_channel_name ON ga4_daily_by_channel(channel)`);
 
+  // Google Ads per-campaign daily. cost/avg_cpc are post-normalization from
+  // Google's cost_micros (cost_micros / 1_000_000). Integer counts stay ints.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS google_ads_daily_by_campaign (
+      date DATE NOT NULL,
+      campaign_id TEXT NOT NULL,
+      campaign_name TEXT NOT NULL DEFAULT '',
+      channel_type TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT '',
+      cost NUMERIC(15,2) DEFAULT 0,
+      clicks INTEGER DEFAULT 0,
+      impressions INTEGER DEFAULT 0,
+      conversions NUMERIC(10,2) DEFAULT 0,
+      conversion_value NUMERIC(15,2) DEFAULT 0,
+      avg_cpc NUMERIC(10,4) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, campaign_id)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_gads_date ON google_ads_daily_by_campaign(date)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_gads_campaign ON google_ads_daily_by_campaign(campaign_name)`);
+
+  // HubSpot closed-won deals. One row per deal_id. Source/attribution fields
+  // come from HubSpot's `hs_analytics_source*` on the deal record and power
+  // the "which channel drove this deal" split on the Paid/SEO tabs.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS hubspot_deals (
+      deal_id TEXT PRIMARY KEY,
+      deal_name TEXT NOT NULL DEFAULT '',
+      amount NUMERIC(15,2) DEFAULT 0,
+      close_date DATE,
+      stage TEXT NOT NULL DEFAULT '',
+      stage_label TEXT NOT NULL DEFAULT '',
+      pipeline TEXT NOT NULL DEFAULT '',
+      owner_id TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      source_data_1 TEXT NOT NULL DEFAULT '',
+      source_data_2 TEXT NOT NULL DEFAULT '',
+      campaign_guid TEXT NOT NULL DEFAULT '',
+      is_closed_won BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMPTZ,
+      modified_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_hs_close_date ON hubspot_deals(close_date)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_hs_source ON hubspot_deals(source)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_hs_won ON hubspot_deals(is_closed_won)`);
+
+  // HubSpot marketing campaigns. Populated only when the account has
+  // Marketing Hub (the /marketing/v3/campaigns endpoint is tier-gated).
+  // When empty, the Paid tab falls back to matching deals by campaign name.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS hubspot_campaigns (
+      campaign_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL DEFAULT '',
+      type TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Google Search Console aggregate daily.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS gsc_daily (
+      date DATE PRIMARY KEY,
+      clicks INTEGER DEFAULT 0,
+      impressions INTEGER DEFAULT 0,
+      ctr NUMERIC(6,4) DEFAULT 0,
+      position NUMERIC(6,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Top queries / pages over a trailing window. window_end_date is the last
+  // day of the window (we default to a rolling 28-day window). Keeping the
+  // windowed shape lets us retain history for a trend line per query/page
+  // without explode-on-every-day cardinality.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS gsc_top_queries (
+      window_end_date DATE NOT NULL,
+      query TEXT NOT NULL,
+      clicks INTEGER DEFAULT 0,
+      impressions INTEGER DEFAULT 0,
+      ctr NUMERIC(6,4) DEFAULT 0,
+      position NUMERIC(6,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (window_end_date, query)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_gsc_queries_win ON gsc_top_queries(window_end_date)`);
+
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS gsc_top_pages (
+      window_end_date DATE NOT NULL,
+      page TEXT NOT NULL,
+      clicks INTEGER DEFAULT 0,
+      impressions INTEGER DEFAULT 0,
+      ctr NUMERIC(6,4) DEFAULT 0,
+      position NUMERIC(6,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (window_end_date, page)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_gsc_pages_win ON gsc_top_pages(window_end_date)`);
+
   console.log('✅  Database tables ready');
 }
 
@@ -776,4 +882,399 @@ export async function getGa4CampaignStats({ since = null, until = null } = {}) {
     conversion_rate: r.sessions > 0 ? r.conversions / r.sessions : null,
     engagement_rate: r.sessions > 0 ? r.engaged_sessions / r.sessions : null,
   }));
+}
+
+// ── Google Ads helpers ───────────────────────────────────────────────
+
+export async function upsertGoogleAdsDailyByCampaign(rows, { replaceSince = null } = {}) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    if (replaceSince) {
+      await client.query(`DELETE FROM google_ads_daily_by_campaign WHERE date >= $1`, [replaceSince]);
+    }
+    let upserted = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO google_ads_daily_by_campaign
+          (date, campaign_id, campaign_name, channel_type, status,
+           cost, clicks, impressions, conversions, conversion_value, avg_cpc, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+        ON CONFLICT (date, campaign_id) DO UPDATE SET
+          campaign_name    = EXCLUDED.campaign_name,
+          channel_type     = EXCLUDED.channel_type,
+          status           = EXCLUDED.status,
+          cost             = EXCLUDED.cost,
+          clicks           = EXCLUDED.clicks,
+          impressions      = EXCLUDED.impressions,
+          conversions      = EXCLUDED.conversions,
+          conversion_value = EXCLUDED.conversion_value,
+          avg_cpc          = EXCLUDED.avg_cpc,
+          updated_at       = NOW()
+      `, [
+        r.date, r.campaign_id,
+        r.campaign_name ?? '', r.channel_type ?? '', r.status ?? '',
+        r.cost ?? 0, r.clicks ?? 0, r.impressions ?? 0,
+        r.conversions ?? 0, r.conversion_value ?? 0, r.avg_cpc ?? 0,
+      ]);
+      upserted++;
+    }
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getGoogleAdsRowCount() {
+  const p = getPool();
+  const { rows } = await p.query('SELECT COUNT(*) as cnt FROM google_ads_daily_by_campaign');
+  return parseInt(rows[0].cnt, 10);
+}
+
+// Aggregate daily totals across all campaigns — feeds the Paid tab's DMA
+// charts. CTR and avg CPC are re-derived from the summed numerators and
+// denominators so a sparse high-CPC day can't skew the trend.
+export async function getGoogleAdsDaily() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT
+      date::text,
+      SUM(cost)::float             as cost,
+      SUM(clicks)::int             as clicks,
+      SUM(impressions)::int        as impressions,
+      SUM(conversions)::float      as conversions,
+      SUM(conversion_value)::float as conversion_value
+    FROM google_ads_daily_by_campaign
+    GROUP BY date
+    ORDER BY date ASC
+  `);
+  return rows.map(r => ({
+    date: r.date,
+    cost: r.cost,
+    clicks: r.clicks,
+    impressions: r.impressions,
+    conversions: r.conversions,
+    conversion_value: r.conversion_value,
+    ctr: r.impressions > 0 ? r.clicks / r.impressions : null,
+    avg_cpc: r.clicks > 0 ? r.cost / r.clicks : null,
+  }));
+}
+
+export async function getGoogleAdsCampaignStats({ since = null, until = null } = {}) {
+  const p = getPool();
+  const where = [];
+  const params = [];
+  if (since) { params.push(since); where.push(`date >= $${params.length}::date`); }
+  if (until) { params.push(until); where.push(`date <= $${params.length}::date`); }
+  const whereSQL = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  const { rows } = await p.query(`
+    SELECT
+      campaign_id,
+      MAX(campaign_name)            as campaign_name,
+      MAX(channel_type)             as channel_type,
+      SUM(cost)::float              as cost,
+      SUM(clicks)::int              as clicks,
+      SUM(impressions)::int         as impressions,
+      SUM(conversions)::float       as conversions,
+      SUM(conversion_value)::float  as conversion_value,
+      COUNT(DISTINCT date)::int     as active_days
+    FROM google_ads_daily_by_campaign
+    ${whereSQL}
+    GROUP BY campaign_id
+    ORDER BY cost DESC
+  `, params);
+  return rows.map(r => ({
+    campaign_id: r.campaign_id,
+    campaign_name: r.campaign_name,
+    channel_type: r.channel_type,
+    cost: r.cost,
+    clicks: r.clicks,
+    impressions: r.impressions,
+    conversions: r.conversions,
+    conversion_value: r.conversion_value,
+    active_days: r.active_days,
+    ctr: r.impressions > 0 ? r.clicks / r.impressions : null,
+    avg_cpc: r.clicks > 0 ? r.cost / r.clicks : null,
+    cost_per_conversion: r.conversions > 0 ? r.cost / r.conversions : null,
+    roas: r.cost > 0 ? r.conversion_value / r.cost : null,
+  }));
+}
+
+// ── HubSpot helpers ──────────────────────────────────────────────────
+
+export async function upsertHubSpotDeals(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    let upserted = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO hubspot_deals
+          (deal_id, deal_name, amount, close_date, stage, stage_label, pipeline,
+           owner_id, source, source_data_1, source_data_2, campaign_guid,
+           is_closed_won, created_at, modified_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+        ON CONFLICT (deal_id) DO UPDATE SET
+          deal_name     = EXCLUDED.deal_name,
+          amount        = EXCLUDED.amount,
+          close_date    = EXCLUDED.close_date,
+          stage         = EXCLUDED.stage,
+          stage_label   = EXCLUDED.stage_label,
+          pipeline      = EXCLUDED.pipeline,
+          owner_id      = EXCLUDED.owner_id,
+          source        = EXCLUDED.source,
+          source_data_1 = EXCLUDED.source_data_1,
+          source_data_2 = EXCLUDED.source_data_2,
+          campaign_guid = EXCLUDED.campaign_guid,
+          is_closed_won = EXCLUDED.is_closed_won,
+          created_at    = EXCLUDED.created_at,
+          modified_at   = EXCLUDED.modified_at,
+          updated_at    = NOW()
+      `, [
+        r.deal_id, r.deal_name ?? '', r.amount ?? 0, r.close_date,
+        r.stage ?? '', r.stage_label ?? '', r.pipeline ?? '',
+        r.owner_id ?? '', r.source ?? '',
+        r.source_data_1 ?? '', r.source_data_2 ?? '', r.campaign_guid ?? '',
+        !!r.is_closed_won, r.created_at, r.modified_at,
+      ]);
+      upserted++;
+    }
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function upsertHubSpotCampaigns(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  let upserted = 0;
+  for (const r of rows) {
+    await p.query(`
+      INSERT INTO hubspot_campaigns (campaign_id, name, type, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT (campaign_id) DO UPDATE SET
+        name       = EXCLUDED.name,
+        type       = EXCLUDED.type,
+        created_at = EXCLUDED.created_at,
+        updated_at = NOW()
+    `, [r.campaign_id, r.name ?? '', r.type ?? '', r.created_at]);
+    upserted++;
+  }
+  return upserted;
+}
+
+export async function getHubSpotDealCount() {
+  const p = getPool();
+  const { rows } = await p.query('SELECT COUNT(*) as cnt FROM hubspot_deals');
+  return parseInt(rows[0].cnt, 10);
+}
+
+// Closed-won deals in [since, until], optionally narrowed to one attribution
+// source. Returns raw deal rows for the Paid/SEO campaign tables, plus
+// pre-aggregated source totals for the KPI tiles.
+export async function getHubSpotDealsWindow({ since = null, until = null, source = null } = {}) {
+  const p = getPool();
+  const where = [`is_closed_won = TRUE`, `close_date IS NOT NULL`];
+  const params = [];
+  if (since)  { params.push(since);  where.push(`close_date >= $${params.length}::date`); }
+  if (until)  { params.push(until);  where.push(`close_date <= $${params.length}::date`); }
+  if (source) { params.push(source); where.push(`source = $${params.length}`); }
+  const whereSQL = 'WHERE ' + where.join(' AND ');
+  const { rows } = await p.query(`
+    SELECT deal_id, deal_name, amount::float as amount, close_date::text,
+           source, source_data_1, source_data_2, campaign_guid
+    FROM hubspot_deals
+    ${whereSQL}
+    ORDER BY close_date DESC, amount DESC
+  `, params);
+  return rows;
+}
+
+// Daily won-deal counts + revenue by source — feeds DMA charts on both tabs.
+// Returns one row per (date, source) so the frontend can filter to the
+// attribution source it cares about.
+export async function getHubSpotDealsDailyBySource({ since = null } = {}) {
+  const p = getPool();
+  const params = [];
+  const where = [`is_closed_won = TRUE`, `close_date IS NOT NULL`];
+  if (since) { params.push(since); where.push(`close_date >= $${params.length}::date`); }
+  const { rows } = await p.query(`
+    SELECT
+      close_date::text as date,
+      COALESCE(NULLIF(source, ''), 'UNKNOWN') as source,
+      COUNT(*)::int     as deals,
+      SUM(amount)::float as revenue
+    FROM hubspot_deals
+    WHERE ${where.join(' AND ')}
+    GROUP BY close_date, source
+    ORDER BY close_date ASC
+  `, params);
+  return rows;
+}
+
+// Distinct source labels HubSpot has used. Used by the frontend to populate
+// a source filter dropdown; the bare strings come from HubSpot unchanged.
+export async function getHubSpotSources() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT COALESCE(NULLIF(source, ''), 'UNKNOWN') as source, COUNT(*)::int as deals
+    FROM hubspot_deals
+    WHERE is_closed_won = TRUE
+    GROUP BY source
+    ORDER BY deals DESC
+  `);
+  return rows;
+}
+
+// ── Google Search Console helpers ────────────────────────────────────
+
+export async function upsertGscDaily(rows, { replaceSince = null } = {}) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    if (replaceSince) {
+      await client.query(`DELETE FROM gsc_daily WHERE date >= $1`, [replaceSince]);
+    }
+    let upserted = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO gsc_daily (date, clicks, impressions, ctr, position, updated_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        ON CONFLICT (date) DO UPDATE SET
+          clicks      = EXCLUDED.clicks,
+          impressions = EXCLUDED.impressions,
+          ctr         = EXCLUDED.ctr,
+          position    = EXCLUDED.position,
+          updated_at  = NOW()
+      `, [r.date, r.clicks ?? 0, r.impressions ?? 0, r.ctr ?? 0, r.position ?? 0]);
+      upserted++;
+    }
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function upsertGscTopQueries(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    let upserted = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO gsc_top_queries (window_end_date, query, clicks, impressions, ctr, position, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        ON CONFLICT (window_end_date, query) DO UPDATE SET
+          clicks = EXCLUDED.clicks,
+          impressions = EXCLUDED.impressions,
+          ctr = EXCLUDED.ctr,
+          position = EXCLUDED.position,
+          updated_at = NOW()
+      `, [r.window_end_date, r.query, r.clicks ?? 0, r.impressions ?? 0, r.ctr ?? 0, r.position ?? 0]);
+      upserted++;
+    }
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function upsertGscTopPages(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    let upserted = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO gsc_top_pages (window_end_date, page, clicks, impressions, ctr, position, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        ON CONFLICT (window_end_date, page) DO UPDATE SET
+          clicks = EXCLUDED.clicks,
+          impressions = EXCLUDED.impressions,
+          ctr = EXCLUDED.ctr,
+          position = EXCLUDED.position,
+          updated_at = NOW()
+      `, [r.window_end_date, r.page, r.clicks ?? 0, r.impressions ?? 0, r.ctr ?? 0, r.position ?? 0]);
+      upserted++;
+    }
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getGscRowCount() {
+  const p = getPool();
+  const { rows } = await p.query('SELECT COUNT(*) as cnt FROM gsc_daily');
+  return parseInt(rows[0].cnt, 10);
+}
+
+export async function getGscDaily() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT date::text,
+      clicks, impressions,
+      ctr::float      as ctr,
+      position::float as position
+    FROM gsc_daily
+    ORDER BY date ASC
+  `);
+  return rows;
+}
+
+// Latest window snapshot for the SEO tab's top-queries / top-pages tables.
+// kind: 'query' | 'page'. Defaults to the most recent window_end_date in the
+// table; callers can pin a specific window via windowEnd.
+export async function getGscTop({ kind, windowEnd = null, limit = 100 } = {}) {
+  const p = getPool();
+  const table = kind === 'page' ? 'gsc_top_pages' : 'gsc_top_queries';
+  const dimCol = kind === 'page' ? 'page' : 'query';
+  let end = windowEnd;
+  if (!end) {
+    const { rows } = await p.query(`SELECT MAX(window_end_date)::text as d FROM ${table}`);
+    end = rows[0]?.d;
+    if (!end) return { window_end: null, rows: [] };
+  }
+  const { rows } = await p.query(`
+    SELECT ${dimCol} as dimension,
+      clicks, impressions,
+      ctr::float      as ctr,
+      position::float as position
+    FROM ${table}
+    WHERE window_end_date = $1::date
+    ORDER BY clicks DESC
+    LIMIT $2
+  `, [end, limit]);
+  return { window_end: end, rows };
 }

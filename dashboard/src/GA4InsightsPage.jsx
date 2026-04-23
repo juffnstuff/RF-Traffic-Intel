@@ -4,7 +4,7 @@ import {
   CartesianGrid,
 } from 'recharts';
 import {
-  DMALineChart, StatCard, fmtNum, fmtMoney, fmtPct, fmtDate, fmtAxisDate,
+  DMALineChart, StatCard, fmtNum, fmtMoney, fmtPct, fmtRatio, fmtDate, fmtAxisDate,
 } from './DashboardView';
 import {
   RELATIVE_RANGES, RangeDropdown, YearsDropdown,
@@ -20,14 +20,6 @@ function fmtDuration(secs) {
   const m = Math.floor(s / 60);
   const r = s % 60;
   return `${m}m ${r.toString().padStart(2, '0')}s`;
-}
-
-// Unitless ratio to 2 decimals, e.g. 1.43 or 0.67. GA4's conversions/sessions
-// can exceed 1 because a session can fire multiple key events, so formatting
-// it as a percent misleads readers.
-function fmtRatio(n) {
-  if (n == null || Number.isNaN(n)) return '—';
-  return Number(n).toFixed(2);
 }
 
 // Palette for the stacked channel-mix chart. Picked to be distinguishable on
