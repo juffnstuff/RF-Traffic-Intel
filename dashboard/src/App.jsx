@@ -6,6 +6,7 @@ import GA4InsightsPage from './GA4InsightsPage';
 import PaidKPIsPage from './PaidKPIsPage';
 import SEOKPIsPage from './SEOKPIsPage';
 import DSOATDLogo from './components/DSOATDLogo';
+import RFTILogo from './components/RFTILogo';
 
 function OverviewPage() {
   const [data, setData] = useState(null);
@@ -89,9 +90,9 @@ export default function App() {
     }}>
       <header style={{ padding: '16px clamp(12px, 4vw, 32px) 0', borderBottom: '1px solid var(--dso-rule)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, paddingBottom: 12 }}>
-          <DSOATDLogo
-            size={26}
-            color="var(--dso-accent)"
+          <RFTILogo
+            size={22}
+            color="var(--dso-sky-bright, #a8d8e8)"
             hot="var(--dso-accent-hot)"
             showFrame={false}
             showTagline={false}
