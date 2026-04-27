@@ -4,7 +4,7 @@ import {
   Tooltip, Legend, CartesianGrid,
   BarChart, Bar, Cell, ReferenceLine,
 } from 'recharts';
-import { movingAverage, leadLag, leadLagDetrended, weekdaysOnly } from './utils/analytics';
+import { movingAverage, leadLag, leadLagDetrended, slopeLastN, weekdaysOnly } from './utils/analytics';
 import { RELATIVE_RANGES, RangeDropdown, YearsDropdown, useLocalStorageState, clearAllFilters } from './FilterControls';
 
 export function fmtNum(n) {
@@ -44,7 +44,40 @@ export function fmtAxisDate(d) {
   return `${months[parseInt(parts[1],10)-1]} ${parts[0].slice(2)}`;
 }
 
-export function StatCard({ label, value, sub, small }) {
+// Up/down/flat triangle for a 7-day slope. Sign-only — magnitude is irrelevant
+// here since metrics live on wildly different scales (dollars vs. ratios).
+function TrendArrow({ slope, size = 12 }) {
+  if (slope == null) {
+    return <span style={{ color: 'var(--dso-text-faint)', fontSize: size }}>·</span>;
+  }
+  const up = slope > 0;
+  const flat = slope === 0;
+  const color = flat ? 'var(--dso-text-faint)' : (up ? '#22c55e' : '#ef4444');
+  const glyph = flat ? '→' : (up ? '▲' : '▼');
+  return (
+    <span style={{ color, fontSize: size, fontWeight: 700, lineHeight: 1 }}>
+      {glyph}
+    </span>
+  );
+}
+
+/**
+ * StatCard — top-of-page KPI tile.
+ *
+ * Optional trend props (when supplied) layer on:
+ *   ma30, ma90       raw numeric DMAs — used to derive growth vs contracting
+ *   slope30, slope90 7-day linear-regression slopes — sign drives arrows
+ *   formatter        function used to format ma90 inline
+ *
+ * Without those, the card renders the legacy label/value/sub/small layout.
+ */
+export function StatCard({
+  label, value, sub, small,
+  ma30, ma90, slope30, slope90, formatter,
+}) {
+  const hasCompare = ma30 != null && ma90 != null;
+  const growth = hasCompare ? ma30 > ma90 : null;
+  const showTrendRow = slope30 != null || slope90 != null || hasCompare || ma90 != null;
   return (
     <div style={{
       background: 'var(--dso-surface)',
@@ -63,15 +96,45 @@ export function StatCard({ label, value, sub, small }) {
         textTransform: 'uppercase',
         marginBottom: 6,
       }}>{label}</div>
-      <div style={{
-        color: 'var(--dso-text)',
-        fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
-        fontSize: 26,
-        fontWeight: 700,
-        lineHeight: 1.05,
-        letterSpacing: '-0.01em',
-      }}>{value}</div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{
+          color: 'var(--dso-text)',
+          fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+          fontSize: 26,
+          fontWeight: 700,
+          lineHeight: 1.05,
+          letterSpacing: '-0.01em',
+        }}>{value}</div>
+        {slope30 !== undefined && <TrendArrow slope={slope30} size={14} />}
+      </div>
       {sub && <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginTop: 4 }}>{sub}</div>}
+      {showTrendRow && (
+        <div style={{
+          color: 'var(--dso-text-dim)',
+          fontSize: 11,
+          marginTop: 4,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          flexWrap: 'wrap',
+          fontFeatureSettings: '"tnum"',
+        }}>
+          <span>90 DMA{ma90 != null && formatter ? `: ${formatter(ma90)}` : ''}</span>
+          {slope90 !== undefined && <TrendArrow slope={slope90} size={11} />}
+          {hasCompare && (
+            <span style={{
+              color: growth ? '#22c55e' : '#ef4444',
+              fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+            }}>
+              · {growth ? 'Growth' : 'Contracting'}
+            </span>
+          )}
+        </div>
+      )}
       {small && <div style={{ color: 'var(--dso-text-faint)', fontSize: 10, marginTop: 2 }}>{small}</div>}
     </div>
   );
@@ -463,12 +526,28 @@ export default function DashboardView({
     if (chartData.length === 0) return null;
     const last = chartData[chartData.length - 1];
     const sumField = (f) => chartData.reduce((s, d) => s + (d[f] || 0), 0);
+    // 7-day slope of each DMA series across the visible window. Sign feeds the
+    // trend arrows on the StatCards; magnitude is unused.
+    const slopeOf = (f) => slopeLastN(chartData.map(d => d[f]), 7);
     return {
+      // 30 DMA latest values (the headline number on each card)
       q30: last.q30, o30: last.o30, s30: last.s30,
       qc30: last.qc30, oc30: last.oc30, sc30: last.sc30,
       closeRate: last.closeRate,
       captureRate: last.captureRate,
       aovO30: last.aovO30, aovS30: last.aovS30,
+      // 90 DMA latest values — used to derive growth/contracting (30 vs 90)
+      q90: last.q90, o90: last.o90, s90: last.s90,
+      cr90: last.cr90, capt90: last.capt90,
+      aovO90: last.aovO90, aovS90: last.aovS90,
+      // 7-day slopes for the up/down arrows
+      q30Slope: slopeOf('q30'),         q90Slope: slopeOf('q90'),
+      o30Slope: slopeOf('o30'),         o90Slope: slopeOf('o90'),
+      s30Slope: slopeOf('s30'),         s90Slope: slopeOf('s90'),
+      closeRateSlope: slopeOf('closeRate'),     cr90Slope: slopeOf('cr90'),
+      captureRateSlope: slopeOf('captureRate'), capt90Slope: slopeOf('capt90'),
+      aovO30Slope: slopeOf('aovO30'),   aovO90Slope: slopeOf('aovO90'),
+      aovS30Slope: slopeOf('aovS30'),   aovS90Slope: slopeOf('aovS90'),
       totalQuotesDollars: sumField('quotes_total'),
       totalOrdersDollars: sumField('orders_total'),
       totalShippedDollars: sumField('shipped_total'),
@@ -742,13 +821,23 @@ export default function DashboardView({
       <main style={{ padding: '16px clamp(12px, 4vw, 32px)', maxWidth: 1600, margin: '0 auto' }}>
         {summary && (
           <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
-            <StatCard label="Total Quote DMA" value={fmtMoney(summary.q30)} sub="30 DMA avg daily" small={`Period total: ${fmtMoney(summary.totalQuotesDollars)}`} />
-            <StatCard label="Total Orders DMA" value={fmtMoney(summary.o30)} sub="30 DMA avg daily" small={`Period total: ${fmtMoney(summary.totalOrdersDollars)}`} />
-            <StatCard label="Total Shipped DMA" value={fmtMoney(summary.s30)} sub="30 DMA avg daily" small={`Period total: ${fmtMoney(summary.totalShippedDollars)}`} />
-            <StatCard label="Close Rate DMA" value={fmtPct(summary.closeRate)} sub="30 DMA orders/quotes (count)" />
-            <StatCard label="Capture Rate DMA" value={fmtPct(summary.captureRate)} sub="30 DMA orders$/quotes$" />
-            <StatCard label="Avg Order Value" value={fmtMoney(summary.aovO30)} sub="30 DMA orders$/count" />
-            <StatCard label="Avg Shipped Value" value={fmtMoney(summary.aovS30)} sub="30 DMA shipped$/count" />
+            <StatCard label="Total Quote DMA" value={fmtMoney(summary.q30)} sub="30 DMA avg daily"
+              ma30={summary.q30} ma90={summary.q90} slope30={summary.q30Slope} slope90={summary.q90Slope} formatter={fmtMoney}
+              small={`Period total: ${fmtMoney(summary.totalQuotesDollars)}`} />
+            <StatCard label="Total Orders DMA" value={fmtMoney(summary.o30)} sub="30 DMA avg daily"
+              ma30={summary.o30} ma90={summary.o90} slope30={summary.o30Slope} slope90={summary.o90Slope} formatter={fmtMoney}
+              small={`Period total: ${fmtMoney(summary.totalOrdersDollars)}`} />
+            <StatCard label="Total Shipped DMA" value={fmtMoney(summary.s30)} sub="30 DMA avg daily"
+              ma30={summary.s30} ma90={summary.s90} slope30={summary.s30Slope} slope90={summary.s90Slope} formatter={fmtMoney}
+              small={`Period total: ${fmtMoney(summary.totalShippedDollars)}`} />
+            <StatCard label="Close Rate DMA" value={fmtPct(summary.closeRate)} sub="30 DMA orders/quotes (count)"
+              ma30={summary.closeRate} ma90={summary.cr90} slope30={summary.closeRateSlope} slope90={summary.cr90Slope} formatter={fmtPct} />
+            <StatCard label="Capture Rate DMA" value={fmtPct(summary.captureRate)} sub="30 DMA orders$/quotes$"
+              ma30={summary.captureRate} ma90={summary.capt90} slope30={summary.captureRateSlope} slope90={summary.capt90Slope} formatter={fmtPct} />
+            <StatCard label="Avg Order Value" value={fmtMoney(summary.aovO30)} sub="30 DMA orders$/count"
+              ma30={summary.aovO30} ma90={summary.aovO90} slope30={summary.aovO30Slope} slope90={summary.aovO90Slope} formatter={fmtMoney} />
+            <StatCard label="Avg Shipped Value" value={fmtMoney(summary.aovS30)} sub="30 DMA shipped$/count"
+              ma30={summary.aovS30} ma90={summary.aovS90} slope30={summary.aovS30Slope} slope90={summary.aovS90Slope} formatter={fmtMoney} />
           </div>
         )}
 
