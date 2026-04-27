@@ -5,6 +5,7 @@ import PartGroupAnalysisPage from './PartGroupAnalysisPage';
 import GA4InsightsPage from './GA4InsightsPage';
 import PaidKPIsPage from './PaidKPIsPage';
 import SEOKPIsPage from './SEOKPIsPage';
+import DSOATDLogo from './components/DSOATDLogo';
 
 function OverviewPage() {
   const [data, setData] = useState(null);
@@ -66,24 +67,36 @@ export default function App() {
   const [tab, setTab] = useState('overview');
 
   const tabStyle = (active) => ({
-    background: active ? '#0f172a' : 'transparent',
-    color: active ? '#f8fafc' : '#94a3b8',
+    background: 'transparent',
+    color: active ? 'var(--dso-text)' : 'var(--dso-text-dim)',
     border: 'none',
-    borderBottom: active ? '2px solid #f59e0b' : '2px solid transparent',
+    borderBottom: active ? '2px solid var(--dso-accent-hot)' : '2px solid transparent',
     padding: '10px 18px',
     fontSize: 13,
-    fontWeight: 600,
+    fontWeight: 700,
     cursor: 'pointer',
-    letterSpacing: 0.2,
+    letterSpacing: '0.14em',
+    textTransform: 'uppercase',
+    fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
   });
 
   return (
-    <div style={{ background: '#0f172a', color: '#f8fafc', minHeight: '100vh', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
-      <header style={{ padding: '16px clamp(12px, 4vw, 32px) 0', borderBottom: '1px solid #1e293b' }}>
+    <div style={{
+      background: 'var(--dso-bg)',
+      color: 'var(--dso-text)',
+      minHeight: '100vh',
+      fontFamily: "var(--dso-font-body, system-ui, -apple-system, sans-serif)",
+    }}>
+      <header style={{ padding: '16px clamp(12px, 4vw, 32px) 0', borderBottom: '1px solid var(--dso-rule)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, paddingBottom: 12 }}>
-          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>
-            <span style={{ color: '#f59e0b' }}>RF</span> Traffic Intelligence
-          </h1>
+          <DSOATDLogo
+            size={26}
+            color="var(--dso-accent)"
+            hot="var(--dso-accent-hot)"
+            showFrame={false}
+            showTagline={false}
+          />
+          <span className="dso-auto-tag" style={{ fontSize: 11 }}>Traffic Intelligence · Live</span>
         </div>
         <nav style={{ display: 'flex', gap: 2, overflowX: 'auto', whiteSpace: 'nowrap' }}>
           <button style={tabStyle(tab === 'overview')} onClick={() => setTab('overview')}>Overview</button>

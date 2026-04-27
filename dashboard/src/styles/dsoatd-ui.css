@@ -1,0 +1,213 @@
+/* RF-DSOATD UI Patterns
+ * v1.0 · Apr 2026
+ * Class utilities — sky-blue base + hot-pink-red lining accents.
+ * Requires dsoatd-tokens.css to be loaded first.
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;500;600;700&family=Inter+Tight:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Yellowtail&family=Pacifico&display=swap');
+
+.dsoatd {
+  font-family: var(--dso-font-body);
+  color: var(--dso-text);
+  background: var(--dso-bg);
+  font-size: var(--dso-text-md);
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- Headings ---- */
+.dso-display {
+  font-family: var(--dso-font-display);
+  font-weight: 400;
+  font-size: var(--dso-text-5xl);
+  line-height: 1;
+  color: var(--dso-accent);
+}
+.dso-h1, .dso-h2, .dso-h3, .dso-eyebrow {
+  font-family: var(--dso-font-heading);
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--dso-text);
+  margin: 0;
+}
+.dso-h1 { font-size: var(--dso-text-3xl); letter-spacing: 0.01em; line-height: 1.05; }
+.dso-h2 { font-size: var(--dso-text-2xl); letter-spacing: 0.04em; line-height: 1.1; }
+.dso-h3 { font-size: var(--dso-text-xl); letter-spacing: 0.06em; line-height: 1.15; }
+.dso-eyebrow {
+  font-size: var(--dso-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.20em;
+  color: var(--dso-text-dim);
+}
+.dso-eyebrow--hot { color: var(--dso-accent-hot); }
+
+/* ---- Frame: double stroke with hot-pink-red INNER lining ---- */
+.dso-frame {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--dso-space-6) var(--dso-space-7);
+  border: var(--dso-frame-stroke) solid var(--dso-accent);
+  border-radius: var(--dso-radius-md);
+}
+.dso-frame::before {
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border: var(--dso-frame-stroke-hot) solid var(--dso-accent-hot);
+  border-radius: var(--dso-radius-sm);
+  pointer-events: none;
+}
+
+/* ---- Card with hot top stripe ---- */
+.dso-card {
+  position: relative;
+  background: var(--dso-surface);
+  border: 1px solid var(--dso-rule);
+  padding: var(--dso-space-6);
+  border-radius: var(--dso-radius-md);
+}
+.dso-card--hot {
+  border-top: 3px solid var(--dso-accent-hot);
+  border-radius: 0 0 var(--dso-radius-md) var(--dso-radius-md);
+}
+
+/* ---- Buttons ---- */
+.dso-btn {
+  font-family: var(--dso-font-heading);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: var(--dso-text-sm);
+  padding: var(--dso-space-3) var(--dso-space-5);
+  border: 2px solid var(--dso-accent);
+  background: transparent;
+  color: var(--dso-accent);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border-radius: var(--dso-radius-sm);
+}
+.dso-btn:hover {
+  background: var(--dso-accent);
+  color: var(--dso-surface);
+}
+.dso-btn--hot {
+  border-color: var(--dso-accent-hot);
+  color: var(--dso-accent-hot);
+}
+.dso-btn--hot:hover {
+  background: var(--dso-accent-hot);
+  color: white;
+}
+.dso-btn--solid-hot {
+  background: var(--dso-accent-hot);
+  border-color: var(--dso-accent-hot);
+  color: white;
+}
+.dso-btn--solid-hot:hover {
+  background: var(--dso-hot-deep);
+  border-color: var(--dso-hot-deep);
+}
+
+/* ---- Hot rule (divider with pink-red accent) ---- */
+.dso-hr-hot {
+  border: none;
+  border-top: 2px solid var(--dso-accent-hot);
+  margin: var(--dso-space-5) 0;
+}
+.dso-hr {
+  border: none;
+  border-top: 1px solid var(--dso-rule);
+  margin: var(--dso-space-5) 0;
+}
+
+/* ---- Chip / status pill ---- */
+.dso-chip {
+  display: inline-block;
+  font-family: var(--dso-font-mono);
+  font-size: var(--dso-text-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  background: var(--dso-chip);
+  color: var(--dso-accent-hot);
+  border-radius: var(--dso-radius-sm);
+}
+.dso-chip--hot {
+  background: var(--dso-accent-hot);
+  color: white;
+}
+
+/* ---- Data row: spreadsheet-like with hot left-rail ---- */
+.dso-row {
+  display: grid;
+  grid-template-columns: 4px 1fr auto;
+  gap: var(--dso-space-4);
+  align-items: center;
+  padding: var(--dso-space-3) var(--dso-space-4);
+  background: var(--dso-surface);
+  border-bottom: 1px solid var(--dso-rule);
+  font-family: var(--dso-font-mono);
+  font-size: var(--dso-text-sm);
+}
+.dso-row::before {
+  content: '';
+  align-self: stretch;
+  background: transparent;
+}
+.dso-row--hot::before { background: var(--dso-accent-hot); }
+.dso-row--blue::before { background: var(--dso-accent); }
+
+/* ---- Status indicator: "AUTOMATED" tag w/ live dot ---- */
+.dso-auto-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--dso-font-heading);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: var(--dso-text-xs);
+  color: var(--dso-accent-hot);
+}
+.dso-auto-tag::before {
+  content: '';
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--dso-accent-hot);
+  box-shadow: 0 0 0 0 var(--dso-accent-hot);
+  animation: dso-pulse 1.6s ease-out infinite;
+}
+@keyframes dso-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 45, 111, 0.6); }
+  70% { box-shadow: 0 0 0 8px rgba(255, 45, 111, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 45, 111, 0); }
+}
+
+/* ---- Numeric callout (the "$" / "units" / "%" block) ---- */
+.dso-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--dso-space-4) var(--dso-space-5);
+  border-left: 3px solid var(--dso-accent-hot);
+  background: var(--dso-surface);
+}
+.dso-stat-value {
+  font-family: var(--dso-font-heading);
+  font-weight: 700;
+  font-size: var(--dso-text-3xl);
+  line-height: 1;
+  color: var(--dso-text);
+  letter-spacing: -0.01em;
+}
+.dso-stat-label {
+  font-family: var(--dso-font-heading);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: var(--dso-text-xs);
+  color: var(--dso-text-dim);
+}
