@@ -1,0 +1,103 @@
+/* RF-DSOATD Brand Tokens
+ * v1.0 · Apr 2026
+ * Sister system to RFRP. Adds a hot pink-red accent for the
+ * Daily Sales Order — Automated tooling.
+ *
+ * Light mode is default. Add data-theme="dark" to <html> or <body> for dark.
+ */
+
+:root {
+  /* ---- Brand palette (RFRP base) ---- */
+  --dso-sky:        #1a6b87;
+  --dso-sky-bright: #a8d8e8;
+  --dso-cream:      #f4ead5;
+  --dso-ink:        #0e3447;
+  --dso-paper:      #ffffff;
+  --dso-sand:       #f0f7fa;
+
+  /* ---- DSOATD signature: hot pink-red ---- */
+  --dso-hot:        #ff2d6f;   /* primary hot pink-red */
+  --dso-hot-deep:   #d11854;   /* hover / pressed */
+  --dso-hot-soft:   #ffd9e5;   /* tints / wash */
+
+  /* ---- Salmon (warning / pending) ---- */
+  --dso-salmon:     #ff8a70;
+  --dso-salmon-soft:#ffe1d8;
+
+  /* ---- Light blue (info / shipped) ---- */
+  --dso-blue-pop:   #5cc9ff;
+  --dso-blue-soft:  #d6f1ff;
+
+  /* ---- Lime (go / paid / cleared) ---- */
+  --dso-lime:       #c6f04a;
+  --dso-lime-deep:  #8ec51a;
+  --dso-lime-soft:  #ecfbc9;
+
+  /* ---- Semantic (light mode) ---- */
+  --dso-bg:         var(--dso-sand);
+  --dso-surface:    var(--dso-paper);
+  --dso-text:       var(--dso-ink);
+  --dso-text-dim:   rgba(14, 52, 71, 0.70);
+  --dso-text-faint: rgba(14, 52, 71, 0.38);
+  --dso-rule:       rgba(14, 52, 71, 0.18);
+  --dso-rule-hot:   var(--dso-hot);     /* hot lining for accented borders */
+  --dso-accent:     var(--dso-sky);
+  --dso-accent-hot: var(--dso-hot);
+  --dso-chip:       var(--dso-hot-soft);
+
+  /* ---- Type ---- */
+  --dso-font-display: 'Yellowtail', 'Pacifico', cursive;
+  --dso-font-heading: 'Oswald', 'Bebas Neue', 'Arial Narrow', sans-serif;
+  --dso-font-body:    'Inter Tight', 'Inter', system-ui, -apple-system, sans-serif;
+  --dso-font-mono:    'JetBrains Mono', ui-monospace, Menlo, monospace;
+
+  --dso-text-xs:   0.75rem;
+  --dso-text-sm:   0.875rem;
+  --dso-text-md:   1rem;
+  --dso-text-lg:   1.125rem;
+  --dso-text-xl:   1.5rem;
+  --dso-text-2xl:  2rem;
+  --dso-text-3xl:  3rem;
+  --dso-text-4xl:  4.5rem;
+  --dso-text-5xl:  7rem;
+
+  --dso-space-1: 4px;
+  --dso-space-2: 8px;
+  --dso-space-3: 12px;
+  --dso-space-4: 16px;
+  --dso-space-5: 24px;
+  --dso-space-6: 32px;
+  --dso-space-7: 48px;
+  --dso-space-8: 64px;
+
+  --dso-radius-sm: 2px;
+  --dso-radius-md: 4px;
+  --dso-frame-stroke: 2.5px;
+  --dso-frame-stroke-hot: 2px;
+}
+
+[data-theme="dark"] {
+  --dso-bg:         #0e3447;
+  --dso-surface:    #16475f;
+  --dso-text:       #ffffff;
+  --dso-text-dim:   rgba(255, 255, 255, 0.74);
+  --dso-text-faint: rgba(255, 255, 255, 0.40);
+  --dso-rule:       rgba(168, 216, 232, 0.32);
+  --dso-accent:     var(--dso-sky-bright);
+  --dso-accent-hot: var(--dso-hot);
+  --dso-chip:       rgba(255, 45, 111, 0.18);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --dso-bg:         #0e3447;
+    --dso-surface:    #16475f;
+    --dso-text:       #ffffff;
+    --dso-text-dim:   rgba(255, 255, 255, 0.74);
+    --dso-text-faint: rgba(255, 255, 255, 0.40);
+    --dso-rule:       rgba(168, 216, 232, 0.32);
+    --dso-accent:     var(--dso-sky-bright);
+    --dso-accent-hot: var(--dso-hot);
+    --dso-chip:       rgba(255, 45, 111, 0.18);
+  }
+}

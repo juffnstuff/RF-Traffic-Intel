@@ -47,13 +47,32 @@ export function fmtAxisDate(d) {
 export function StatCard({ label, value, sub, small }) {
   return (
     <div style={{
-      background: '#334155', borderRadius: 8, padding: '14px 16px',
-      flex: '1 1 160px', minWidth: 140,
+      background: 'var(--dso-surface)',
+      borderRadius: 4,
+      padding: '14px 16px',
+      flex: '1 1 160px',
+      minWidth: 140,
+      borderLeft: '3px solid var(--dso-accent-hot)',
     }}>
-      <div style={{ color: '#cbd5e1', fontSize: 11, marginBottom: 2 }}>{label}</div>
-      <div style={{ color: '#f8fafc', fontSize: 24, fontWeight: 700, lineHeight: 1.1 }}>{value}</div>
-      {sub && <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 4 }}>{sub}</div>}
-      {small && <div style={{ color: '#94a3b8', fontSize: 10, marginTop: 2 }}>{small}</div>}
+      <div style={{
+        color: 'var(--dso-text-dim)',
+        fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+        fontSize: 10,
+        fontWeight: 600,
+        letterSpacing: '0.18em',
+        textTransform: 'uppercase',
+        marginBottom: 6,
+      }}>{label}</div>
+      <div style={{
+        color: 'var(--dso-text)',
+        fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+        fontSize: 26,
+        fontWeight: 700,
+        lineHeight: 1.05,
+        letterSpacing: '-0.01em',
+      }}>{value}</div>
+      {sub && <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginTop: 4 }}>{sub}</div>}
+      {small && <div style={{ color: 'var(--dso-text-faint)', fontSize: 10, marginTop: 2 }}>{small}</div>}
     </div>
   );
 }
@@ -62,10 +81,16 @@ function ChartTooltip({ active, payload, label, formatter }) {
   if (!active || !payload?.length) return null;
   return (
     <div style={{
-      background: '#0f172a', border: '1px solid #64748b', borderRadius: 6,
-      padding: '10px 14px', fontSize: 12, lineHeight: 1.6,
+      background: 'var(--dso-bg)',
+      border: '1px solid var(--dso-rule)',
+      borderLeft: '3px solid var(--dso-accent-hot)',
+      borderRadius: 4,
+      padding: '10px 14px',
+      fontSize: 12,
+      lineHeight: 1.6,
+      fontFamily: "var(--dso-font-mono, ui-monospace, Menlo, monospace)",
     }}>
-      <div style={{ color: '#f8fafc', fontWeight: 600, marginBottom: 4 }}>{fmtDate(label)}</div>
+      <div style={{ color: 'var(--dso-text)', fontWeight: 700, marginBottom: 4 }}>{fmtDate(label)}</div>
       {payload.map((p, i) => (
         <div key={i} style={{ color: p.color }}>
           {p.name}: {formatter ? formatter(p.value) : fmtNum(p.value)}
@@ -75,10 +100,13 @@ function ChartTooltip({ active, payload, label, formatter }) {
   );
 }
 
+// Brand-mapped chart palette. raw = faint grey (background context),
+// 30 DMA = hot pink-red (the "look at this!" recent trend),
+// 90 DMA = sky-bright (the steady baseline).
 const LINE_COLORS = {
-  daily: '#94a3b8',
-  ma30: '#fbbf24',
-  ma90: '#a78bfa',
+  daily: 'rgba(255, 255, 255, 0.32)',
+  ma30: '#ff2d6f',
+  ma90: '#a8d8e8',
 };
 
 export function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmtNum, currentValue, showDaily = true }) {
@@ -102,30 +130,53 @@ export function DMALineChart({ title, data, field30, field90, fieldRaw, formatte
 
   return (
     <div style={{
-      background: '#334155', borderRadius: 8, padding: '14px 16px',
-      flex: '1 1 480px', minWidth: 0,
+      background: 'var(--dso-surface)',
+      borderRadius: 4,
+      padding: '14px 16px',
+      flex: '1 1 480px',
+      minWidth: 0,
+      border: '1px solid var(--dso-rule)',
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
         <div>
-          <div style={{ color: '#cbd5e1', fontSize: 11 }}>{title}</div>
-          <div style={{ color: '#f8fafc', fontSize: 22, fontWeight: 700 }}>
+          <div style={{
+            color: 'var(--dso-text-dim)',
+            fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: '0.18em',
+            textTransform: 'uppercase',
+          }}>{title}</div>
+          <div style={{
+            color: 'var(--dso-text)',
+            fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+            fontSize: 22,
+            fontWeight: 700,
+            letterSpacing: '-0.01em',
+          }}>
             {formatter(currentValue ?? latest30)}
-            <span style={{ fontSize: 11, color: '#94a3b8', marginLeft: 6 }}>30 DMA</span>
+            <span style={{
+              fontSize: 10,
+              color: 'var(--dso-accent-hot)',
+              marginLeft: 8,
+              letterSpacing: '0.16em',
+              fontWeight: 600,
+            }}>30 DMA</span>
           </div>
         </div>
       </div>
       <ResponsiveContainer width="100%" height={220}>
         <LineChart data={data} syncId="rf-dashboard-charts" syncMethod="value" margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#64748b" strokeOpacity={0.4} />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--dso-rule)" strokeOpacity={0.5} />
           <XAxis
             dataKey="date" tickFormatter={fmtAxisDate}
             ticks={monthTicks} interval={0}
-            tick={{ fill: '#cbd5e1', fontSize: 10 }}
-            axisLine={{ stroke: '#94a3b8' }} tickLine={false}
+            tick={{ fill: 'var(--dso-text-dim)', fontSize: 10 }}
+            axisLine={{ stroke: 'var(--dso-rule)' }} tickLine={false}
           />
           <YAxis
             tickFormatter={formatter}
-            tick={{ fill: '#cbd5e1', fontSize: 10 }}
+            tick={{ fill: 'var(--dso-text-dim)', fontSize: 10 }}
             axisLine={false} tickLine={false} width={55}
           />
           <Tooltip content={<ChartTooltip formatter={formatter} />} />
@@ -650,14 +701,34 @@ export default function DashboardView({
           {onRefresh && (
             <>
               <button onClick={() => onRefresh('incremental')} disabled={refreshing} style={{
-                background: '#164e63', color: '#67e8f9', border: 'none', borderRadius: 4,
-                padding: '5px 12px', cursor: 'pointer', fontSize: 11, fontWeight: 600,
+                background: 'var(--dso-accent-hot)',
+                color: '#ffffff',
+                border: '2px solid var(--dso-accent-hot)',
+                borderRadius: 2,
+                padding: '6px 14px',
+                cursor: refreshing ? 'wait' : 'pointer',
+                fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: '0.14em',
+                textTransform: 'uppercase',
+                opacity: refreshing ? 0.7 : 1,
               }}>
-                {refreshing ? 'Refreshing...' : '↻ Refresh'}
+                {refreshing ? 'Refreshing…' : '↻ Refresh'}
               </button>
               <button onClick={() => onRefresh('full')} disabled={refreshing} style={{
-                background: '#1e293b', color: '#94a3b8', border: '1px solid #334155', borderRadius: 4,
-                padding: '5px 12px', cursor: 'pointer', fontSize: 11, fontWeight: 600,
+                background: 'transparent',
+                color: 'var(--dso-accent)',
+                border: '2px solid var(--dso-accent)',
+                borderRadius: 2,
+                padding: '6px 14px',
+                cursor: refreshing ? 'wait' : 'pointer',
+                fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: '0.14em',
+                textTransform: 'uppercase',
+                opacity: refreshing ? 0.7 : 1,
               }}>
                 Full Backfill
               </button>
