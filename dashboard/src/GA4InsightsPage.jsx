@@ -10,7 +10,7 @@ import {
   RELATIVE_RANGES, RangeDropdown, YearsDropdown,
   useLocalStorageState, clearAllFilters,
 } from './FilterControls';
-import { movingAverage, weekdaysOnly } from './utils/analytics';
+import { movingAverage, slopeLastN, weekdaysOnly } from './utils/analytics';
 
 // Seconds → "1m 23s" or "45s". Used for avg session duration KPI.
 function fmtDuration(secs) {
@@ -338,6 +338,13 @@ export default function GA4InsightsPage() {
     const totalConv = sum('conversions');
     const totalEngaged = sum('engagedSessions');
     const totalPageviews = sum('pageviews');
+    // Latest 30/90 DMAs and 7-day slopes feed the trend arrows and
+    // GROWTH/CONTRACTING badges on the KPI tiles. Note: the StatCard
+    // applies a uniform "30 > 90 = growth" rule — for bounce rate, that
+    // means GROWTH = more bouncing, which is bad. The page caller has to
+    // accept that the badge is directionally agnostic.
+    const last = chartData[chartData.length - 1];
+    const slopeOf = (f) => slopeLastN(chartData.map(d => d[f]), 7);
     return {
       sessions: totalSessions,
       users: sum('totalUsers'),
@@ -348,6 +355,16 @@ export default function GA4InsightsPage() {
       bounceRate: weighted('bounceRate'),
       avgSessionDuration: weighted('avgSessionDuration'),
       pagesPerSession: totalSessions > 0 ? totalPageviews / totalSessions : null,
+      // 30/90 latest values + 7d slopes
+      sess30: last.sess30, sess90: last.sess90, sess30Slope: slopeOf('sess30'), sess90Slope: slopeOf('sess90'),
+      u30:    last.u30,    u90:    last.u90,    u30Slope:    slopeOf('u30'),    u90Slope:    slopeOf('u90'),
+      nu30:   last.nu30,   nu90:   last.nu90,   nu30Slope:   slopeOf('nu30'),   nu90Slope:   slopeOf('nu90'),
+      conv30: last.conv30, conv90: last.conv90, conv30Slope: slopeOf('conv30'), conv90Slope: slopeOf('conv90'),
+      cr30:   last.cr30,   cr90:   last.cr90,   cr30Slope:   slopeOf('cr30'),   cr90Slope:   slopeOf('cr90'),
+      er30:   last.er30,   er90:   last.er90,   er30Slope:   slopeOf('er30'),   er90Slope:   slopeOf('er90'),
+      b30:    last.b30,    b90:    last.b90,    b30Slope:    slopeOf('b30'),    b90Slope:    slopeOf('b90'),
+      d30:    last.d30,    d90:    last.d90,    d30Slope:    slopeOf('d30'),    d90Slope:    slopeOf('d90'),
+      pps30:  last.pps30,  pps90:  last.pps90,  pps30Slope:  slopeOf('pps30'),  pps90Slope:  slopeOf('pps90'),
     };
   }, [chartData]);
 
@@ -477,17 +494,27 @@ export default function GA4InsightsPage() {
       <main style={{ padding: '16px clamp(12px, 4vw, 32px)', maxWidth: 1600, margin: '0 auto' }}>
         {kpi && (
           <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
-            <StatCard label="Sessions" value={fmtNum(kpi.sessions)} sub="in range" />
-            <StatCard label="Users" value={fmtNum(kpi.users)} sub="in range" />
+            <StatCard label="Sessions" value={fmtNum(kpi.sessions)} sub="in range"
+              ma30={kpi.sess30} ma90={kpi.sess90} slope30={kpi.sess30Slope} slope90={kpi.sess90Slope} formatter={fmtNum} />
+            <StatCard label="Users" value={fmtNum(kpi.users)} sub="in range"
+              ma30={kpi.u30} ma90={kpi.u90} slope30={kpi.u30Slope} slope90={kpi.u90Slope} formatter={fmtNum} />
             <StatCard label="New users" value={fmtNum(kpi.newUsers)} sub={
               kpi.users > 0 ? `${Math.round(kpi.newUsers / kpi.users * 100)}% of users` : null
-            } />
-            <StatCard label="Conversions" value={fmtNum(kpi.conversions)} sub="in range" />
-            <StatCard label="Conv / session" value={fmtRatio(kpi.conversionRate)} sub="events per session — can exceed 1" />
-            <StatCard label="Engagement rate" value={fmtPct(kpi.engagementRate)} sub="engaged / sessions" />
-            <StatCard label="Bounce rate" value={fmtPct(kpi.bounceRate)} sub="weighted by sessions" />
-            <StatCard label="Avg session" value={fmtDuration(kpi.avgSessionDuration)} sub="weighted by sessions" />
-            <StatCard label="Pages / session" value={kpi.pagesPerSession != null ? kpi.pagesPerSession.toFixed(2) : '—'} sub="pageviews / sessions" />
+            }
+              ma30={kpi.nu30} ma90={kpi.nu90} slope30={kpi.nu30Slope} slope90={kpi.nu90Slope} formatter={fmtNum} />
+            <StatCard label="Conversions" value={fmtNum(kpi.conversions)} sub="in range"
+              ma30={kpi.conv30} ma90={kpi.conv90} slope30={kpi.conv30Slope} slope90={kpi.conv90Slope} formatter={fmtNum} />
+            <StatCard label="Conv / session" value={fmtRatio(kpi.conversionRate)} sub="events per session — can exceed 1"
+              ma30={kpi.cr30} ma90={kpi.cr90} slope30={kpi.cr30Slope} slope90={kpi.cr90Slope} formatter={fmtRatio} />
+            <StatCard label="Engagement rate" value={fmtPct(kpi.engagementRate)} sub="engaged / sessions"
+              ma30={kpi.er30} ma90={kpi.er90} slope30={kpi.er30Slope} slope90={kpi.er90Slope} formatter={fmtPct} />
+            <StatCard label="Bounce rate" value={fmtPct(kpi.bounceRate)} sub="weighted by sessions"
+              ma30={kpi.b30} ma90={kpi.b90} slope30={kpi.b30Slope} slope90={kpi.b90Slope} formatter={fmtPct} />
+            <StatCard label="Avg session" value={fmtDuration(kpi.avgSessionDuration)} sub="weighted by sessions"
+              ma30={kpi.d30} ma90={kpi.d90} slope30={kpi.d30Slope} slope90={kpi.d90Slope} formatter={fmtDuration} />
+            <StatCard label="Pages / session" value={kpi.pagesPerSession != null ? kpi.pagesPerSession.toFixed(2) : '—'} sub="pageviews / sessions"
+              ma30={kpi.pps30} ma90={kpi.pps90} slope30={kpi.pps30Slope} slope90={kpi.pps90Slope}
+              formatter={(v) => v == null ? '—' : v.toFixed(2)} />
           </div>
         )}
 
