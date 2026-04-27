@@ -2,6 +2,9 @@ import React, { useState, useEffect, useCallback } from 'react';
 import DashboardView from './DashboardView';
 import FilteredPage from './FilteredPage';
 import PartGroupAnalysisPage from './PartGroupAnalysisPage';
+import GA4InsightsPage from './GA4InsightsPage';
+import PaidKPIsPage from './PaidKPIsPage';
+import SEOKPIsPage from './SEOKPIsPage';
 
 function OverviewPage() {
   const [data, setData] = useState(null);
@@ -86,12 +89,18 @@ export default function App() {
           <button style={tabStyle(tab === 'overview')} onClick={() => setTab('overview')}>Overview</button>
           <button style={tabStyle(tab === 'filtered')} onClick={() => setTab('filtered')}>By Part Group / Rep</button>
           <button style={tabStyle(tab === 'pg-r')} onClick={() => setTab('pg-r')}>Part Group r-Analysis</button>
+          <button style={tabStyle(tab === 'ga4')} onClick={() => setTab('ga4')}>GA4 Insights</button>
+          <button style={tabStyle(tab === 'paid')} onClick={() => setTab('paid')}>Paid KPIs</button>
+          <button style={tabStyle(tab === 'seo')} onClick={() => setTab('seo')}>SEO KPIs</button>
         </nav>
       </header>
 
       {tab === 'overview' && <OverviewPage />}
       {tab === 'filtered' && <FilteredPage />}
       {tab === 'pg-r' && <PartGroupAnalysisPage />}
+      {tab === 'ga4' && <GA4InsightsPage />}
+      {tab === 'paid' && <PaidKPIsPage />}
+      {tab === 'seo' && <SEOKPIsPage />}
     </div>
   );
 }

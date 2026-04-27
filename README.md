@@ -162,13 +162,79 @@ rf-traffic-intel/
 |----------|-------------|
 | `GET /api/unified` | Full merged daily dataset |
 | `GET /api/netsuite` | NetSuite data only |
-| `GET /api/gsc` | Search Console data only |
+| `GET /api/gsc` | Search Console daily aggregate |
+| `GET /api/gsc-top?kind=query\|page` | Top 50 queries/pages for the latest 28d window |
 | `GET /api/ga4` | GA4 data only |
+| `GET /api/google-ads` | Google Ads daily aggregate (cost, clicks, impressions) |
+| `GET /api/google-ads-campaigns?since=&until=` | Per-campaign window stats |
+| `GET /api/hubspot-deals?since=&until=&source=` | Closed-won deals in window |
+| `GET /api/hubspot-deals-daily` | Daily won counts + revenue by attribution source |
 | `GET /api/health` | Server status + cache ages |
 | `POST /api/refresh/netsuite` | Re-fetch NetSuite in background |
-| `POST /api/refresh/all` | Re-fetch everything in background |
+| `POST /api/refresh/ga4?mode=full\|incremental` | Re-fetch GA4 |
+| `POST /api/refresh/google-ads?mode=full\|incremental` | Re-fetch Google Ads |
+| `POST /api/refresh/hubspot?mode=full\|incremental` | Re-fetch HubSpot |
+| `POST /api/refresh/gsc?mode=full\|incremental` | Re-fetch Search Console |
 
 Query params for `/api/unified`: `?start=2024-01-01&end=2025-01-01`
+
+---
+
+## Paid + SEO KPI tabs — credential setup
+
+Two dashboard tabs (**Paid KPIs** and **SEO KPIs**) join three new data sources to GA4 to compute CPA, ROAS, CTR, and organic search performance. All three are optional — each tab renders an empty-state error with a pointer to the right credentials if a source isn't configured. None of these block the other tabs (GA4 Insights, Overview, Part Group) from working.
+
+### Google Ads (direct API)
+
+Feeds the Paid KPIs tab's cost / clicks / impressions / CPC / CTR columns. Cost data is NOT fetched from GA4 or HubSpot — we hit the Google Ads API directly for accuracy and to avoid a dependency on having Google Ads linked to GA4.
+
+1. **Developer token.** Sign in to the Google Ads Manager account at https://ads.google.com/aw/apicenter and request a token. "Basic access" is enough to read your own accounts; approval usually comes within hours.
+2. **OAuth client.** In GCP Console → APIs & Services → Credentials, create a Desktop-app OAuth client. You'll get a `client_id` + `client_secret`.
+3. **Refresh token.** One-time consent flow. The quickest path:
+   ```
+   # Open this URL in a browser (replace CLIENT_ID):
+   https://accounts.google.com/o/oauth2/auth?response_type=code&client_id=CLIENT_ID&redirect_uri=urn:ietf:wg:oauth:2.0:oob&scope=https://www.googleapis.com/auth/adwords&access_type=offline&prompt=consent
+
+   # Copy the authorization code Google gives you, then:
+   curl -s -d "code=AUTH_CODE" \
+        -d "client_id=CLIENT_ID" \
+        -d "client_secret=CLIENT_SECRET" \
+        -d "redirect_uri=urn:ietf:wg:oauth:2.0:oob" \
+        -d "grant_type=authorization_code" \
+        https://oauth2.googleapis.com/token
+   ```
+   The response includes a `refresh_token` — save it.
+4. **Customer ID.** The 10-digit Google Ads account id (no dashes). If it's under a Manager (MCC), also set `GOOGLE_ADS_LOGIN_CUSTOMER_ID` to the MCC's id.
+5. Set all of `GOOGLE_ADS_*` vars in `.env` and POST to `/api/refresh/google-ads?mode=full` (or restart the server — it backfills automatically when the table is empty).
+
+### HubSpot (Private App token)
+
+Feeds both tabs: closed-won deals are the "true acquisition" denominator for CPA, and `hs_analytics_source` drives the paid-vs-organic split.
+
+1. HubSpot → **Settings → Integrations → Private Apps → Create a private app**.
+2. Scopes required (minimum):
+   - `crm.objects.deals.read`
+   - `crm.schemas.deals.read`
+3. Optional (Marketing Hub Professional or higher, for campaign attribution):
+   - `crm.objects.marketing_events.read`
+
+   If you omit this and the account isn't on Marketing Hub, the Paid tab falls back to matching deals by `hs_analytics_source_data_1` / campaign name.
+4. Copy the generated token into `HUBSPOT_PRIVATE_APP_TOKEN` and POST to `/api/refresh/hubspot?mode=full`.
+
+### Google Search Console
+
+Reuses the same `GOOGLE_CREDENTIALS_JSON` service account already in use for GA4. Only a permission grant is needed.
+
+1. Find the service-account email inside `GOOGLE_CREDENTIALS_JSON` — it ends in `.iam.gserviceaccount.com`.
+2. Go to https://search.google.com/search-console/users, select the property that matches `GSC_SITE_URL`, and add the service-account email as a User (Restricted is fine).
+3. POST to `/api/refresh/gsc?mode=full` (or restart the server).
+
+### Known limitations
+
+- **Google Ads only:** multi-platform paid spend (Meta, LinkedIn, Bing) is not covered yet. Each would need its own fetcher or require HubSpot Marketing Hub with ads accounts connected.
+- **Currency:** Google Ads returns cost in the account's native currency. `fmtMoney` displays as `$`; if the account is not USD, the symbol is misleading.
+- **GSC lag:** Search Console data is 2–3 days behind real time. The SEO tab's latest points will reflect this.
+- **Attribution granularity:** GA4 channel assignment (last-touch) and HubSpot `hs_analytics_source` (first-touch) can disagree. Each KPI is labelled by its source so readers don't conflate them.
 
 ---
 

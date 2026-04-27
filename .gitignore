@@ -3,3 +3,7 @@ node_modules/
 auth/credentials.json
 auth/token.json
 # data/cache/ — committed for demo; uncomment when using real data
+
+# Built frontend — produced by `npm run build` on deploy (see railway.json).
+# Kept out of git so source commits aren't silently overridden by a stale dist.
+dashboard/dist/
