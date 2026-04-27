@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <title>RF-DSOATD — Live Example</title>
+  <link rel="stylesheet" href="dsoatd-tokens.css">
+  <link rel="stylesheet" href="dsoatd-ui.css">
+  <style>
+    body { margin: 0; padding: 48px; min-height: 100vh; }
+    .grid { display: grid; gap: 40px; max-width: 980px; margin: 0 auto; }
+    .row-flex { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .toggle { position: fixed; top: 16px; right: 16px; }
+  </style>
+</head>
+<body class="dsoatd">
+  <button class="dso-btn toggle" onclick="document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'">Toggle dark</button>
+
+  <div class="grid">
+    <header>
+      <p class="dso-eyebrow dso-eyebrow--hot">RF-DSOATD · v1.0</p>
+      <h1 class="dso-h1" style="margin-top: 8px;">Daily Sales Order — Automated</h1>
+      <p style="font-size: var(--dso-text-lg); max-width: 640px; color: var(--dso-text-dim);">Sister design system to RFRP. Hot pink-red (#ff2d6f) accents flag the automated nature of the tooling.</p>
+    </header>
+
+    <hr class="dso-hr-hot">
+
+    <!-- Logo -->
+    <section>
+      <p class="dso-eyebrow">Logo</p>
+      <img src="dsoatd-logo.svg?v=6" height="240" alt="RF-DSOATD" style="margin-top: 12px;">
+    </section>
+
+    <hr class="dso-hr">
+
+    <!-- Stats -->
+    <section>
+      <div class="row-flex" style="justify-content: space-between; align-items: baseline;">
+        <p class="dso-eyebrow">Today's snapshot</p>
+        <span class="dso-auto-tag">Automated · live</span>
+      </div>
+      <div class="stats" style="margin-top: 16px;">
+        <div class="dso-stat">
+          <div class="dso-stat-value">$48,210</div>
+          <div class="dso-stat-label">Booked Today</div>
+        </div>
+        <div class="dso-stat">
+          <div class="dso-stat-value">37</div>
+          <div class="dso-stat-label">Orders Confirmed</div>
+        </div>
+        <div class="dso-stat">
+          <div class="dso-stat-value">94%</div>
+          <div class="dso-stat-label">Auto-Approved</div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="dso-hr">
+
+    <!-- Data table -->
+    <section>
+      <p class="dso-eyebrow">Order queue</p>
+      <div style="margin-top: 12px; border: 1px solid var(--dso-rule); border-radius: 4px; overflow: hidden;">
+        <div class="dso-row dso-row--blue">
+          <span></span>
+          <span>SO-2026-0481 · Glenn Construction · Trackout Mats × 12</span>
+          <span class="dso-chip">Approved</span>
+        </div>
+        <div class="dso-row dso-row--hot">
+          <span></span>
+          <span>SO-2026-0482 · Buffalo DPW · Curb Ramps × 4</span>
+          <span class="dso-chip dso-chip--hot">Needs Review</span>
+        </div>
+        <div class="dso-row dso-row--blue">
+          <span></span>
+          <span>SO-2026-0483 · Wegmans Logistics · Wheel Chocks × 200</span>
+          <span class="dso-chip">Approved</span>
+        </div>
+        <div class="dso-row dso-row--hot">
+          <span></span>
+          <span>SO-2026-0484 · NYSDOT R5 · Speed Bumps × 18</span>
+          <span class="dso-chip dso-chip--hot">Hold — Credit</span>
+        </div>
+      </div>
+    </section>
+
+    <hr class="dso-hr">
+
+    <!-- Buttons -->
+    <section>
+      <p class="dso-eyebrow">Actions</p>
+      <div class="row-flex" style="margin-top: 12px;">
+        <button class="dso-btn">Outline</button>
+        <button class="dso-btn dso-btn--hot">Hot outline</button>
+        <button class="dso-btn dso-btn--solid-hot">Run Automation</button>
+      </div>
+    </section>
+
+    <hr class="dso-hr">
+
+    <!-- Frame demo -->
+    <section>
+      <p class="dso-eyebrow">Frame chrome (blue outer + hot inner)</p>
+      <div class="dso-frame" style="margin-top: 12px;">
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 4px;">
+          <div class="dso-display" style="font-size: 96px;">DSO</div>
+          <div class="dso-eyebrow">Daily Sales Order</div>
+          <div class="dso-eyebrow dso-eyebrow--hot">· Automated ·</div>
+        </div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

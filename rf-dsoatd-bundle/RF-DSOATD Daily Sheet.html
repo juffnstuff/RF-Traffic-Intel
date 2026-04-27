@@ -1,0 +1,961 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <title>RF-DSOATD · Daily Sales Order Sheet</title>
+  <link rel="stylesheet" href="dsoatd-package/dsoatd-tokens.css">
+  <link rel="stylesheet" href="dsoatd-package/dsoatd-ui.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Monoton&family=Bungee+Shade&family=Audiowide&family=Yellowtail&display=swap" rel="stylesheet">
+  <style>
+    /* ---------- Page ---------- */
+    body {
+      margin: 0;
+      padding: 0;
+      background: var(--dso-bg);
+      color: var(--dso-text);
+      font-family: var(--dso-font-body);
+    }
+    .sheet {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 32px 40px 80px;
+    }
+
+    /* ---------- Status color tokens (sheet-local, with hard fallbacks) ---------- */
+    :root {
+      /* Salmon */
+      --dso-salmon:      #ff8a70;
+      --dso-salmon-soft: #ffe1d8;
+      /* Light blue */
+      --dso-blue-pop:    #5cc9ff;
+      --dso-blue-soft:   #d6f1ff;
+      /* Lime */
+      --dso-lime:        #c6f04a;
+      --dso-lime-deep:   #8ec51a;
+      --dso-lime-soft:   #ecfbc9;
+
+      --st-go:    #c6f04a;        /* PAID / SHIPPED / CLEARED */
+      --st-go-d:  #8ec51a;
+      --st-go-s:  #ecfbc9;
+      --st-info:  #5cc9ff;        /* IN PRODUCTION / IN TRANSIT */
+      --st-info-s:#d6f1ff;
+      --st-warn:  #ff8a70;        /* AT RISK / PENDING */
+      --st-warn-s:#ffe1d8;
+      --st-stop:  #ff2d6f;        /* HOLD / NEEDS REVIEW */
+      --st-stop-s:#ffd9e5;
+    }
+
+    /* ---------- Top bar ---------- */
+    .topbar {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 24px;
+      align-items: end;
+      padding-bottom: 18px;
+      border-bottom: 3px solid var(--dso-ink);
+    }
+    .topbar .lockup { display: flex; flex-direction: column; gap: 4px; }
+    .topbar .mark {
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      font-size: 56px;
+      line-height: 0.9;
+      color: var(--dso-ink);
+    }
+    .topbar .mark .dot {
+      display: inline-block;
+      width: 14px; height: 14px;
+      background: var(--st-stop);
+      vertical-align: 8px;
+      margin-left: 6px;
+      border-radius: 50%;
+      animation: dso-pulse 1.6s ease-out infinite;
+    }
+    .topbar .sub {
+      font-family: var(--dso-font-mono);
+      font-size: 12px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--dso-text-dim);
+    }
+    .topbar .ribbon {
+      grid-column: 2;
+      align-self: end;
+      display: flex;
+      gap: 0;
+      align-items: stretch;
+      height: 28px;
+      margin-bottom: 4px;
+    }
+    .ribbon span {
+      flex: 1;
+    }
+    .ribbon .a { background: var(--st-info); }
+    .ribbon .b { background: var(--st-warn); }
+    .ribbon .c { background: var(--st-stop); }
+    .ribbon .d { background: var(--st-go); }
+    .topbar .meta {
+      text-align: right;
+      font-family: var(--dso-font-mono);
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--dso-text-dim);
+      line-height: 1.6;
+    }
+    .topbar .meta strong {
+      color: var(--dso-ink);
+      font-weight: 700;
+    }
+    .topbar .meta .live {
+      color: var(--st-stop);
+      font-weight: 700;
+    }
+
+    /* ---------- KPI strip ---------- */
+    .kpis {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr 1fr 1fr 1fr;
+      gap: 0;
+      margin-top: 28px;
+      border: 2px solid var(--dso-ink);
+    }
+    .kpi {
+      padding: 18px 20px 16px;
+      border-right: 2px solid var(--dso-ink);
+      position: relative;
+      background: var(--dso-surface);
+    }
+    .kpi:last-child { border-right: none; }
+    .kpi .label {
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-size: 11px;
+      color: var(--dso-text-dim);
+    }
+    .kpi .value {
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      font-size: 44px;
+      line-height: 1;
+      letter-spacing: -0.01em;
+      margin-top: 8px;
+    }
+    .kpi .delta {
+      margin-top: 8px;
+      font-family: var(--dso-font-mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .kpi.hero { background: var(--dso-ink); color: var(--dso-paper); }
+    .kpi.hero .label { color: rgba(255,255,255,0.65); }
+    .kpi.hero .value { color: var(--st-go); }
+    .kpi.hero .delta { color: var(--st-go); }
+    .kpi.go    { background: var(--st-go-s); }
+    .kpi.go .value { color: var(--st-go-d); }
+    .kpi.info  { background: var(--st-info-s); }
+    .kpi.info .value { color: #1565a8; }
+    .kpi.warn  { background: var(--st-warn-s); }
+    .kpi.warn .value { color: #c43d20; }
+    .kpi.stop  { background: var(--st-stop-s); }
+    .kpi.stop .value { color: var(--dso-hot-deep); }
+
+    /* ---------- Section header ---------- */
+    .section-head {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 16px;
+      align-items: center;
+      margin-top: 40px;
+      margin-bottom: 12px;
+    }
+    .section-head .num {
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      font-size: 36px;
+      line-height: 1;
+      color: var(--st-stop);
+      letter-spacing: -0.02em;
+    }
+    .section-head .title {
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-size: 22px;
+    }
+    .section-head .rule {
+      height: 6px;
+      background: var(--dso-ink);
+    }
+    .section-head .count {
+      font-family: var(--dso-font-mono);
+      font-size: 12px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--dso-text-dim);
+    }
+    .section-head .count b { color: var(--dso-ink); font-weight: 700; }
+
+    /* ---------- Order table ---------- */
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--dso-font-mono);
+      font-size: 13px;
+      background: var(--dso-surface);
+      border: 2px solid var(--dso-ink);
+    }
+    .table thead th {
+      text-align: left;
+      padding: 10px 12px;
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 11px;
+      color: var(--dso-paper);
+      background: var(--dso-ink);
+      border-right: 1px solid rgba(255,255,255,0.18);
+      white-space: nowrap;
+    }
+    .table thead th:last-child { border-right: none; }
+    .table thead th.r { text-align: right; }
+    .table tbody td {
+      padding: 12px 12px;
+      border-bottom: 1px solid var(--dso-rule);
+      border-right: 1px solid var(--dso-rule);
+      vertical-align: middle;
+    }
+    .table tbody td:last-child { border-right: none; }
+    .table tbody td.r { text-align: right; font-variant-numeric: tabular-nums; }
+    .table tbody tr:last-child td { border-bottom: none; }
+
+    /* status left rail */
+    .table tbody tr {
+      position: relative;
+    }
+    .rail-cell {
+      width: 8px;
+      padding: 0 !important;
+      border-right: none !important;
+    }
+    .rail-cell .rail {
+      display: block;
+      width: 8px;
+      align-self: stretch;
+      height: 100%;
+      min-height: 44px;
+    }
+    tr.row-go    .rail { background: var(--st-go); }
+    tr.row-info  .rail { background: var(--st-info); }
+    tr.row-warn  .rail { background: var(--st-warn); }
+    tr.row-stop  .rail { background: var(--st-stop); }
+
+    tr.row-stop td:nth-child(2),
+    tr.row-warn td:nth-child(2) {
+      font-weight: 700;
+    }
+
+    /* SO number column */
+    .so {
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      font-size: 14px;
+      letter-spacing: 0.04em;
+      color: var(--dso-ink);
+      white-space: nowrap;
+    }
+
+    /* customer */
+    .cust { font-weight: 600; }
+    .cust .meta {
+      display: block;
+      font-weight: 400;
+      color: var(--dso-text-dim);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      margin-top: 2px;
+    }
+
+    /* ---------- Status pill ---------- */
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 10px;
+      padding: 4px 9px 4px 8px;
+      border-radius: 2px;
+      white-space: nowrap;
+    }
+    .pill::before {
+      content: '';
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .pill.go   { background: var(--st-go);     color: #1f3a00; }
+    .pill.info { background: var(--st-info);   color: #08344f; }
+    .pill.warn { background: var(--st-warn);   color: #4a1606; }
+    .pill.stop { background: var(--st-stop);   color: #fff; }
+
+    /* ---------- Mini progress bar (production %) ---------- */
+    .bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 120px;
+    }
+    .bar .track {
+      flex: 1;
+      height: 8px;
+      background: var(--dso-rule);
+      position: relative;
+    }
+    .bar .fill {
+      position: absolute; inset: 0;
+      width: var(--p, 0%);
+      background: var(--c, var(--st-info));
+    }
+    .bar .pct {
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      width: 32px;
+      text-align: right;
+    }
+
+    /* aging cell */
+    .age {
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    .age.hot { color: var(--st-stop); }
+    .age.warm { color: var(--st-warn); }
+
+    /* ---------- Bottom split: blockers + automation log ---------- */
+    .split {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 24px;
+      margin-top: 36px;
+    }
+    .panel {
+      border: 2px solid var(--dso-ink);
+      background: var(--dso-surface);
+      padding: 20px 22px;
+    }
+    .panel h3 {
+      margin: 0 0 14px;
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .panel h3::before {
+      content: '';
+      width: 12px; height: 12px;
+      background: var(--st-stop);
+    }
+    .panel.lime h3::before { background: var(--st-go); }
+
+    .blocker {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 14px;
+      align-items: center;
+      padding: 12px 0;
+      border-top: 1px solid var(--dso-rule);
+    }
+    .blocker:first-of-type { border-top: none; padding-top: 4px; }
+    .blocker .so {
+      font-size: 13px;
+    }
+    .blocker .what {
+      font-family: var(--dso-font-body);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .blocker .what b { font-weight: 700; }
+    .blocker .who {
+      font-family: var(--dso-font-mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 4px 8px;
+      background: var(--dso-ink);
+      color: var(--dso-paper);
+    }
+
+    /* ---------- Automation log ---------- */
+    .log {
+      list-style: none;
+      margin: 0; padding: 0;
+      font-family: var(--dso-font-mono);
+      font-size: 12px;
+      max-height: 280px;
+      overflow: hidden;
+    }
+    .log li {
+      display: grid;
+      grid-template-columns: 56px auto 1fr;
+      gap: 10px;
+      padding: 8px 0;
+      border-top: 1px dashed var(--dso-rule);
+      align-items: baseline;
+    }
+    .log li:first-child { border-top: none; }
+    .log .t { color: var(--dso-text-faint); }
+    .log .tag {
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      font-size: 10px;
+      padding: 2px 6px;
+      color: var(--dso-paper);
+      background: var(--dso-ink);
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .log .tag.go   { background: var(--st-go); color: #1f3a00; }
+    .log .tag.info { background: var(--st-info); color: #08344f; }
+    .log .tag.warn { background: var(--st-warn); color: #4a1606; }
+    .log .tag.stop { background: var(--st-stop); color: #fff; }
+    .log .msg .em { font-family: var(--dso-font-body); font-weight: 700; }
+    .log .msg .so { font-family: var(--dso-font-heading); font-size: 12px; }
+
+    /* ---------- Footer ---------- */
+    .footer {
+      margin-top: 40px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--dso-rule);
+      font-family: var(--dso-font-mono);
+      font-size: 11px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--dso-text-dim);
+    }
+    .footer .legend {
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+    .footer .legend .sw {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .footer .legend .sw::before {
+      content: '';
+      width: 14px; height: 10px;
+      display: inline-block;
+    }
+    .footer .legend .go::before   { background: var(--st-go); }
+    .footer .legend .info::before { background: var(--st-info); }
+    .footer .legend .warn::before { background: var(--st-warn); }
+    .footer .legend .stop::before { background: var(--st-stop); }
+
+    /* tiny helper */
+    .num { font-variant-numeric: tabular-nums; }
+    .qty { font-family: var(--dso-font-heading); font-weight: 700; }
+
+    @media (max-width: 1100px) {
+      .kpis { grid-template-columns: 1fr 1fr 1fr; }
+      .kpi { border-bottom: 2px solid var(--dso-ink); }
+      .split { grid-template-columns: 1fr; }
+    }
+
+    /* ============================================================
+       DARK MODE — navy field + brighter sky-blue ink
+       Hot pink-red and lime stay as-is; salmon kept for warn.
+       ============================================================ */
+    [data-theme="dark"] {
+      --dso-ink:        #0c2a3c;     /* deep navy field */
+      --dso-paper:      #ffffff;
+      --dso-bg:         #0c2a3c;     /* page bg */
+      --dso-surface:    #143a52;     /* cards/tables */
+      --dso-surface-2:  #1a4863;     /* hover / 2nd surface */
+      --dso-text:       #eaf6ff;
+      --dso-text-dim:   rgba(234, 246, 255, 0.66);
+      --dso-text-faint: rgba(234, 246, 255, 0.36);
+      --dso-rule:       rgba(168, 216, 232, 0.22);
+
+      /* The new "ink" stand-in for borders/headers in dark = bright sky */
+      --d-line:    #a8d8e8;          /* lighter blue line (matches ref) */
+      --d-line-2:  #5cc9ff;          /* brighter accent line */
+    }
+
+    [data-theme="dark"] {
+      --dso-ink:        #0e3447;
+      --dso-paper:      #ffffff;
+      --dso-bg:         #2a4d63;     /* slightly lighter navy field */
+      --dso-surface:    #2a4d63;     /* same flat for cards */
+      --dso-surface-2:  #335a72;
+      --dso-text:       #f4ead5;     /* warm cream */
+      --dso-text-dim:   rgba(244, 234, 213, 0.72);
+      --dso-text-faint: rgba(244, 234, 213, 0.40);
+      --dso-rule:       rgba(168, 216, 232, 0.28);
+
+      --d-line:    #a8d8e8;          /* light blue lines (matches ref) */
+      --d-line-2:  #ffffff;
+    }
+
+    [data-theme="dark"] body {
+      background: #2a4d63;
+    }
+
+    /* ---- Logo: cool retro neon (Monoton) ---- */
+    [data-theme="dark"] .topbar .mark {
+      font-family: 'Monoton', 'Audiowide', 'Bungee Shade', sans-serif;
+      font-weight: 400;
+      font-size: 64px;
+      line-height: 1;
+      letter-spacing: 0.06em;
+      color: #f4ead5;
+      text-shadow: none;
+    }
+    [data-theme="dark"] .topbar .mark .dot {
+      background: var(--st-stop);
+    }
+    [data-theme="dark"] .topbar { border-bottom: 3px solid var(--d-line); }
+    [data-theme="dark"] .topbar .meta strong { color: #f4ead5; }
+    [data-theme="dark"] .topbar .meta .live { color: var(--st-stop); }
+    [data-theme="dark"] .topbar .sub { color: var(--dso-text-dim); }
+
+    /* ---- KPI strip ---- */
+    [data-theme="dark"] .kpis { border-color: var(--d-line); }
+    [data-theme="dark"] .kpi {
+      background: #2a4d63;
+      border-right-color: var(--d-line);
+      color: var(--dso-text);
+    }
+    [data-theme="dark"] .kpi .label { color: var(--dso-text-dim); }
+    [data-theme="dark"] .kpi .delta { color: var(--dso-text-dim); }
+    [data-theme="dark"] .kpi.hero {
+      background: #f4ead5;
+      color: #0e3447;
+    }
+    [data-theme="dark"] .kpi.hero .label { color: rgba(14,52,71,0.65); }
+    [data-theme="dark"] .kpi.hero .value,
+    [data-theme="dark"] .kpi.hero .delta { color: #0e3447; }
+    /* Tinted KPIs: same navy bg + colored value + bottom strap */
+    [data-theme="dark"] .kpi.go,
+    [data-theme="dark"] .kpi.info,
+    [data-theme="dark"] .kpi.warn,
+    [data-theme="dark"] .kpi.stop {
+      background: #2a4d63;
+      box-shadow: inset 0 -4px 0 0 currentColor;
+    }
+    [data-theme="dark"] .kpi.go    { color: var(--st-go); }
+    [data-theme="dark"] .kpi.info  { color: var(--st-info); }
+    [data-theme="dark"] .kpi.warn  { color: var(--st-warn); }
+    [data-theme="dark"] .kpi.stop  { color: var(--st-stop); }
+    [data-theme="dark"] .kpi.go .value    { color: var(--st-go); }
+    [data-theme="dark"] .kpi.info .value  { color: var(--st-info); }
+    [data-theme="dark"] .kpi.warn .value  { color: var(--st-warn); }
+    [data-theme="dark"] .kpi.stop .value  { color: var(--st-stop); }
+
+    /* ---- Section headers ---- */
+    [data-theme="dark"] .section-head .num { color: var(--st-stop); }
+    [data-theme="dark"] .section-head .title { color: #f4ead5; }
+    [data-theme="dark"] .section-head .rule  { background: var(--d-line); }
+    [data-theme="dark"] .section-head .count { color: var(--dso-text-dim); }
+    [data-theme="dark"] .section-head .count b { color: #f4ead5; }
+
+    /* ---- Table ---- */
+    [data-theme="dark"] .table {
+      background: #2a4d63;
+      border-color: var(--d-line);
+      color: var(--dso-text);
+    }
+    [data-theme="dark"] .table thead th {
+      background: #1f3e54;
+      color: #f4ead5;
+      border-right: 1px solid rgba(168, 216, 232, 0.20);
+    }
+    [data-theme="dark"] .table tbody td {
+      border-bottom-color: var(--dso-rule);
+      border-right-color: var(--dso-rule);
+    }
+    [data-theme="dark"] .table tbody tr:nth-child(even) td {
+      background: rgba(168, 216, 232, 0.04);
+    }
+    [data-theme="dark"] .so       { color: #a8d8e8; }
+    [data-theme="dark"] .cust     { color: var(--dso-text); }
+    [data-theme="dark"] .cust .meta { color: var(--dso-text-dim); }
+    [data-theme="dark"] .age      { color: var(--dso-text); }
+
+    /* ---- Panels ---- */
+    [data-theme="dark"] .panel {
+      background: #2a4d63;
+      border-color: var(--d-line);
+    }
+    [data-theme="dark"] .panel h3 { color: #f4ead5; }
+    [data-theme="dark"] .blocker .so { color: #a8d8e8; }
+    [data-theme="dark"] .blocker .who {
+      background: #a8d8e8;
+      color: #0e3447;
+    }
+    [data-theme="dark"] .blocker { border-top-color: var(--dso-rule); }
+    [data-theme="dark"] .log li  { border-top-color: rgba(168, 216, 232, 0.18); }
+    [data-theme="dark"] .log .so { color: #a8d8e8; }
+
+    /* ---- Footer ---- */
+    [data-theme="dark"] .footer { border-top-color: var(--dso-rule); }
+
+    /* ---- Bar track on navy ---- */
+    [data-theme="dark"] .bar .track { background: rgba(168, 216, 232, 0.18); }
+
+    /* ---- Theme toggle ---- */
+    .theme-toggle {
+      position: fixed;
+      top: 14px; right: 14px;
+      z-index: 50;
+      font-family: var(--dso-font-heading);
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-size: 11px;
+      padding: 8px 12px;
+      background: transparent;
+      color: #a8d8e8;
+      border: 2px solid #a8d8e8;
+      border-radius: 2px;
+      cursor: pointer;
+    }
+    .theme-toggle:hover { background: #a8d8e8; color: #0e3447; }
+  </style>
+</head>
+<body class="dsoatd">
+  <button class="theme-toggle" onclick="document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'">◐ Theme</button>
+  <main class="sheet">
+
+    <!-- ============ TOP BAR ============ -->
+    <header class="topbar">
+      <div class="lockup">
+        <div class="sub">RubberForm · Daily Sales Order — Automated</div>
+        <div class="mark">RF–DSOATD<span class="dot"></span></div>
+      </div>
+      <div class="ribbon" aria-hidden="true">
+        <span class="a"></span><span class="b"></span><span class="c"></span><span class="d"></span>
+      </div>
+      <div class="meta">
+        <div><strong>MON · APR 27 · 2026</strong></div>
+        <div>09:14 ET · auto-refresh 5min</div>
+        <div class="live">● LIVE FROM NETSUITE</div>
+      </div>
+    </header>
+
+    <!-- ============ KPI STRIP ============ -->
+    <section class="kpis" aria-label="Today snapshot">
+      <div class="kpi hero">
+        <div class="label">Open Order Value</div>
+        <div class="value num">$1,284,610</div>
+        <div class="delta">▲ $112,840 vs Fri</div>
+      </div>
+      <div class="kpi go">
+        <div class="label">Shipped / Paid</div>
+        <div class="value num">$348,920</div>
+        <div class="delta">14 orders cleared</div>
+      </div>
+      <div class="kpi info">
+        <div class="label">In Production</div>
+        <div class="value num">$612,475</div>
+        <div class="delta">22 on the floor</div>
+      </div>
+      <div class="kpi warn">
+        <div class="label">At Risk</div>
+        <div class="value num">$184,300</div>
+        <div class="delta">6 aging &gt; 10d</div>
+      </div>
+      <div class="kpi stop">
+        <div class="label">Holds / Review</div>
+        <div class="value num">$138,915</div>
+        <div class="delta">4 need a human</div>
+      </div>
+    </section>
+
+    <!-- ============ OPEN ORDERS ============ -->
+    <div class="section-head">
+      <div class="num">01</div>
+      <div class="title">Open Orders — by ship date</div>
+      <div class="rule"></div>
+      <div class="count"><b>27</b> rows · <b>$1.28M</b></div>
+    </div>
+
+    <table class="table">
+      <thead>
+        <tr>
+          <th style="width:8px"></th>
+          <th>SO #</th>
+          <th>Customer / PO</th>
+          <th>Product · Qty</th>
+          <th>Ship Date</th>
+          <th class="r">Value</th>
+          <th>Production</th>
+          <th>Age</th>
+          <th>Status</th>
+          <th>Owner</th>
+        </tr>
+      </thead>
+      <tbody>
+
+        <!-- HOLD -->
+        <tr class="row-stop">
+          <td class="rail-cell"><span class="rail"></span></td>
+          <td class="so">SO‑26‑0492</td>
+          <td class="cust">Buffalo DPW <span class="meta">PO 4471‑B · NET 30</span></td>
+          <td>Curb Ramps · <span class="qty">×8</span></td>
+          <td class="num">May 04</td>
+          <td class="r num">$42,800</td>
+          <td>
+            <div class="bar"><div class="track"><div class="fill" style="--p:18%; --c:var(--st-stop)"></div></div><div class="pct">18%</div></div>
+          </td>
+          <td class="age hot">11d</td>
+          <td><span class="pill stop">Hold · Credit</span></td>
+          <td>JM</td>
+        </tr>
+
+        <!-- WARN -->
+        <tr class="row-warn">
+          <td class="rail-cell"><span class="rail"></span></td>
+          <td class="so">SO‑26‑0488</td>
+          <td class="cust">NYSDOT Region 5 <span class="meta">PO R5‑8821 · NET 45</span></td>
+          <td>Speed Bumps · <span class="qty">×24</span></td>
+          <td class="num">Apr 30</td>
+          <td class="r num">$67,200</td>
+          <td>
+            <div class="bar"><div class="track"><div class="fill" style="--p:62%; --c:var(--st-warn)"></div></div><div class="pct">62%</div></div>
+          </td>
+          <td class="age warm">9d</td>
+          <td><span class="pill warn">Material Late</span></td>
+          <td>RC</td>
+        </tr>
+
+        <!-- INFO -->
+        <tr class="row-info">
+          <td class="rail-cell"><span class="rail"></span></td>
+          <td class="so">SO‑26‑0501</td>
+          <td class="cust">Glenn Construction <span class="meta">PO GC‑0042 · NET 30</span></td>
+          <td>Trackout Mats · <span class="qty">×12</span></td>
+          <td class="num">May 02</td>
+          <td class="r num">$28,440</td>
+          <td>
+            <div class="bar"><div class="track"><div class="fill" style="--p:74%; --c:var(--st-info)"></div></div><div class="pct">74%</div></div>
+          </td>
+          <td class="age">4d</td>
+          <td><span class="pill info">In Production</span></td>
+          <td>AK</td>
+        </tr>
+
+        <!-- GO -->
+        <tr class="row-go">
+          <td class="rail-cell"><span class="rail"></span></td>
+          <td class="so">SO‑26‑0479</td>
+          <td class="cust">Wegmans Logistics <span class="meta">PO WL‑55102 · NET 15</span></td>
+          <td>Wheel Chocks · <span class="qty">×200</span></td>
+          <td class="num">Apr 28</td>
+          <td class="r num">$36,000</td>
+          <td>
+            <div class="bar"><div class="track"><div class="fill" style="--p:100%; --c:var(--st-go-d)"></div></div><div class="pct">100%</div></div>
+          </td>
+          <td class="age">2d</td>
+          <td><span class="pill go">Shipped</span></td>
+          <td>AK</td>
+        </tr>
+
+        <!-- INFO -->
+        <tr class="row-info">
+          <td class="rail-cell"><span class="rail"></span></td>
+          <td class="so">SO‑26‑0496</td>
+          <td class="cust">PennDOT D‑11 <span class="meta">PO 11‑3308 · NET 30</span></td>
+          <td>Channelizer Drums · <span class="qty">×320</span></td>
+          <td class="num">May 06</td>
+          <td class="r num">$84,160</td>
+          <td>
+            <div class="bar"><div class="track"><div class="fill" style="--p:48%; --c:var(--st-info)"></div></div><div class="pct">48%</div></div>
+          </td>
+          <td class="age">5d</td>
+          <td><span class="pill info">In Production</span></td>
+          <td>RC</td>
+        </tr>
+
+        <!-- STOP -->
+        <tr class="row-stop">
+          <td class="rail-cell"><span class="rail"></span></td>
+          <td class="so">SO‑26‑0503</td>
+          <td class="cust">Sunbelt Rentals <span class="meta">PO SB‑88410 · NEW</span></td>
+          <td>Cable Protectors · <span class="qty">×60</span></td>
+          <td class="num">May 09</td>
+          <td class="r num">$22,915</td>
+          <td>
+            <div class="bar"><div class="track"><div class="fill" style="--p:0%; --c:var(--st-stop)"></div></div><div class="pct">0%</div></div>
+          </td>
+          <td class="age hot">1d</td>
+          <td><span class="pill stop">Needs Review</span></td>
+          <td>JM</td>
+        </tr>
+
+        <!-- WARN -->
+        <tr class="row-warn">
+          <td class="rail-cell"><span class="rail"></span></td>
+          <td class="so">SO‑26‑0471</td>
+          <td class="cust">City of Rochester <span class="meta">PO ROC‑22119 · NET 60</span></td>
+          <td>Trash Receptacles · <span class="qty">×18</span></td>
+          <td class="num">Apr 29</td>
+          <td class="r num">$31,500</td>
+          <td>
+            <div class="bar"><div class="track"><div class="fill" style="--p:55%; --c:var(--st-warn)"></div></div><div class="pct">55%</div></div>
+          </td>
+          <td class="age warm">12d</td>
+          <td><span class="pill warn">Aging</span></td>
+          <td>AK</td>
+        </tr>
+
+        <!-- INFO -->
+        <tr class="row-info">
+          <td class="rail-cell"><span class="rail"></span></td>
+          <td class="so">SO‑26‑0498</td>
+          <td class="cust">Skanska USA <span class="meta">PO SK‑447‑A · NET 30</span></td>
+          <td>Crane Pads · <span class="qty">×40</span></td>
+          <td class="num">May 11</td>
+          <td class="r num">$96,000</td>
+          <td>
+            <div class="bar"><div class="track"><div class="fill" style="--p:30%; --c:var(--st-info)"></div></div><div class="pct">30%</div></div>
+          </td>
+          <td class="age">3d</td>
+          <td><span class="pill info">In Production</span></td>
+          <td>RC</td>
+        </tr>
+
+        <!-- GO -->
+        <tr class="row-go">
+          <td class="rail-cell"><span class="rail"></span></td>
+          <td class="so">SO‑26‑0485</td>
+          <td class="cust">Erie County DOT <span class="meta">PO EC‑99‑12 · NET 30</span></td>
+          <td>Trench Covers · <span class="qty">×24</span></td>
+          <td class="num">Apr 27</td>
+          <td class="r num">$48,720</td>
+          <td>
+            <div class="bar"><div class="track"><div class="fill" style="--p:100%; --c:var(--st-go-d)"></div></div><div class="pct">100%</div></div>
+          </td>
+          <td class="age">0d</td>
+          <td><span class="pill go">Paid</span></td>
+          <td>JM</td>
+        </tr>
+
+        <!-- INFO -->
+        <tr class="row-info">
+          <td class="rail-cell"><span class="rail"></span></td>
+          <td class="so">SO‑26‑0500</td>
+          <td class="cust">United Rentals <span class="meta">PO UR‑772184 · NET 15</span></td>
+          <td>Wheel Chocks · <span class="qty">×500</span></td>
+          <td class="num">May 03</td>
+          <td class="r num">$72,500</td>
+          <td>
+            <div class="bar"><div class="track"><div class="fill" style="--p:88%; --c:var(--st-info)"></div></div><div class="pct">88%</div></div>
+          </td>
+          <td class="age">2d</td>
+          <td><span class="pill info">Boxing</span></td>
+          <td>AK</td>
+        </tr>
+
+      </tbody>
+    </table>
+
+    <!-- ============ SPLIT: Blockers + Automation log ============ -->
+    <div class="split">
+      <section class="panel">
+        <h3>Blockers · need a human today</h3>
+
+        <div class="blocker">
+          <div class="so">SO‑26‑0492</div>
+          <div class="what"><b>Buffalo DPW</b> — credit hold, $42.8K over limit. AR opened ticket Fri, awaiting CFO sign-off.</div>
+          <div class="who">JM</div>
+        </div>
+        <div class="blocker">
+          <div class="so">SO‑26‑0488</div>
+          <div class="what"><b>NYSDOT R5</b> — recycled rubber feedstock 6d late from Akron supplier. ETA Tue.</div>
+          <div class="who">RC</div>
+        </div>
+        <div class="blocker">
+          <div class="so">SO‑26‑0503</div>
+          <div class="what"><b>Sunbelt Rentals</b> — new account, no terms on file. Sales to confirm NET vs prepay.</div>
+          <div class="who">JM</div>
+        </div>
+        <div class="blocker">
+          <div class="so">SO‑26‑0471</div>
+          <div class="what"><b>City of Rochester</b> — sitting at 55% for 4 days. Production capacity reallocated to 0500. Re-prioritize?</div>
+          <div class="who">AK</div>
+        </div>
+      </section>
+
+      <section class="panel lime">
+        <h3>Automation log · last 24h</h3>
+        <ul class="log">
+          <li>
+            <span class="t">09:12</span><span class="tag go">PAID</span>
+            <span class="msg"><span class="so">SO‑26‑0485</span> · ACH from Erie County cleared, <span class="em">$48,720</span>.</span>
+          </li>
+          <li>
+            <span class="t">08:47</span><span class="tag info">SHIP</span>
+            <span class="msg"><span class="so">SO‑26‑0479</span> · Wegmans BOL generated, picked up by R+L 06:30.</span>
+          </li>
+          <li>
+            <span class="t">07:30</span><span class="tag stop">HOLD</span>
+            <span class="msg"><span class="so">SO‑26‑0492</span> · Buffalo DPW flagged: credit balance <span class="em">+$31K</span> over limit.</span>
+          </li>
+          <li>
+            <span class="t">Sun</span><span class="tag info">QUEUE</span>
+            <span class="msg"><span class="so">SO‑26‑0500</span> · United Rentals reorder auto-pulled from EDI.</span>
+          </li>
+          <li>
+            <span class="t">Sun</span><span class="tag warn">AGE</span>
+            <span class="msg"><span class="so">SO‑26‑0471</span> · Crossed 10d threshold, escalated to AK.</span>
+          </li>
+          <li>
+            <span class="t">Sat</span><span class="tag go">APPRV</span>
+            <span class="msg"><span class="so">SO‑26‑0501</span> · Glenn Construction credit auto-approved (Tier‑A).</span>
+          </li>
+          <li>
+            <span class="t">Sat</span><span class="tag info">PROD</span>
+            <span class="msg"><span class="so">SO‑26‑0496</span> · PennDOT routed to Mold Cell 3.</span>
+          </li>
+        </ul>
+      </section>
+    </div>
+
+    <!-- ============ FOOTER ============ -->
+    <footer class="footer">
+      <div class="legend">
+        <span class="sw go">Paid / Shipped</span>
+        <span class="sw info">In production</span>
+        <span class="sw warn">At risk · aging</span>
+        <span class="sw stop">Hold · review</span>
+      </div>
+      <div>RF‑DSOATD v1.0 · NetSuite ↔ Sheets · contact @rcollins</div>
+    </footer>
+
+  </main>
+</body>
+</html>
