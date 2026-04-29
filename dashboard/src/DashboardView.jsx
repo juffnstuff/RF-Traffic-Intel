@@ -130,7 +130,7 @@ export function StatCard({
               letterSpacing: '0.12em',
               textTransform: 'uppercase',
             }}>
-              · {growth ? 'Growth' : 'Contracting'}
+              · {growth ? 'Growing' : 'Contracting'}
             </span>
           )}
         </div>
