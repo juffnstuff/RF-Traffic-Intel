@@ -397,16 +397,45 @@ export async function initDB() {
 
   // Core Web Vitals from the Chrome User Experience Report (CrUX). p75
   // values for LCP (ms), INP (ms), CLS (unitless). One row per CrUX
-  // collection period's lastDate. Direct Google ranking factor.
+  // collection period's lastDate, per form factor — 'ALL' is the blended
+  // read; 'PHONE' / 'DESKTOP' / 'TABLET' are the form-factor-specific
+  // history (mobile vs desktop CWV typically differ noticeably).
   await p.query(`
     CREATE TABLE IF NOT EXISTS crux_daily (
-      date DATE PRIMARY KEY,
+      date DATE NOT NULL,
+      form_factor TEXT NOT NULL DEFAULT 'ALL',
       lcp_p75 NUMERIC(10,2),
       inp_p75 NUMERIC(10,2),
       cls_p75 NUMERIC(8,4),
-      updated_at TIMESTAMPTZ DEFAULT NOW()
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, form_factor)
     )
   `);
+  // Migration path for the v1 schema where the PK was (date) only and
+  // form_factor didn't exist. We add the column with a default, then swap
+  // the PK. Idempotent — second run is a no-op.
+  await p.query(`ALTER TABLE crux_daily ADD COLUMN IF NOT EXISTS form_factor TEXT NOT NULL DEFAULT 'ALL'`).catch(() => {});
+  await p.query(`ALTER TABLE crux_daily DROP CONSTRAINT IF EXISTS crux_daily_pkey`).catch(() => {});
+  await p.query(`ALTER TABLE crux_daily ADD PRIMARY KEY (date, form_factor)`).catch(() => {});
+
+  // Per-page CrUX. One row per (date, page, form_factor). Date is the
+  // fetch date (CrUX's queryRecord returns the current snapshot, not a
+  // history per page), so accumulating snapshots over time gives us a
+  // per-page trend automatically the same way gsc_top_queries does.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS crux_daily_by_page (
+      date DATE NOT NULL,
+      page TEXT NOT NULL,
+      form_factor TEXT NOT NULL,
+      lcp_p75 NUMERIC(10,2),
+      inp_p75 NUMERIC(10,2),
+      cls_p75 NUMERIC(8,4),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, page, form_factor)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_crux_page_date ON crux_daily_by_page(date)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_crux_page_path ON crux_daily_by_page(page)`);
 
   console.log('✅  Database tables ready');
 }
@@ -1804,28 +1833,88 @@ export async function upsertCruxDaily(rows) {
   for (const r of rows) {
     if (!r.date) continue;
     await p.query(`
-      INSERT INTO crux_daily (date, lcp_p75, inp_p75, cls_p75, updated_at)
-      VALUES ($1, $2, $3, $4, NOW())
-      ON CONFLICT (date) DO UPDATE SET
+      INSERT INTO crux_daily (date, form_factor, lcp_p75, inp_p75, cls_p75, updated_at)
+      VALUES ($1, $2, $3, $4, $5, NOW())
+      ON CONFLICT (date, form_factor) DO UPDATE SET
         lcp_p75    = EXCLUDED.lcp_p75,
         inp_p75    = EXCLUDED.inp_p75,
         cls_p75    = EXCLUDED.cls_p75,
         updated_at = NOW()
-    `, [r.date, r.lcp_p75, r.inp_p75, r.cls_p75]);
+    `, [r.date, r.form_factor || 'ALL', r.lcp_p75, r.inp_p75, r.cls_p75]);
     upserted++;
   }
   return upserted;
 }
 
-export async function getCruxDaily() {
+// Origin-level history. Defaults to the blended ALL series so existing
+// callers / UIs keep working unchanged; the form-factor split is opt-in.
+export async function getCruxDaily({ formFactor = 'ALL' } = {}) {
   const p = getPool();
   const { rows } = await p.query(`
-    SELECT date::text,
+    SELECT date::text, form_factor,
       lcp_p75::float as lcp_p75,
       inp_p75::float as inp_p75,
       cls_p75::float as cls_p75
     FROM crux_daily
+    WHERE form_factor = $1
     ORDER BY date ASC
+  `, [formFactor]);
+  return rows;
+}
+
+export async function getCruxDailyAllFormFactors() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT date::text, form_factor,
+      lcp_p75::float as lcp_p75,
+      inp_p75::float as inp_p75,
+      cls_p75::float as cls_p75
+    FROM crux_daily
+    ORDER BY date ASC, form_factor ASC
+  `);
+  return rows;
+}
+
+export async function upsertCruxDailyByPage(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  let upserted = 0;
+  for (const r of rows) {
+    if (!r.date || !r.page || !r.form_factor) continue;
+    await p.query(`
+      INSERT INTO crux_daily_by_page (date, page, form_factor, lcp_p75, inp_p75, cls_p75, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      ON CONFLICT (date, page, form_factor) DO UPDATE SET
+        lcp_p75    = EXCLUDED.lcp_p75,
+        inp_p75    = EXCLUDED.inp_p75,
+        cls_p75    = EXCLUDED.cls_p75,
+        updated_at = NOW()
+    `, [r.date, r.page, r.form_factor, r.lcp_p75, r.inp_p75, r.cls_p75]);
+    upserted++;
+  }
+  return upserted;
+}
+
+// Latest per-page CWV reads — one row per (page, form_factor) using each
+// page's most recent fetch date. Used for the per-page table on the GA4
+// tab so we don't have to render every snapshot we've ever pulled.
+export async function getCruxLatestByPage() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    WITH latest AS (
+      SELECT page, form_factor, MAX(date) as date
+      FROM crux_daily_by_page
+      GROUP BY page, form_factor
+    )
+    SELECT c.date::text, c.page, c.form_factor,
+      c.lcp_p75::float as lcp_p75,
+      c.inp_p75::float as inp_p75,
+      c.cls_p75::float as cls_p75
+    FROM crux_daily_by_page c
+    JOIN latest l ON l.page = c.page
+                 AND l.form_factor = c.form_factor
+                 AND l.date = c.date
+    ORDER BY c.page ASC, c.form_factor ASC
   `);
   return rows;
 }

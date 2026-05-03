@@ -274,14 +274,32 @@ function QueryRankTrendChart({ query, history, onClose }) {
   );
 }
 
-function CoreWebVitalsPanel({ data }) {
+function CoreWebVitalsPanel({ data, latestByFf }) {
   if (!data || !Array.isArray(data) || data.length === 0) return null;
   const last = data[data.length - 1];
+
+  const FormFactorPill = ({ label, ff, metric, fmt }) => {
+    const reading = latestByFf?.[ff];
+    const v = reading?.[`${metric}_p75`];
+    const { color } = ratingForMetric(metric, v);
+    return (
+      <span style={{
+        display: 'inline-flex', alignItems: 'center', gap: 4,
+        padding: '2px 8px', borderRadius: 999,
+        background: '#0f172a', border: `1px solid ${color}`,
+        fontSize: 10, fontFeatureSettings: '"tnum"',
+      }} title={`${label} p75`}>
+        <span style={{ color: '#94a3b8' }}>{label}</span>
+        <span style={{ color }}>{v != null ? fmt(v) : '—'}</span>
+      </span>
+    );
+  };
+
   const Card = ({ label, metric, value, fmt }) => {
     const { rating, color } = ratingForMetric(metric, value);
     return (
       <div style={{
-        flex: '1 1 220px', minWidth: 200,
+        flex: '1 1 240px', minWidth: 220,
         background: '#1e293b', borderRadius: 8, padding: 14,
         borderLeft: `3px solid ${color}`,
       }}>
@@ -296,7 +314,13 @@ function CoreWebVitalsPanel({ data }) {
             {rating}
           </div>
         </div>
-        <div style={{ color: '#64748b', fontSize: 10, marginTop: 4 }}>p75 · CrUX history</div>
+        <div style={{ color: '#64748b', fontSize: 10, marginTop: 2, marginBottom: 6 }}>blended p75 · CrUX history</div>
+        {latestByFf && (
+          <div style={{ display: 'flex', gap: 6, marginBottom: 4, flexWrap: 'wrap' }}>
+            <FormFactorPill label="phone"   ff="PHONE"   metric={metric} fmt={fmt} />
+            <FormFactorPill label="desktop" ff="DESKTOP" metric={metric} fmt={fmt} />
+          </div>
+        )}
         <ResponsiveContainer width="100%" height={50}>
           <LineChart data={data} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
             <XAxis dataKey="date" hide />
@@ -318,6 +342,106 @@ function CoreWebVitalsPanel({ data }) {
         value={last.inp_p75} fmt={v => `${Math.round(v)}ms`} />
       <Card label="CLS (cumulative layout shift)" metric="cls"
         value={last.cls_p75} fmt={v => Number(v).toFixed(3)} />
+    </div>
+  );
+}
+
+// Per-page CWV table — pivots the (page, form_factor) rows so each page is
+// one line with mobile + desktop side by side. PageSpeed Insights deep-link
+// in the last column gets the operator straight to the diagnostic for the
+// specific URL.
+function CoreWebVitalsByPagePanel({ rows, origin }) {
+  if (!rows || rows.length === 0) return null;
+  // Pivot (page, form_factor) → page → { PHONE: {...}, DESKTOP: {...} }
+  const byPage = new Map();
+  for (const r of rows) {
+    if (!byPage.has(r.page)) byPage.set(r.page, { page: r.page });
+    byPage.get(r.page)[r.form_factor] = r;
+  }
+  const pages = [...byPage.values()];
+  // Sort by worst LCP (mobile preferred) so the most-broken pages float up.
+  pages.sort((a, b) => {
+    const av = (a.PHONE?.lcp_p75 ?? a.DESKTOP?.lcp_p75 ?? 0);
+    const bv = (b.PHONE?.lcp_p75 ?? b.DESKTOP?.lcp_p75 ?? 0);
+    return bv - av;
+  });
+
+  const Cell = ({ reading, metric, fmt }) => {
+    if (!reading) return <span style={{ color: '#475569' }}>—</span>;
+    const v = reading[`${metric}_p75`];
+    const { color } = ratingForMetric(metric, v);
+    return (
+      <span style={{ color, fontFeatureSettings: '"tnum"' }} title={`p75 ${metric.toUpperCase()}`}>
+        {v != null ? fmt(v) : '—'}
+      </span>
+    );
+  };
+
+  const fmtLcp = v => `${(v / 1000).toFixed(2)}s`;
+  const fmtInp = v => `${Math.round(v)}ms`;
+  const fmtCls = v => Number(v).toFixed(3);
+
+  return (
+    <div style={{
+      background: '#1e293b', borderRadius: 8, padding: '14px 16px',
+      flex: '1 1 100%', minWidth: 0, overflowX: 'auto',
+    }}>
+      <div style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 700, marginBottom: 2 }}>
+        Per-page Core Web Vitals — sorted by worst mobile LCP
+      </div>
+      <div style={{ color: '#64748b', fontSize: 10, marginBottom: 8 }}>
+        Pages without enough Chrome traffic to qualify for CrUX coverage are skipped silently.
+        Click "PSI" on any row to jump straight into PageSpeed Insights for the full diagnostic + fix recommendations.
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: '#e2e8f0', minWidth: 880 }}>
+        <thead>
+          <tr style={{ color: '#94a3b8', fontSize: 11, textAlign: 'left' }}>
+            <th rowSpan={2} style={{ padding: '6px 8px', fontWeight: 500, verticalAlign: 'bottom' }}>Page</th>
+            <th colSpan={3} style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'center', borderLeft: '1px solid #334155' }}>Mobile (p75)</th>
+            <th colSpan={3} style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'center', borderLeft: '1px solid #334155' }}>Desktop (p75)</th>
+            <th rowSpan={2} style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right', verticalAlign: 'bottom', borderLeft: '1px solid #334155' }}>Diagnose</th>
+          </tr>
+          <tr style={{ color: '#64748b', fontSize: 10 }}>
+            <th style={{ padding: '2px 8px', fontWeight: 400, textAlign: 'right', borderLeft: '1px solid #334155' }}>LCP</th>
+            <th style={{ padding: '2px 8px', fontWeight: 400, textAlign: 'right' }}>INP</th>
+            <th style={{ padding: '2px 8px', fontWeight: 400, textAlign: 'right' }}>CLS</th>
+            <th style={{ padding: '2px 8px', fontWeight: 400, textAlign: 'right', borderLeft: '1px solid #334155' }}>LCP</th>
+            <th style={{ padding: '2px 8px', fontWeight: 400, textAlign: 'right' }}>INP</th>
+            <th style={{ padding: '2px 8px', fontWeight: 400, textAlign: 'right' }}>CLS</th>
+          </tr>
+        </thead>
+        <tbody>
+          {pages.map((p, i) => {
+            const fullUrl = origin ? `${origin}${p.page.startsWith('/') ? p.page : `/${p.page}`}` : null;
+            const psi = fullUrl ? `https://pagespeed.web.dev/?url=${encodeURIComponent(fullUrl)}` : null;
+            return (
+              <tr key={p.page} style={{ borderTop: i === 0 ? 'none' : '1px solid #334155' }}>
+                <td style={{ padding: '6px 8px', maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.page}>
+                  {p.page}
+                </td>
+                <td style={{ padding: '6px 8px', textAlign: 'right', borderLeft: '1px solid #334155' }}>
+                  <Cell reading={p.PHONE} metric="lcp" fmt={fmtLcp} />
+                </td>
+                <td style={{ padding: '6px 8px', textAlign: 'right' }}><Cell reading={p.PHONE} metric="inp" fmt={fmtInp} /></td>
+                <td style={{ padding: '6px 8px', textAlign: 'right' }}><Cell reading={p.PHONE} metric="cls" fmt={fmtCls} /></td>
+                <td style={{ padding: '6px 8px', textAlign: 'right', borderLeft: '1px solid #334155' }}>
+                  <Cell reading={p.DESKTOP} metric="lcp" fmt={fmtLcp} />
+                </td>
+                <td style={{ padding: '6px 8px', textAlign: 'right' }}><Cell reading={p.DESKTOP} metric="inp" fmt={fmtInp} /></td>
+                <td style={{ padding: '6px 8px', textAlign: 'right' }}><Cell reading={p.DESKTOP} metric="cls" fmt={fmtCls} /></td>
+                <td style={{ padding: '6px 8px', textAlign: 'right', borderLeft: '1px solid #334155' }}>
+                  {psi ? (
+                    <a href={psi} target="_blank" rel="noreferrer" style={{
+                      color: 'var(--dso-accent)', fontWeight: 600, textDecoration: 'none',
+                      border: '1px solid var(--dso-accent)', borderRadius: 4, padding: '2px 8px', fontSize: 11,
+                    }}>PSI ↗</a>
+                  ) : <span style={{ color: '#64748b' }}>—</span>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -594,6 +718,7 @@ export default function GA4InsightsPage() {
   const [campaignStats, setCampaignStats] = useState(null);
   const [gsc, setGsc] = useState(null);
   const [crux, setCrux] = useState(null);
+  const [cruxPages, setCruxPages] = useState(null);
   const [brandedShare, setBrandedShare] = useState(null);
   const [queryMovers, setQueryMovers] = useState(null);
   const [trendQuery, setTrendQuery] = useState(null);
@@ -620,14 +745,16 @@ export default function GA4InsightsPage() {
       fetch('/api/gsc').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/gsc-branded-share').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/crux').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/crux-by-page').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/gsc-query-movers').then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([agg, chans, gscResp, brandResp, cruxResp, moversResp]) => {
+      .then(([agg, chans, gscResp, brandResp, cruxResp, cruxPagesResp, moversResp]) => {
         setAggregate(agg);
         setChannelsDaily(chans);
         setGsc(gscResp);
         setBrandedShare(brandResp);
         setCrux(cruxResp);
+        setCruxPages(cruxPagesResp);
         setQueryMovers(moversResp);
         if (!agg || (agg.daily || []).length === 0) {
           setError('No GA4 data yet. Run a GA4 fetch first.');
@@ -1141,11 +1268,24 @@ export default function GA4InsightsPage() {
                 <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
                   Direct Google ranking factor — when these degrade, organic clicks follow within weeks.
                   Real-user p75 from the Chrome User Experience Report (last 25 collection periods).
+                  Each tile shows the blended ALL-form-factor reading with a <em>phone</em> / <em>desktop</em>{' '}
+                  pill below — mobile is usually worse and is the form factor most B2B sites should optimize for.
                   Thresholds per <a href="https://web.dev/vitals/" target="_blank" rel="noreferrer" style={{ color: '#94a3b8' }}>web.dev/vitals</a>.
                 </div>
-                <div style={{ marginBottom: 20 }}>
-                  <CoreWebVitalsPanel data={crux.daily} />
+                <div style={{ marginBottom: 14 }}>
+                  <CoreWebVitalsPanel
+                    data={crux.daily}
+                    latestByFf={crux.latest_by_form_factor}
+                  />
                 </div>
+                {(cruxPages?.pages?.length ?? 0) > 0 && (
+                  <div style={{ marginBottom: 20 }}>
+                    <CoreWebVitalsByPagePanel
+                      rows={cruxPages.pages}
+                      origin={crux.origin || ''}
+                    />
+                  </div>
+                )}
               </>
             )}
 
