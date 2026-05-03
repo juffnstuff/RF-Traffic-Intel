@@ -11,20 +11,29 @@ import RFTILogo from './components/RFTILogo';
 function OverviewPage() {
   const [data, setData] = useState(null);
   const [ga4, setGa4] = useState(null);
+  // GSC daily clicks/impressions and per-channel sessions feed the upstream
+  // lead-lag panel — both are optional and degrade quietly if missing.
+  const [gscDaily, setGscDaily] = useState(null);
+  const [channelsDaily, setChannelsDaily] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const loadData = useCallback(() => {
     setLoading(true);
-    // GA4 is optional — don't fail the page if it's not ready yet.
+    // GA4 / GSC / channel-daily are optional — don't fail the page if any are
+    // not ready yet (each integration backfills independently).
     Promise.all([
       fetch('/api/unified').then(r => { if (!r.ok) throw new Error(`API ${r.status}`); return r.json(); }),
       fetch('/api/ga4').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/gsc').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/ga4-channels-daily').then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([unified, ga4Resp]) => {
+      .then(([unified, ga4Resp, gscResp, channelsResp]) => {
         setData(unified);
         setGa4(ga4Resp);
+        setGscDaily(gscResp);
+        setChannelsDaily(channelsResp);
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
@@ -56,6 +65,8 @@ function OverviewPage() {
     <DashboardView
       daily={data?.daily || []}
       ga4Daily={ga4?.daily || []}
+      gscDaily={gscDaily?.daily || []}
+      channelsDaily={channelsDaily?.daily || []}
       onRefresh={handleRefresh}
       refreshing={refreshing}
       sourceLabel={data?.sources?.join(', ') || ''}
