@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
-  ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, Legend,
-  CartesianGrid,
+  ResponsiveContainer, AreaChart, Area, LineChart, Line,
+  XAxis, YAxis, Tooltip, Legend, CartesianGrid,
 } from 'recharts';
 import {
   DMALineChart, StatCard, fmtNum, fmtMoney, fmtPct, fmtRatio, fmtDate, fmtAxisDate,
@@ -119,6 +119,81 @@ function StackedChannelChart({ data, channels, formatter = fmtNum }) {
 // Generic table for any list-of-rows funnel breakdown. Columns are passed
 // as { key, label, align, format } objects so each section can shape the
 // columns it needs without duplicating the table boilerplate.
+// Core Web Vitals panel — three p75 metrics from CrUX with threshold-colored
+// tiles and a 25-period mini-trend each. Thresholds are Google's published
+// "good / needs improvement / poor" cutoffs (web.dev/vitals).
+//
+// LCP — Largest Contentful Paint (ms). Good < 2500.
+// INP — Interaction to Next Paint (ms). Good < 200.
+// CLS — Cumulative Layout Shift (unitless). Good < 0.1.
+function ratingForMetric(metric, v) {
+  if (v == null) return { rating: '—', color: '#475569' };
+  if (metric === 'lcp') {
+    if (v <= 2500) return { rating: 'GOOD', color: '#22c55e' };
+    if (v <= 4000) return { rating: 'NEEDS WORK', color: '#fbbf24' };
+    return { rating: 'POOR', color: '#ef4444' };
+  }
+  if (metric === 'inp') {
+    if (v <= 200) return { rating: 'GOOD', color: '#22c55e' };
+    if (v <= 500) return { rating: 'NEEDS WORK', color: '#fbbf24' };
+    return { rating: 'POOR', color: '#ef4444' };
+  }
+  if (metric === 'cls') {
+    if (v <= 0.1)  return { rating: 'GOOD', color: '#22c55e' };
+    if (v <= 0.25) return { rating: 'NEEDS WORK', color: '#fbbf24' };
+    return { rating: 'POOR', color: '#ef4444' };
+  }
+  return { rating: '—', color: '#475569' };
+}
+
+function CoreWebVitalsPanel({ data }) {
+  if (!data || !Array.isArray(data) || data.length === 0) return null;
+  const last = data[data.length - 1];
+  const Card = ({ label, metric, value, fmt }) => {
+    const { rating, color } = ratingForMetric(metric, value);
+    return (
+      <div style={{
+        flex: '1 1 220px', minWidth: 200,
+        background: '#1e293b', borderRadius: 8, padding: 14,
+        borderLeft: `3px solid ${color}`,
+      }}>
+        <div style={{ color: '#94a3b8', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>
+          {label}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+          <div style={{ color: '#f8fafc', fontSize: 26, fontWeight: 700, fontFeatureSettings: '"tnum"' }}>
+            {value != null ? fmt(value) : '—'}
+          </div>
+          <div style={{ color, fontSize: 11, fontWeight: 700, letterSpacing: 0.5 }}>
+            {rating}
+          </div>
+        </div>
+        <div style={{ color: '#64748b', fontSize: 10, marginTop: 4 }}>p75 · CrUX history</div>
+        <ResponsiveContainer width="100%" height={50}>
+          <LineChart data={data} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
+            <XAxis dataKey="date" hide />
+            <YAxis hide />
+            <Line
+              type="monotone" dataKey={`${metric}_p75`}
+              stroke={color} strokeWidth={2} dot={false} isAnimationActive={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    );
+  };
+  return (
+    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+      <Card label="LCP (largest contentful paint)" metric="lcp"
+        value={last.lcp_p75} fmt={v => `${(v / 1000).toFixed(2)}s`} />
+      <Card label="INP (interaction to next paint)" metric="inp"
+        value={last.inp_p75} fmt={v => `${Math.round(v)}ms`} />
+      <Card label="CLS (cumulative layout shift)" metric="cls"
+        value={last.cls_p75} fmt={v => Number(v).toFixed(3)} />
+    </div>
+  );
+}
+
 function FunnelTable({ title, subtitle, rows, columns, emptyMessage = 'No data in the current range.' }) {
   return (
     <div style={{
@@ -390,6 +465,7 @@ export default function GA4InsightsPage() {
   const [channelsDaily, setChannelsDaily] = useState(null);
   const [campaignStats, setCampaignStats] = useState(null);
   const [gsc, setGsc] = useState(null);
+  const [crux, setCrux] = useState(null);
   const [brandedShare, setBrandedShare] = useState(null);
   // Window-aggregated dim breakdowns; refetched on range change.
   const [landingPages, setLandingPages] = useState(null);
@@ -412,12 +488,14 @@ export default function GA4InsightsPage() {
       fetch('/api/ga4-channels-daily').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/gsc').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/gsc-branded-share').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/crux').then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([agg, chans, gscResp, brandResp]) => {
+      .then(([agg, chans, gscResp, brandResp, cruxResp]) => {
         setAggregate(agg);
         setChannelsDaily(chans);
         setGsc(gscResp);
         setBrandedShare(brandResp);
+        setCrux(cruxResp);
         if (!agg || (agg.daily || []).length === 0) {
           setError('No GA4 data yet. Run a GA4 fetch first.');
         } else {
@@ -886,6 +964,22 @@ export default function GA4InsightsPage() {
                 </div>
                 <div style={{ marginBottom: 20 }}>
                   <BrandedSharePanel data={brandedShare} />
+                </div>
+              </>
+            )}
+
+            {(crux?.daily?.length ?? 0) > 0 && (
+              <>
+                <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, fontWeight: 600 }}>
+                  Core Web Vitals (page experience)
+                </h2>
+                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
+                  Direct Google ranking factor — when these degrade, organic clicks follow within weeks.
+                  Real-user p75 from the Chrome User Experience Report (last 25 collection periods).
+                  Thresholds per <a href="https://web.dev/vitals/" target="_blank" rel="noreferrer" style={{ color: '#94a3b8' }}>web.dev/vitals</a>.
+                </div>
+                <div style={{ marginBottom: 20 }}>
+                  <CoreWebVitalsPanel data={crux.daily} />
                 </div>
               </>
             )}

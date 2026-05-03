@@ -10,6 +10,7 @@
     "fetch:ga4": "node fetchers/fetch-ga4.js",
     "fetch:netsuite": "node fetchers/fetch-netsuite.js",
     "fetch:netsuite-dim": "node fetchers/fetch-netsuite-dim.js",
+    "fetch:crux": "node fetchers/fetch-crux.js",
     "start": "node server.js",
     "server": "node server.js",
     "dev": "concurrently \"node server.js\" \"vite dashboard --port 5174\"",

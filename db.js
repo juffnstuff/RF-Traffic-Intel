@@ -395,6 +395,19 @@ export async function initDB() {
   `);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_gsc_pages_win ON gsc_top_pages(window_end_date)`);
 
+  // Core Web Vitals from the Chrome User Experience Report (CrUX). p75
+  // values for LCP (ms), INP (ms), CLS (unitless). One row per CrUX
+  // collection period's lastDate. Direct Google ranking factor.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS crux_daily (
+      date DATE PRIMARY KEY,
+      lcp_p75 NUMERIC(10,2),
+      inp_p75 NUMERIC(10,2),
+      cls_p75 NUMERIC(8,4),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   console.log('✅  Database tables ready');
 }
 
@@ -1720,4 +1733,39 @@ export async function getGscTop({ kind, windowEnd = null, limit = 100 } = {}) {
     LIMIT $2
   `, [end, limit]);
   return { window_end: end, rows };
+}
+
+// ── CrUX (Core Web Vitals) helpers ──────────────────────────────────
+
+export async function upsertCruxDaily(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  let upserted = 0;
+  for (const r of rows) {
+    if (!r.date) continue;
+    await p.query(`
+      INSERT INTO crux_daily (date, lcp_p75, inp_p75, cls_p75, updated_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT (date) DO UPDATE SET
+        lcp_p75    = EXCLUDED.lcp_p75,
+        inp_p75    = EXCLUDED.inp_p75,
+        cls_p75    = EXCLUDED.cls_p75,
+        updated_at = NOW()
+    `, [r.date, r.lcp_p75, r.inp_p75, r.cls_p75]);
+    upserted++;
+  }
+  return upserted;
+}
+
+export async function getCruxDaily() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT date::text,
+      lcp_p75::float as lcp_p75,
+      inp_p75::float as inp_p75,
+      cls_p75::float as cls_p75
+    FROM crux_daily
+    ORDER BY date ASC
+  `);
+  return rows;
 }
