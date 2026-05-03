@@ -146,6 +146,134 @@ function ratingForMetric(metric, v) {
   return { rating: '—', color: '#475569' };
 }
 
+// Top movers table — the cheapest leading indicator we have for organic
+// click loss. A query's position slipping from 4 to 9 will lose ~70% of
+// clicks before sessions reflects it, often 2–6 weeks ahead.
+function QueryMoversPanel({ data, onPick, selected }) {
+  if (!data || !data.movers || data.movers.length === 0) return null;
+  return (
+    <div style={{
+      background: '#1e293b', borderRadius: 8, padding: '14px 16px',
+      flex: '1 1 100%', minWidth: 0, overflowX: 'auto',
+    }}>
+      <div style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 700, marginBottom: 2 }}>
+        Top movers — {data.latest} vs {data.prior}
+      </div>
+      <div style={{ color: '#64748b', fontSize: 10, marginBottom: 8 }}>
+        Click a query to chart its rank trend over every snapshot we've stored.
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: '#e2e8f0' }}>
+        <thead>
+          <tr style={{ color: '#94a3b8', fontSize: 11, textAlign: 'left' }}>
+            <th style={{ padding: '6px 8px', fontWeight: 500 }}>Query</th>
+            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Pos. (prior → latest)</th>
+            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Δ pos.</th>
+            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Clicks (prior → latest)</th>
+            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Δ clicks</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.movers.map((m, i) => {
+            const isSelected = selected === m.query;
+            // position_delta = prior - latest. Positive means rank improved
+            // (smaller number is better in GSC), negative means rank lost.
+            const improved = m.position_delta > 0;
+            return (
+              <tr
+                key={m.query}
+                onClick={() => onPick(isSelected ? null : m.query)}
+                style={{
+                  borderTop: i === 0 ? 'none' : '1px solid #334155',
+                  background: isSelected ? '#334155' : undefined,
+                  cursor: 'pointer',
+                }}
+              >
+                <td style={{ padding: '6px 8px', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={m.query}>
+                  {m.query}
+                </td>
+                <td style={{ padding: '6px 8px', textAlign: 'right', color: '#cbd5e1', fontFeatureSettings: '"tnum"' }}>
+                  {Number(m.prior_position).toFixed(1)} → {Number(m.latest_position).toFixed(1)}
+                </td>
+                <td style={{
+                  padding: '6px 8px', textAlign: 'right', fontWeight: 600,
+                  color: improved ? '#22c55e' : '#ef4444',
+                  fontFeatureSettings: '"tnum"',
+                }}>
+                  {improved ? '↑' : '↓'} {Math.abs(Number(m.position_delta)).toFixed(1)}
+                </td>
+                <td style={{ padding: '6px 8px', textAlign: 'right', color: '#cbd5e1', fontFeatureSettings: '"tnum"' }}>
+                  {fmtNum(m.prior_clicks ?? 0)} → {fmtNum(m.latest_clicks ?? 0)}
+                </td>
+                <td style={{
+                  padding: '6px 8px', textAlign: 'right', fontWeight: 600,
+                  color: m.click_delta >= 0 ? '#22c55e' : '#ef4444',
+                  fontFeatureSettings: '"tnum"',
+                }}>
+                  {m.click_delta >= 0 ? '+' : ''}{fmtNum(m.click_delta)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function QueryRankTrendChart({ query, history, onClose }) {
+  if (!query) return null;
+  if (!history || !history.history || history.history.length < 2) {
+    return (
+      <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, marginTop: 8 }}>
+        <div style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 600, marginBottom: 6, display: 'flex', justifyContent: 'space-between' }}>
+          <span>Rank trend — <em>{query}</em></span>
+          <button onClick={onClose} style={{ background: 'transparent', border: '1px solid #475569', borderRadius: 4, padding: '2px 8px', fontSize: 10, color: '#94a3b8', cursor: 'pointer' }}>close</button>
+        </div>
+        <div style={{ color: '#64748b', fontSize: 11 }}>
+          Not enough history yet — need at least two GSC snapshots for this query. (We're storing one per fetch; check back after another nightly run.)
+        </div>
+      </div>
+    );
+  }
+  const data = history.history.map(r => ({
+    date: r.date,
+    position: Number(r.position),
+    clicks: Number(r.clicks) || 0,
+  }));
+  return (
+    <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, marginTop: 8 }}>
+      <div style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 600, marginBottom: 6, display: 'flex', justifyContent: 'space-between' }}>
+        <span>Rank trend — <em>{query}</em></span>
+        <button onClick={onClose} style={{ background: 'transparent', border: '1px solid #475569', borderRadius: 4, padding: '2px 8px', fontSize: 10, color: '#94a3b8', cursor: 'pointer' }}>close</button>
+      </div>
+      <div style={{ color: '#64748b', fontSize: 10, marginBottom: 8 }}>
+        Avg position over time (lower is better) — Y axis inverted. Bars show daily clicks.
+      </div>
+      <ResponsiveContainer width="100%" height={180}>
+        <LineChart data={data} margin={{ top: 4, right: 6, left: 6, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#334155" strokeOpacity={0.5} />
+          <XAxis dataKey="date" tick={{ fill: '#94a3b8', fontSize: 10 }} axisLine={{ stroke: '#475569' }} />
+          <YAxis
+            reversed
+            tick={{ fill: '#94a3b8', fontSize: 10 }}
+            axisLine={false} tickLine={false}
+            domain={['dataMin - 1', 'dataMax + 1']}
+          />
+          <Tooltip
+            contentStyle={{ background: '#0f172a', border: '1px solid #475569', borderRadius: 4, fontSize: 11 }}
+            labelStyle={{ color: '#cbd5e1' }}
+          />
+          <Line
+            type="monotone" dataKey="position" name="Avg position"
+            stroke="#f59e0b" strokeWidth={2.5} dot={{ r: 3, fill: '#f59e0b' }}
+            isAnimationActive={false}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 function CoreWebVitalsPanel({ data }) {
   if (!data || !Array.isArray(data) || data.length === 0) return null;
   const last = data[data.length - 1];
@@ -467,6 +595,9 @@ export default function GA4InsightsPage() {
   const [gsc, setGsc] = useState(null);
   const [crux, setCrux] = useState(null);
   const [brandedShare, setBrandedShare] = useState(null);
+  const [queryMovers, setQueryMovers] = useState(null);
+  const [trendQuery, setTrendQuery] = useState(null);
+  const [trendData, setTrendData] = useState(null);
   // Window-aggregated dim breakdowns; refetched on range change.
   const [landingPages, setLandingPages] = useState(null);
   const [sourceMedium, setSourceMedium] = useState(null);
@@ -489,13 +620,15 @@ export default function GA4InsightsPage() {
       fetch('/api/gsc').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/gsc-branded-share').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/crux').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/gsc-query-movers').then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([agg, chans, gscResp, brandResp, cruxResp]) => {
+      .then(([agg, chans, gscResp, brandResp, cruxResp, moversResp]) => {
         setAggregate(agg);
         setChannelsDaily(chans);
         setGsc(gscResp);
         setBrandedShare(brandResp);
         setCrux(cruxResp);
+        setQueryMovers(moversResp);
         if (!agg || (agg.daily || []).length === 0) {
           setError('No GA4 data yet. Run a GA4 fetch first.');
         } else {
@@ -505,6 +638,16 @@ export default function GA4InsightsPage() {
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
+
+  // Lazy-fetch query rank history when the user picks a query in the movers
+  // table. Cleared when the user dismisses the trend.
+  useEffect(() => {
+    if (!trendQuery) { setTrendData(null); return; }
+    fetch(`/api/gsc-query-history?q=${encodeURIComponent(trendQuery)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(setTrendData)
+      .catch(() => setTrendData(null));
+  }, [trendQuery]);
 
   const availableYears = useMemo(() => {
     const rows = aggregate?.daily || [];
@@ -965,6 +1108,28 @@ export default function GA4InsightsPage() {
                 <div style={{ marginBottom: 20 }}>
                   <BrandedSharePanel data={brandedShare} />
                 </div>
+              </>
+            )}
+
+            {(queryMovers?.movers?.length ?? 0) > 0 && (
+              <>
+                <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, fontWeight: 600 }}>
+                  GSC query rank movers
+                </h2>
+                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
+                  Position changes between the most recent two GSC snapshots. A query slipping
+                  from rank 4 to 9 loses ~70% of clicks — this surfaces those slips weeks before
+                  the session counts catch up. Click any row to chart its full snapshot history.
+                </div>
+                <div style={{ marginBottom: 8 }}>
+                  <QueryMoversPanel data={queryMovers} onPick={setTrendQuery} selected={trendQuery} />
+                </div>
+                <QueryRankTrendChart
+                  query={trendQuery}
+                  history={trendData}
+                  onClose={() => setTrendQuery(null)}
+                />
+                <div style={{ marginBottom: 20 }} />
               </>
             )}
 

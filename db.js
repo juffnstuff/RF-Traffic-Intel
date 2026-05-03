@@ -1735,6 +1735,66 @@ export async function getGscTop({ kind, windowEnd = null, limit = 100 } = {}) {
   return { window_end: end, rows };
 }
 
+// Trend over time for a specific GSC query — uses the natural snapshot
+// accumulation from gsc_top_queries (PK is (window_end_date, query) so
+// every fetch leaves a daily breadcrumb). Returns one row per snapshot
+// the query appeared in, sorted oldest → newest. Useful for the SEO
+// "is this query slipping in rank" diagnostic that catches losses
+// 2-6 weeks before sessions reflect them.
+export async function getGscQueryHistory({ query, sinceDate = null } = {}) {
+  if (!query) return [];
+  const p = getPool();
+  const params = [query];
+  let whereExtra = '';
+  if (sinceDate) { params.push(sinceDate); whereExtra = `AND window_end_date >= $${params.length}::date`; }
+  const { rows } = await p.query(`
+    SELECT window_end_date::text as date,
+      clicks, impressions,
+      ctr::float      as ctr,
+      position::float as position
+    FROM gsc_top_queries
+    WHERE query = $1
+    ${whereExtra}
+    ORDER BY window_end_date ASC
+  `, params);
+  return rows;
+}
+
+// "Most volatile" queries — top movers by absolute position delta between
+// the most recent two snapshots. Surfaces queries that gained or lost
+// ranking visibility week-over-week.
+export async function getGscQueryMovers({ limit = 25 } = {}) {
+  const p = getPool();
+  const { rows: dateRows } = await p.query(`
+    SELECT DISTINCT window_end_date::text as date
+    FROM gsc_top_queries
+    ORDER BY window_end_date DESC
+    LIMIT 2
+  `);
+  if (dateRows.length < 2) return { latest: null, prior: null, movers: [] };
+  const [latest, prior] = dateRows.map(r => r.date);
+  const { rows } = await p.query(`
+    SELECT
+      l.query,
+      l.clicks::int        as latest_clicks,
+      l.impressions::int   as latest_impressions,
+      l.position::float    as latest_position,
+      p.clicks::int        as prior_clicks,
+      p.impressions::int   as prior_impressions,
+      p.position::float    as prior_position,
+      (p.position - l.position)::float       as position_delta,
+      (l.clicks - COALESCE(p.clicks, 0))::int as click_delta
+    FROM gsc_top_queries l
+    LEFT JOIN gsc_top_queries p
+      ON p.query = l.query AND p.window_end_date = $2::date
+    WHERE l.window_end_date = $1::date
+      AND p.position IS NOT NULL
+    ORDER BY ABS(p.position - l.position) DESC NULLS LAST
+    LIMIT $3
+  `, [latest, prior, Math.min(200, Math.max(5, parseInt(limit, 10) || 25))]);
+  return { latest, prior, movers: rows };
+}
+
 // ── CrUX (Core Web Vitals) helpers ──────────────────────────────────
 
 export async function upsertCruxDaily(rows) {
