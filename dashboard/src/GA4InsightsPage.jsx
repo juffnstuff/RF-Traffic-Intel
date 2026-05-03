@@ -116,6 +116,59 @@ function StackedChannelChart({ data, channels, formatter = fmtNum }) {
   );
 }
 
+// Generic table for any list-of-rows funnel breakdown. Columns are passed
+// as { key, label, align, format } objects so each section can shape the
+// columns it needs without duplicating the table boilerplate.
+function FunnelTable({ title, subtitle, rows, columns, emptyMessage = 'No data in the current range.' }) {
+  return (
+    <div style={{
+      background: '#1e293b', borderRadius: 8, padding: '14px 16px',
+      flex: '1 1 100%', minWidth: 0, overflowX: 'auto',
+    }}>
+      <div style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 700, marginBottom: 2 }}>{title}</div>
+      {subtitle && <div style={{ color: '#64748b', fontSize: 10, marginBottom: 8 }}>{subtitle}</div>}
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: '#e2e8f0' }}>
+        <thead>
+          <tr style={{ color: '#94a3b8', fontSize: 11, textAlign: 'left' }}>
+            {columns.map(c => (
+              <th key={c.key} style={{ padding: '6px 8px', fontWeight: 500, textAlign: c.align || 'left' }}>
+                {c.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {(rows || []).map((r, i) => (
+            <tr key={i} style={{ borderTop: i === 0 ? 'none' : '1px solid #334155' }}>
+              {columns.map(c => {
+                const v = r[c.key];
+                const formatted = c.format ? c.format(v, r) : v;
+                return (
+                  <td key={c.key} style={{
+                    padding: '6px 8px',
+                    textAlign: c.align || 'left',
+                    fontFeatureSettings: c.align === 'right' ? '"tnum"' : 'normal',
+                    color: c.dim ? '#94a3b8' : '#e2e8f0',
+                    maxWidth: c.maxWidth, overflow: 'hidden',
+                    textOverflow: 'ellipsis', whiteSpace: c.maxWidth ? 'nowrap' : 'normal',
+                  }} title={c.maxWidth ? String(v ?? '') : undefined}>
+                    {formatted}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+          {(!rows || rows.length === 0) && (
+            <tr><td colSpan={columns.length} style={{ padding: '10px 8px', color: '#64748b' }}>
+              {emptyMessage}
+            </td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function BrandedSharePanel({ data }) {
   if (!data || !data.branded || !data.non_branded) return null;
   const totalClicks = (data.branded.clicks || 0) + (data.non_branded.clicks || 0);
@@ -338,6 +391,14 @@ export default function GA4InsightsPage() {
   const [campaignStats, setCampaignStats] = useState(null);
   const [gsc, setGsc] = useState(null);
   const [brandedShare, setBrandedShare] = useState(null);
+  // Window-aggregated dim breakdowns; refetched on range change.
+  const [landingPages, setLandingPages] = useState(null);
+  const [sourceMedium, setSourceMedium] = useState(null);
+  const [firstTouch, setFirstTouch] = useState(null);
+  const [devices, setDevices] = useState(null);
+  const [countries, setCountries] = useState(null);
+  const [events, setEvents] = useState(null);
+  const [newVsReturning, setNewVsReturning] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -375,8 +436,10 @@ export default function GA4InsightsPage() {
 
   const cutoff = useMemo(() => rangeCutoff(range, selectedYears), [range, selectedYears]);
 
-  // Campaign stats refetch on range change — the server aggregates over
-  // [since, until] so we can't filter client-side without per-day data.
+  // Campaign + every dim breakdown refetches on range change — the server
+  // aggregates over [since, until] so we can't filter client-side without
+  // per-day data. Fire them in parallel; each is independently optional so
+  // the page still renders if some endpoints aren't yet populated.
   useEffect(() => {
     const rows = aggregate?.daily || [];
     if (!rows.length) return;
@@ -388,10 +451,21 @@ export default function GA4InsightsPage() {
     } else if (cutoff) {
       params.set('since', cutoff);
     }
-    fetch(`/api/ga4-campaign-stats?${params.toString()}`)
-      .then(r => r.ok ? r.json() : null)
-      .then(j => setCampaignStats(j))
-      .catch(() => setCampaignStats(null));
+    const qs = params.toString();
+    const fetchOpt = (url, setter) => {
+      const sep = url.includes('?') ? '&' : '?';
+      fetch(`${url}${sep}${qs}`).then(r => r.ok ? r.json() : null)
+        .then(j => setter(j))
+        .catch(() => setter(null));
+    };
+    fetchOpt('/api/ga4-campaign-stats',           setCampaignStats);
+    fetchOpt('/api/ga4-landing-pages',            setLandingPages);
+    fetchOpt('/api/ga4-source-medium',            setSourceMedium);
+    fetchOpt('/api/ga4-first-touch',              setFirstTouch);
+    fetchOpt('/api/ga4-devices',                  setDevices);
+    fetchOpt('/api/ga4-countries',                setCountries);
+    fetchOpt('/api/ga4-events?conversionsOnly=1', setEvents);
+    fetchOpt('/api/ga4-new-vs-returning',         setNewVsReturning);
   }, [aggregate, cutoff, selectedYears]);
 
   // Build the main daily series with DMAs + a derived pages/session and
@@ -836,6 +910,178 @@ export default function GA4InsightsPage() {
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
               <CampaignTable rows={campaignStats?.campaigns || []} />
             </div>
+
+            {(landingPages?.landing_pages?.length ?? 0) > 0 && (
+              <>
+                <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
+                  Top landing pages
+                </h2>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+                  <FunnelTable
+                    title="Top landing pages by sessions in range"
+                    subtitle="The single most useful SEO read — which pages earn their keep, and which drop off."
+                    rows={landingPages.landing_pages}
+                    columns={[
+                      { key: 'landing_page', label: 'Landing page', maxWidth: 360 },
+                      { key: 'sessions', label: 'Sessions', align: 'right', format: fmtNum },
+                      { key: 'engaged_sessions', label: 'Engaged', align: 'right', format: fmtNum },
+                      { key: 'engagement_rate', label: 'Eng %', align: 'right', format: v => v != null ? fmtPct(v) : '—' },
+                      { key: 'conversions', label: 'Conv.', align: 'right', format: fmtNum },
+                      { key: 'conversion_rate', label: 'Conv / sess', align: 'right', format: v => v != null ? fmtRatio(v) : '—' },
+                      { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
+                      { key: 'active_days', label: 'Active days', align: 'right', dim: true, format: v => v ?? '—' },
+                    ]}
+                  />
+                </div>
+              </>
+            )}
+
+            {(sourceMedium?.source_medium?.length ?? 0) > 0 && (
+              <>
+                <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
+                  Source / Medium (granular attribution)
+                </h2>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+                  <FunnelTable
+                    title="Source / Medium — top combinations by sessions"
+                    subtitle="Channel groups roll these up; this is the granular view (google/organic vs google/cpc, reddit/referral, etc.)."
+                    rows={sourceMedium.source_medium}
+                    columns={[
+                      { key: 'source', label: 'Source', maxWidth: 200 },
+                      { key: 'medium', label: 'Medium', maxWidth: 140 },
+                      { key: 'sessions', label: 'Sessions', align: 'right', format: fmtNum },
+                      { key: 'engaged_sessions', label: 'Engaged', align: 'right', format: fmtNum },
+                      { key: 'new_users', label: 'New users', align: 'right', format: fmtNum },
+                      { key: 'conversions', label: 'Conv.', align: 'right', format: fmtNum },
+                      { key: 'conversion_rate', label: 'Conv / sess', align: 'right', format: v => v != null ? fmtRatio(v) : '—' },
+                      { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
+                    ]}
+                  />
+                </div>
+              </>
+            )}
+
+            {((devices?.devices?.length ?? 0) > 0 || (countries?.countries?.length ?? 0) > 0) && (
+              <>
+                <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
+                  Device &amp; geo split
+                </h2>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+                  {(devices?.devices?.length ?? 0) > 0 && (
+                    <div style={{ flex: '1 1 360px', minWidth: 0 }}>
+                      <FunnelTable
+                        title="Device"
+                        subtitle="Mobile vs desktop conv-rate delta surfaces UX leaks."
+                        rows={devices.devices}
+                        columns={[
+                          { key: 'device', label: 'Device' },
+                          { key: 'sessions', label: 'Sessions', align: 'right', format: fmtNum },
+                          { key: 'engagement_rate', label: 'Eng %', align: 'right', format: v => v != null ? fmtPct(v) : '—' },
+                          { key: 'conversions', label: 'Conv.', align: 'right', format: fmtNum },
+                          { key: 'conversion_rate', label: 'Conv / sess', align: 'right', format: v => v != null ? fmtRatio(v) : '—' },
+                          { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
+                        ]}
+                      />
+                    </div>
+                  )}
+                  {(countries?.countries?.length ?? 0) > 0 && (
+                    <div style={{ flex: '1 1 480px', minWidth: 0 }}>
+                      <FunnelTable
+                        title="Country"
+                        subtitle="Top 25 by sessions in range."
+                        rows={countries.countries}
+                        columns={[
+                          { key: 'country', label: 'Country', maxWidth: 180 },
+                          { key: 'sessions', label: 'Sessions', align: 'right', format: fmtNum },
+                          { key: 'new_users', label: 'New users', align: 'right', format: fmtNum },
+                          { key: 'conversions', label: 'Conv.', align: 'right', format: fmtNum },
+                          { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
+                        ]}
+                      />
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {(events?.events?.length ?? 0) > 0 && (
+              <>
+                <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
+                  Conversion events
+                </h2>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+                  {events.events.slice(0, 8).map(ev => (
+                    <StatCard
+                      key={ev.event_name}
+                      label={ev.event_name}
+                      value={fmtNum(ev.conversions)}
+                      sub={`${fmtNum(ev.event_count)} fires${ev.total_revenue ? ` · ${fmtMoney(ev.total_revenue)} revenue` : ''}`}
+                      small={ev.active_days != null ? `${ev.active_days} active days` : null}
+                    />
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+                  <FunnelTable
+                    title="All conversion events in range"
+                    rows={events.events}
+                    columns={[
+                      { key: 'event_name', label: 'Event' },
+                      { key: 'conversions', label: 'Conversions', align: 'right', format: fmtNum },
+                      { key: 'event_count', label: 'Total fires', align: 'right', format: fmtNum },
+                      { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
+                      { key: 'active_days', label: 'Active days', align: 'right', dim: true, format: v => v ?? '—' },
+                    ]}
+                  />
+                </div>
+              </>
+            )}
+
+            {(newVsReturning?.visitor_types?.length ?? 0) > 0 && (
+              <>
+                <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
+                  New vs returning
+                </h2>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+                  <FunnelTable
+                    title="Top vs bottom funnel proxy"
+                    subtitle="New visitors are upper funnel; returning are closer to converting. Mixing them blurs lag analysis."
+                    rows={newVsReturning.visitor_types}
+                    columns={[
+                      { key: 'visitor_type', label: 'Visitor type' },
+                      { key: 'sessions', label: 'Sessions', align: 'right', format: fmtNum },
+                      { key: 'engagement_rate', label: 'Eng %', align: 'right', format: v => v != null ? fmtPct(v) : '—' },
+                      { key: 'conversions', label: 'Conv.', align: 'right', format: fmtNum },
+                      { key: 'conversion_rate', label: 'Conv / sess', align: 'right', format: v => v != null ? fmtRatio(v) : '—' },
+                      { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
+                    ]}
+                  />
+                </div>
+              </>
+            )}
+
+            {(firstTouch?.first_touch?.length ?? 0) > 0 && (
+              <>
+                <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
+                  First-touch attribution
+                </h2>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+                  <FunnelTable
+                    title="First-touch source / medium"
+                    subtitle="Where the user first found you, not where they were when they came back to convert. For 30–90d B2B cycles this often tells a different story than session-source."
+                    rows={firstTouch.first_touch}
+                    columns={[
+                      { key: 'first_source', label: 'First source', maxWidth: 200 },
+                      { key: 'first_medium', label: 'First medium', maxWidth: 140 },
+                      { key: 'sessions', label: 'Sessions', align: 'right', format: fmtNum },
+                      { key: 'new_users', label: 'New users', align: 'right', format: fmtNum },
+                      { key: 'conversions', label: 'Conv.', align: 'right', format: fmtNum },
+                      { key: 'conversion_rate', label: 'Conv / sess', align: 'right', format: v => v != null ? fmtRatio(v) : '—' },
+                      { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
+                    ]}
+                  />
+                </div>
+              </>
+            )}
           </>
         )}
       </main>

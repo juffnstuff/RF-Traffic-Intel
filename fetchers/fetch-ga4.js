@@ -79,6 +79,15 @@ function num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 const DATE_DIM       = { name: 'date' };
 const CAMPAIGN_DIM   = { name: 'sessionCampaignName' };
 const CHANNEL_DIM    = { name: 'sessionDefaultChannelGroup' };
+const LANDING_DIM    = { name: 'landingPagePlusQueryString' };
+const SOURCE_DIM     = { name: 'sessionSource' };
+const MEDIUM_DIM     = { name: 'sessionMedium' };
+const FIRST_SOURCE_DIM = { name: 'firstUserSource' };
+const FIRST_MEDIUM_DIM = { name: 'firstUserMedium' };
+const DEVICE_DIM     = { name: 'deviceCategory' };
+const COUNTRY_DIM    = { name: 'country' };
+const EVENT_DIM      = { name: 'eventName' };
+const NEW_RET_DIM    = { name: 'newVsReturning' };
 
 const METRICS_AGG = [
   { name: 'sessions' },
@@ -101,6 +110,26 @@ const METRICS_CAMPAIGN = [
   { name: 'newUsers' },
   { name: 'engagedSessions' },
   { name: 'screenPageViews' },
+  { name: 'conversions' },
+  { name: 'totalRevenue' },
+];
+
+// Lighter metric set for breakdowns where only counts + revenue matter.
+const METRICS_LIGHT = [
+  { name: 'sessions' },
+  { name: 'totalUsers' },
+  { name: 'newUsers' },
+  { name: 'engagedSessions' },
+  { name: 'screenPageViews' },
+  { name: 'conversions' },
+  { name: 'totalRevenue' },
+];
+
+// Event-name reports only need eventCount + conversions (we'll surface the
+// rows where conversions > 0 as "conversion events"; the rest as a long
+// tail of fired events for context).
+const METRICS_EVENT = [
+  { name: 'eventCount' },
   { name: 'conversions' },
   { name: 'totalRevenue' },
 ];
@@ -212,7 +241,121 @@ export async function fetchGa4({ since = null } = {}) {
   }).filter(r => r.date);
   console.log(`    ${chanRows.length} channel-day rows`);
 
-  // ── 4. Persist ───────────────────────────────────────────────────────
+  // Helper to run a (date, dim) report and shape rows for db.js. Pulls the
+  // metric values in METRICS_LIGHT order and tags the dim under `dimKey`.
+  const runDimReport = async (dim, dimKey, label, { metrics = METRICS_LIGHT, limit = 250000 } = {}) => {
+    console.log(`  → daily by ${label}...`);
+    const [resp] = await runReportWithRetry(client, {
+      property: `properties/${propertyId}`,
+      dateRanges: [{ startDate, endDate }],
+      dimensions: [DATE_DIM, dim],
+      metrics,
+      orderBys: [{ dimension: { dimensionName: 'date' } }],
+      limit,
+    }, label);
+    const rows = (resp.rows || []).map(r => {
+      const date = parseGa4Date(r.dimensionValues?.[0]?.value);
+      const dimValue = r.dimensionValues?.[1]?.value ?? '';
+      const m = r.metricValues || [];
+      const out = { date, [dimKey]: dimValue };
+      if (metrics === METRICS_EVENT) {
+        out.event_count   = num(m[0]?.value);
+        out.conversions   = num(m[1]?.value);
+        out.total_revenue = num(m[2]?.value);
+      } else {
+        out.sessions          = num(m[0]?.value);
+        out.total_users       = num(m[1]?.value);
+        out.new_users         = num(m[2]?.value);
+        out.engaged_sessions  = num(m[3]?.value);
+        out.screen_page_views = num(m[4]?.value);
+        out.conversions       = num(m[5]?.value);
+        out.total_revenue     = num(m[6]?.value);
+      }
+      return out;
+    }).filter(r => r.date);
+    console.log(`    ${rows.length} ${label}-day rows`);
+    return rows;
+  };
+
+  // ── 4. Per-(landing page) daily ─────────────────────────────────────
+  const landingRows = await runDimReport(LANDING_DIM, 'landing_page', 'landing-page');
+
+  // ── 5. Per-(source/medium) daily — combined dim pair so server can
+  //      separate by either or aggregate together. Requires both dims
+  //      since "google" can be both organic and cpc on the same day.
+  console.log('  → daily by source/medium...');
+  const [smResp] = await runReportWithRetry(client, {
+    property: `properties/${propertyId}`,
+    dateRanges: [{ startDate, endDate }],
+    dimensions: [DATE_DIM, SOURCE_DIM, MEDIUM_DIM],
+    metrics: METRICS_LIGHT,
+    orderBys: [{ dimension: { dimensionName: 'date' } }],
+    limit: 250000,
+  }, 'source-medium');
+  const sourceMediumRows = (smResp.rows || []).map(r => {
+    const date = parseGa4Date(r.dimensionValues?.[0]?.value);
+    const source = r.dimensionValues?.[1]?.value ?? '';
+    const medium = r.dimensionValues?.[2]?.value ?? '';
+    const m = r.metricValues || [];
+    return {
+      date, source, medium,
+      sessions:          num(m[0]?.value),
+      total_users:       num(m[1]?.value),
+      new_users:         num(m[2]?.value),
+      engaged_sessions:  num(m[3]?.value),
+      screen_page_views: num(m[4]?.value),
+      conversions:       num(m[5]?.value),
+      total_revenue:     num(m[6]?.value),
+    };
+  }).filter(r => r.date);
+  console.log(`    ${sourceMediumRows.length} source/medium-day rows`);
+
+  // ── 6. Per-(first-touch source/medium) daily — first-touch attribution
+  //      on a 30-90d B2B cycle tells a very different story than
+  //      session-source. Direct often hides paid-then-organic chains.
+  console.log('  → daily by first-touch source/medium...');
+  const [ftResp] = await runReportWithRetry(client, {
+    property: `properties/${propertyId}`,
+    dateRanges: [{ startDate, endDate }],
+    dimensions: [DATE_DIM, FIRST_SOURCE_DIM, FIRST_MEDIUM_DIM],
+    metrics: METRICS_LIGHT,
+    orderBys: [{ dimension: { dimensionName: 'date' } }],
+    limit: 250000,
+  }, 'first-touch');
+  const firstTouchRows = (ftResp.rows || []).map(r => {
+    const date = parseGa4Date(r.dimensionValues?.[0]?.value);
+    const source = r.dimensionValues?.[1]?.value ?? '';
+    const medium = r.dimensionValues?.[2]?.value ?? '';
+    const m = r.metricValues || [];
+    return {
+      date, first_source: source, first_medium: medium,
+      sessions:          num(m[0]?.value),
+      total_users:       num(m[1]?.value),
+      new_users:         num(m[2]?.value),
+      engaged_sessions:  num(m[3]?.value),
+      screen_page_views: num(m[4]?.value),
+      conversions:       num(m[5]?.value),
+      total_revenue:     num(m[6]?.value),
+    };
+  }).filter(r => r.date);
+  console.log(`    ${firstTouchRows.length} first-touch-day rows`);
+
+  // ── 7. Per-device daily ─────────────────────────────────────────────
+  const deviceRows = await runDimReport(DEVICE_DIM, 'device', 'device', { limit: 50000 });
+
+  // ── 8. Per-country daily ────────────────────────────────────────────
+  const countryRows = await runDimReport(COUNTRY_DIM, 'country', 'country', { limit: 100000 });
+
+  // ── 9. Per-event daily — used to surface conversion events (RFQ form,
+  //      phone-click, etc.) as their own KPIs. Filtering happens client-
+  //      side via conversions > 0 since GA4 doesn't have an "isConversion"
+  //      dimension.
+  const eventRows = await runDimReport(EVENT_DIM, 'event_name', 'event', { metrics: METRICS_EVENT, limit: 100000 });
+
+  // ── 10. Per-(new-vs-returning) daily — top vs bottom funnel proxy.
+  const newRetRows = await runDimReport(NEW_RET_DIM, 'visitor_type', 'new-vs-returning', { limit: 5000 });
+
+  // ── 11. Persist ──────────────────────────────────────────────────────
   // Always write a JSON cache so there's a fallback when DATABASE_URL is unset
   // or the DB is unreachable. Mirrors fetch-netsuite.js's cache behavior.
   fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -224,18 +367,49 @@ export async function fetchGa4({ since = null } = {}) {
     aggregate: aggRows,
     byCampaign: campRows,
     byChannel: chanRows,
+    byLandingPage: landingRows,
+    bySourceMedium: sourceMediumRows,
+    byFirstTouch: firstTouchRows,
+    byDevice: deviceRows,
+    byCountry: countryRows,
+    byEvent: eventRows,
+    byNewVsReturning: newRetRows,
   }, null, 2));
-  console.log(`✅  Wrote GA4 cache: ${aggRows.length} agg + ${campRows.length} campaign + ${chanRows.length} channel rows`);
+  console.log(`✅  Wrote GA4 cache: ${aggRows.length} agg + ${campRows.length} campaign + ${chanRows.length} channel + ${landingRows.length} landing + ${sourceMediumRows.length} source/medium + ${firstTouchRows.length} first-touch + ${deviceRows.length} device + ${countryRows.length} country + ${eventRows.length} event + ${newRetRows.length} new-vs-returning rows`);
 
   if (process.env.DATABASE_URL) {
-    const { upsertGa4Daily, upsertGa4DailyByCampaign, upsertGa4DailyByChannel } = await import('../db.js');
+    const {
+      upsertGa4Daily, upsertGa4DailyByCampaign, upsertGa4DailyByChannel,
+      upsertGa4DailyByLandingPage, upsertGa4DailyBySourceMedium,
+      upsertGa4DailyByFirstTouch, upsertGa4DailyByDevice,
+      upsertGa4DailyByCountry, upsertGa4DailyByEvent,
+      upsertGa4DailyByNewVsReturning,
+    } = await import('../db.js');
     const aggInserted  = await upsertGa4Daily(aggRows, { replaceSince: since });
     const campInserted = await upsertGa4DailyByCampaign(campRows, { replaceSince: since });
     const chanInserted = await upsertGa4DailyByChannel(chanRows, { replaceSince: since });
-    console.log(`✅  Upserted ${aggInserted} aggregate + ${campInserted} campaign + ${chanInserted} channel rows into PostgreSQL`);
-    return { aggregate: aggInserted, byCampaign: campInserted, byChannel: chanInserted };
+    const lpInserted   = await upsertGa4DailyByLandingPage(landingRows, { replaceSince: since });
+    const smInserted   = await upsertGa4DailyBySourceMedium(sourceMediumRows, { replaceSince: since });
+    const ftInserted   = await upsertGa4DailyByFirstTouch(firstTouchRows, { replaceSince: since });
+    const dvInserted   = await upsertGa4DailyByDevice(deviceRows, { replaceSince: since });
+    const ctInserted   = await upsertGa4DailyByCountry(countryRows, { replaceSince: since });
+    const evInserted   = await upsertGa4DailyByEvent(eventRows, { replaceSince: since });
+    const nrInserted   = await upsertGa4DailyByNewVsReturning(newRetRows, { replaceSince: since });
+    console.log(`✅  Upserted ${aggInserted} agg + ${campInserted} campaign + ${chanInserted} channel + ${lpInserted} landing + ${smInserted} source/medium + ${ftInserted} first-touch + ${dvInserted} device + ${ctInserted} country + ${evInserted} event + ${nrInserted} new-vs-returning rows into PostgreSQL`);
+    return {
+      aggregate: aggInserted, byCampaign: campInserted, byChannel: chanInserted,
+      byLandingPage: lpInserted, bySourceMedium: smInserted, byFirstTouch: ftInserted,
+      byDevice: dvInserted, byCountry: ctInserted, byEvent: evInserted,
+      byNewVsReturning: nrInserted,
+    };
   }
-  return { aggregate: aggRows.length, byCampaign: campRows.length, byChannel: chanRows.length };
+  return {
+    aggregate: aggRows.length, byCampaign: campRows.length, byChannel: chanRows.length,
+    byLandingPage: landingRows.length, bySourceMedium: sourceMediumRows.length,
+    byFirstTouch: firstTouchRows.length, byDevice: deviceRows.length,
+    byCountry: countryRows.length, byEvent: eventRows.length,
+    byNewVsReturning: newRetRows.length,
+  };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
