@@ -116,6 +116,125 @@ function StackedChannelChart({ data, channels, formatter = fmtNum }) {
   );
 }
 
+function BrandedSharePanel({ data }) {
+  if (!data || !data.branded || !data.non_branded) return null;
+  const totalClicks = (data.branded.clicks || 0) + (data.non_branded.clicks || 0);
+  const totalImpressions = (data.branded.impressions || 0) + (data.non_branded.impressions || 0);
+  if (totalClicks === 0 && totalImpressions === 0) return null;
+  const brandedClickShare = totalClicks > 0 ? data.branded.clicks / totalClicks : null;
+  const brandedImprShare  = totalImpressions > 0 ? data.branded.impressions / totalImpressions : null;
+
+  const Pile = ({ title, color, summary, top }) => (
+    <div style={{
+      flex: '1 1 360px', minWidth: 0,
+      background: '#1e293b', borderRadius: 8, padding: 14,
+      borderLeft: `3px solid ${color}`,
+    }}>
+      <div style={{ color: '#cbd5e1', fontSize: 11, fontWeight: 700, letterSpacing: 0.5, marginBottom: 8 }}>
+        {title}
+      </div>
+      <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginBottom: 8 }}>
+        <div>
+          <div style={{ color: '#94a3b8', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>Clicks</div>
+          <div style={{ color: '#f8fafc', fontSize: 18, fontWeight: 700, fontFeatureSettings: '"tnum"' }}>
+            {fmtNum(summary.clicks)}
+          </div>
+        </div>
+        <div>
+          <div style={{ color: '#94a3b8', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>Impr.</div>
+          <div style={{ color: '#f8fafc', fontSize: 18, fontWeight: 700, fontFeatureSettings: '"tnum"' }}>
+            {fmtNum(summary.impressions)}
+          </div>
+        </div>
+        <div>
+          <div style={{ color: '#94a3b8', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>CTR</div>
+          <div style={{ color: '#f8fafc', fontSize: 18, fontWeight: 700, fontFeatureSettings: '"tnum"' }}>
+            {summary.ctr != null ? fmtPct(summary.ctr) : '—'}
+          </div>
+        </div>
+        <div>
+          <div style={{ color: '#94a3b8', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>Avg pos.</div>
+          <div style={{ color: '#f8fafc', fontSize: 18, fontWeight: 700, fontFeatureSettings: '"tnum"' }}>
+            {summary.avg_position != null ? summary.avg_position.toFixed(1) : '—'}
+          </div>
+        </div>
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5, color: '#e2e8f0' }}>
+        <thead>
+          <tr style={{ color: '#94a3b8', fontSize: 10, textAlign: 'left' }}>
+            <th style={{ padding: '4px 6px', fontWeight: 500 }}>Query</th>
+            <th style={{ padding: '4px 6px', fontWeight: 500, textAlign: 'right' }}>Clicks</th>
+            <th style={{ padding: '4px 6px', fontWeight: 500, textAlign: 'right' }}>Impr.</th>
+            <th style={{ padding: '4px 6px', fontWeight: 500, textAlign: 'right' }}>Pos.</th>
+          </tr>
+        </thead>
+        <tbody>
+          {top.slice(0, 12).map((q, i) => (
+            <tr key={`${q.dimension}-${i}`} style={{ borderTop: i === 0 ? 'none' : '1px solid #334155' }}>
+              <td style={{ padding: '4px 6px', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={q.dimension}>
+                {q.dimension}
+              </td>
+              <td style={{ padding: '4px 6px', textAlign: 'right', fontFeatureSettings: '"tnum"' }}>{fmtNum(q.clicks)}</td>
+              <td style={{ padding: '4px 6px', textAlign: 'right', color: '#94a3b8', fontFeatureSettings: '"tnum"' }}>{fmtNum(q.impressions)}</td>
+              <td style={{ padding: '4px 6px', textAlign: 'right', color: '#94a3b8', fontFeatureSettings: '"tnum"' }}>
+                {q.position != null ? Number(q.position).toFixed(1) : '—'}
+              </td>
+            </tr>
+          ))}
+          {top.length === 0 && (
+            <tr><td colSpan={4} style={{ padding: '8px 6px', color: '#64748b' }}>No queries in this bucket.</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: '#64748b', marginBottom: 8 }}>
+        Brand pattern: <code style={{ color: '#94a3b8' }}>{data.regex}</code>
+        {' '}— set <code style={{ color: '#94a3b8' }}>BRAND_QUERY_REGEX</code> env to customize.
+      </div>
+      <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+        <div style={{
+          flex: '1 1 220px', minWidth: 200,
+          background: '#1e293b', borderRadius: 8, padding: 14,
+          borderLeft: '3px solid var(--dso-accent-hot)',
+        }}>
+          <div style={{ color: '#94a3b8', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>
+            Branded click share
+          </div>
+          <div style={{ color: '#f8fafc', fontSize: 26, fontWeight: 700 }}>
+            {brandedClickShare != null ? fmtPct(brandedClickShare) : '—'}
+          </div>
+          <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 4 }}>
+            of organic clicks come from brand-name searches
+          </div>
+        </div>
+        <div style={{
+          flex: '1 1 220px', minWidth: 200,
+          background: '#1e293b', borderRadius: 8, padding: 14,
+          borderLeft: '3px solid #a8d8e8',
+        }}>
+          <div style={{ color: '#94a3b8', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>
+            Branded impression share
+          </div>
+          <div style={{ color: '#f8fafc', fontSize: 26, fontWeight: 700 }}>
+            {brandedImprShare != null ? fmtPct(brandedImprShare) : '—'}
+          </div>
+          <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 4 }}>
+            of search impressions are brand-name searches
+          </div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        <Pile title="BRANDED — demand capture" color="var(--dso-accent-hot)" summary={data.branded} top={data.branded.top} />
+        <Pile title="NON-BRANDED — demand creation" color="#a8d8e8" summary={data.non_branded} top={data.non_branded.top} />
+      </div>
+    </div>
+  );
+}
+
 function ChannelTable({ rows }) {
   return (
     <div style={{
@@ -218,23 +337,26 @@ export default function GA4InsightsPage() {
   const [channelsDaily, setChannelsDaily] = useState(null);
   const [campaignStats, setCampaignStats] = useState(null);
   const [gsc, setGsc] = useState(null);
+  const [brandedShare, setBrandedShare] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Aggregate + per-channel daily + GSC daily are range-independent; fetch
-  // once. GSC degrades quietly if the integration isn't configured —
-  // rendering should still work on a GA4-only environment.
+  // Aggregate + per-channel daily + GSC daily + branded share are
+  // range-independent; fetch once. Each integration degrades quietly if
+  // not configured — rendering should still work on a GA4-only environment.
   useEffect(() => {
     setLoading(true);
     Promise.all([
       fetch('/api/ga4').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/ga4-channels-daily').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/gsc').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/gsc-branded-share').then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([agg, chans, gscResp]) => {
+      .then(([agg, chans, gscResp, brandResp]) => {
         setAggregate(agg);
         setChannelsDaily(chans);
         setGsc(gscResp);
+        setBrandedShare(brandResp);
         if (!agg || (agg.daily || []).length === 0) {
           setError('No GA4 data yet. Run a GA4 fetch first.');
         } else {
@@ -674,6 +796,22 @@ export default function GA4InsightsPage() {
                   <DMALineChart title="GSC avg position DMA (lower is better)" data={chartData}
                     fieldRaw="gscPosition" field30="gpos30" field90="gpos90"
                     formatter={(v) => v == null ? '—' : v.toFixed(1)} showDaily={showDaily} />
+                </div>
+              </>
+            )}
+
+            {brandedShare && (brandedShare.branded || brandedShare.non_branded) && (
+              <>
+                <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, fontWeight: 600 }}>
+                  Branded vs non-branded organic
+                </h2>
+                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
+                  Branded queries are <em>demand capture</em> — searchers already knew you. Non-branded are{' '}
+                  <em>demand creation</em> — your SEO content earned a click from someone who didn't.
+                  Latest GSC top-queries snapshot ({brandedShare.window_end || '—'}, 28-day window).
+                </div>
+                <div style={{ marginBottom: 20 }}>
+                  <BrandedSharePanel data={brandedShare} />
                 </div>
               </>
             )}
