@@ -13,7 +13,11 @@
  * Env:
  *   CRUX_API_KEY    — Google Cloud API key with the CrUX API enabled
  *                     https://developer.chrome.com/docs/crux/api
- *   GSC_SITE_URL    — reused as the CrUX origin (trailing slash stripped)
+ *   CRUX_ORIGIN     — origin URL like "https://www.rubberform.com" (preferred).
+ *                     Required if GSC_SITE_URL is a Domain property
+ *                     (sc-domain:...) since CrUX needs an actual origin.
+ *   GSC_SITE_URL    — fallback CrUX origin if CRUX_ORIGIN isn't set AND
+ *                     GSC_SITE_URL is in URL-prefix form (https://...).
  */
 
 import 'dotenv/config';
@@ -37,15 +41,30 @@ function periodToIso(p) {
   return `${y}-${m}-${day}`;
 }
 
+// CrUX wants an origin URL like https://www.example.com (no trailing slash,
+// no path). Resolve from CRUX_ORIGIN first; fall back to GSC_SITE_URL only
+// when it's a URL-prefix property (sc-domain:... won't work — Domain
+// properties cover every subdomain so we can't pick one automatically).
+function resolveOrigin() {
+  const explicit = process.env.CRUX_ORIGIN?.trim();
+  if (explicit) return explicit.replace(/\/$/, '');
+  const gsc = process.env.GSC_SITE_URL?.trim();
+  if (!gsc) return null;
+  if (gsc.startsWith('sc-domain:')) {
+    throw new Error(
+      'GSC_SITE_URL is a Domain property (sc-domain:...) which CrUX cannot accept. '
+      + 'Set CRUX_ORIGIN to the specific origin you want CrUX to read '
+      + '(e.g. CRUX_ORIGIN=https://www.rubberform.com).'
+    );
+  }
+  return gsc.replace(/\/$/, '');
+}
+
 export async function fetchCrux() {
   const apiKey = process.env.CRUX_API_KEY?.trim();
-  const origin = process.env.GSC_SITE_URL?.trim();
   if (!apiKey) throw new Error('Missing CRUX_API_KEY env var');
-  if (!origin) throw new Error('Missing GSC_SITE_URL env var (reused as CrUX origin)');
-
-  // CrUX wants the origin without a trailing slash; we accept either form
-  // in the env so both GSC and CrUX work without splitting the variable.
-  const cleanOrigin = origin.replace(/\/$/, '');
+  const cleanOrigin = resolveOrigin();
+  if (!cleanOrigin) throw new Error('Missing CRUX_ORIGIN (or GSC_SITE_URL in URL-prefix form)');
 
   console.log(`🔎  CrUX fetch — ${cleanOrigin}`);
 
