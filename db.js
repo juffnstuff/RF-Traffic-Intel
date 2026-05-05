@@ -155,6 +155,140 @@ export async function initDB() {
   await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_channel_date ON ga4_daily_by_channel(date)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_channel_name ON ga4_daily_by_channel(channel)`);
 
+  // Per-(landing page) daily. landing_page is the URL path + querystring,
+  // not just the path — strips of querystring tokens like utm_* are intentional
+  // (different querystring → different landing experience for SEO purposes).
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS ga4_daily_by_landing_page (
+      date DATE NOT NULL,
+      landing_page TEXT NOT NULL,
+      sessions INTEGER DEFAULT 0,
+      total_users INTEGER DEFAULT 0,
+      new_users INTEGER DEFAULT 0,
+      engaged_sessions INTEGER DEFAULT 0,
+      screen_page_views INTEGER DEFAULT 0,
+      conversions INTEGER DEFAULT 0,
+      total_revenue NUMERIC(15,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, landing_page)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_landing_date ON ga4_daily_by_landing_page(date)`);
+
+  // Per-(source, medium) daily. Same row can have source="google", medium="organic"
+  // and source="google", medium="cpc" on the same day — they're different
+  // attributions, both legit.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS ga4_daily_by_source_medium (
+      date DATE NOT NULL,
+      source TEXT NOT NULL,
+      medium TEXT NOT NULL,
+      sessions INTEGER DEFAULT 0,
+      total_users INTEGER DEFAULT 0,
+      new_users INTEGER DEFAULT 0,
+      engaged_sessions INTEGER DEFAULT 0,
+      screen_page_views INTEGER DEFAULT 0,
+      conversions INTEGER DEFAULT 0,
+      total_revenue NUMERIC(15,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, source, medium)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_sm_date ON ga4_daily_by_source_medium(date)`);
+
+  // Per-(first-touch source/medium) daily — first interaction in the session
+  // chain, not the converting one. For a 30–90d B2B cycle this often tells a
+  // very different story than session-source.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS ga4_daily_by_first_touch (
+      date DATE NOT NULL,
+      first_source TEXT NOT NULL,
+      first_medium TEXT NOT NULL,
+      sessions INTEGER DEFAULT 0,
+      total_users INTEGER DEFAULT 0,
+      new_users INTEGER DEFAULT 0,
+      engaged_sessions INTEGER DEFAULT 0,
+      screen_page_views INTEGER DEFAULT 0,
+      conversions INTEGER DEFAULT 0,
+      total_revenue NUMERIC(15,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, first_source, first_medium)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_ft_date ON ga4_daily_by_first_touch(date)`);
+
+  // Per-device daily — desktop / mobile / tablet. Mobile vs desktop conv-rate
+  // delta tells you whether mobile UX is leaking quotes.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS ga4_daily_by_device (
+      date DATE NOT NULL,
+      device TEXT NOT NULL,
+      sessions INTEGER DEFAULT 0,
+      total_users INTEGER DEFAULT 0,
+      new_users INTEGER DEFAULT 0,
+      engaged_sessions INTEGER DEFAULT 0,
+      screen_page_views INTEGER DEFAULT 0,
+      conversions INTEGER DEFAULT 0,
+      total_revenue NUMERIC(15,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, device)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_device_date ON ga4_daily_by_device(date)`);
+
+  // Per-country daily — geo split, headline "US vs ROW" is the most common
+  // read but the long tail informs international ad spend.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS ga4_daily_by_country (
+      date DATE NOT NULL,
+      country TEXT NOT NULL,
+      sessions INTEGER DEFAULT 0,
+      total_users INTEGER DEFAULT 0,
+      new_users INTEGER DEFAULT 0,
+      engaged_sessions INTEGER DEFAULT 0,
+      screen_page_views INTEGER DEFAULT 0,
+      conversions INTEGER DEFAULT 0,
+      total_revenue NUMERIC(15,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, country)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_country_date ON ga4_daily_by_country(date)`);
+
+  // Per-event daily — used to surface conversion events (form submits,
+  // phone-clicks, etc.) as their own KPIs. Rows where conversions > 0 are
+  // the conversion-event subset; the rest is informational fired-event volume.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS ga4_daily_by_event (
+      date DATE NOT NULL,
+      event_name TEXT NOT NULL,
+      event_count INTEGER DEFAULT 0,
+      conversions INTEGER DEFAULT 0,
+      total_revenue NUMERIC(15,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, event_name)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_event_date ON ga4_daily_by_event(date)`);
+
+  // Per-(new vs returning) daily. visitor_type in {new, returning, (not set)}.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS ga4_daily_by_new_vs_returning (
+      date DATE NOT NULL,
+      visitor_type TEXT NOT NULL,
+      sessions INTEGER DEFAULT 0,
+      total_users INTEGER DEFAULT 0,
+      new_users INTEGER DEFAULT 0,
+      engaged_sessions INTEGER DEFAULT 0,
+      screen_page_views INTEGER DEFAULT 0,
+      conversions INTEGER DEFAULT 0,
+      total_revenue NUMERIC(15,2) DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, visitor_type)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ga4_nvr_date ON ga4_daily_by_new_vs_returning(date)`);
+
   // Google Ads per-campaign daily. cost/avg_cpc are post-normalization from
   // Google's cost_micros (cost_micros / 1_000_000). Integer counts stay ints.
   await p.query(`
@@ -260,6 +394,48 @@ export async function initDB() {
     )
   `);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_gsc_pages_win ON gsc_top_pages(window_end_date)`);
+
+  // Core Web Vitals from the Chrome User Experience Report (CrUX). p75
+  // values for LCP (ms), INP (ms), CLS (unitless). One row per CrUX
+  // collection period's lastDate, per form factor — 'ALL' is the blended
+  // read; 'PHONE' / 'DESKTOP' / 'TABLET' are the form-factor-specific
+  // history (mobile vs desktop CWV typically differ noticeably).
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS crux_daily (
+      date DATE NOT NULL,
+      form_factor TEXT NOT NULL DEFAULT 'ALL',
+      lcp_p75 NUMERIC(10,2),
+      inp_p75 NUMERIC(10,2),
+      cls_p75 NUMERIC(8,4),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, form_factor)
+    )
+  `);
+  // Migration path for the v1 schema where the PK was (date) only and
+  // form_factor didn't exist. We add the column with a default, then swap
+  // the PK. Idempotent — second run is a no-op.
+  await p.query(`ALTER TABLE crux_daily ADD COLUMN IF NOT EXISTS form_factor TEXT NOT NULL DEFAULT 'ALL'`).catch(() => {});
+  await p.query(`ALTER TABLE crux_daily DROP CONSTRAINT IF EXISTS crux_daily_pkey`).catch(() => {});
+  await p.query(`ALTER TABLE crux_daily ADD PRIMARY KEY (date, form_factor)`).catch(() => {});
+
+  // Per-page CrUX. One row per (date, page, form_factor). Date is the
+  // fetch date (CrUX's queryRecord returns the current snapshot, not a
+  // history per page), so accumulating snapshots over time gives us a
+  // per-page trend automatically the same way gsc_top_queries does.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS crux_daily_by_page (
+      date DATE NOT NULL,
+      page TEXT NOT NULL,
+      form_factor TEXT NOT NULL,
+      lcp_p75 NUMERIC(10,2),
+      inp_p75 NUMERIC(10,2),
+      cls_p75 NUMERIC(8,4),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (date, page, form_factor)
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_crux_page_date ON crux_daily_by_page(date)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_crux_page_path ON crux_daily_by_page(page)`);
 
   console.log('✅  Database tables ready');
 }
@@ -884,6 +1060,315 @@ export async function getGa4CampaignStats({ since = null, until = null } = {}) {
   }));
 }
 
+// ── GA4 dim-expansion helpers ───────────────────────────────────────
+// These tables all share the same metric set (sessions, users, etc.)
+// differing only by the dim column(s). Upserts are factored through
+// _upsertGa4Dim where possible; getters are explicit because each one
+// returns a different aggregate shape.
+
+const STD_GA4_METRIC_COLS = [
+  'sessions', 'total_users', 'new_users', 'engaged_sessions',
+  'screen_page_views', 'conversions', 'total_revenue',
+];
+
+async function _upsertGa4Dim(table, dimCols, rows, { replaceSince = null } = {}) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    if (replaceSince) {
+      await client.query(`DELETE FROM ${table} WHERE date >= $1`, [replaceSince]);
+    }
+    const cols = ['date', ...dimCols, ...STD_GA4_METRIC_COLS];
+    const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+    const updateSet = STD_GA4_METRIC_COLS
+      .map(c => `${c} = EXCLUDED.${c}`)
+      .concat('updated_at = NOW()')
+      .join(', ');
+    const conflict = ['date', ...dimCols].join(', ');
+    const sql = `
+      INSERT INTO ${table} (${cols.join(', ')}, updated_at)
+      VALUES (${placeholders}, NOW())
+      ON CONFLICT (${conflict}) DO UPDATE SET ${updateSet}
+    `;
+    let upserted = 0;
+    for (const r of rows) {
+      const params = [
+        r.date,
+        ...dimCols.map(c => r[c]),
+        ...STD_GA4_METRIC_COLS.map(c => r[c] ?? 0),
+      ];
+      await client.query(sql, params);
+      upserted++;
+    }
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function upsertGa4DailyByLandingPage(rows, opts) {
+  return _upsertGa4Dim('ga4_daily_by_landing_page', ['landing_page'], rows, opts);
+}
+export async function upsertGa4DailyBySourceMedium(rows, opts) {
+  return _upsertGa4Dim('ga4_daily_by_source_medium', ['source', 'medium'], rows, opts);
+}
+export async function upsertGa4DailyByFirstTouch(rows, opts) {
+  return _upsertGa4Dim('ga4_daily_by_first_touch', ['first_source', 'first_medium'], rows, opts);
+}
+export async function upsertGa4DailyByDevice(rows, opts) {
+  return _upsertGa4Dim('ga4_daily_by_device', ['device'], rows, opts);
+}
+export async function upsertGa4DailyByCountry(rows, opts) {
+  return _upsertGa4Dim('ga4_daily_by_country', ['country'], rows, opts);
+}
+export async function upsertGa4DailyByNewVsReturning(rows, opts) {
+  return _upsertGa4Dim('ga4_daily_by_new_vs_returning', ['visitor_type'], rows, opts);
+}
+
+// Event table has a different metric set (event_count + conversions + revenue)
+// so it gets its own upsert.
+export async function upsertGa4DailyByEvent(rows, { replaceSince = null } = {}) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    if (replaceSince) {
+      await client.query(`DELETE FROM ga4_daily_by_event WHERE date >= $1`, [replaceSince]);
+    }
+    let upserted = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO ga4_daily_by_event
+          (date, event_name, event_count, conversions, total_revenue, updated_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        ON CONFLICT (date, event_name) DO UPDATE SET
+          event_count   = EXCLUDED.event_count,
+          conversions   = EXCLUDED.conversions,
+          total_revenue = EXCLUDED.total_revenue,
+          updated_at    = NOW()
+      `, [r.date, r.event_name, r.event_count ?? 0, r.conversions ?? 0, r.total_revenue ?? 0]);
+      upserted++;
+    }
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// Aggregation getters — each returns one row per dim grouping over the
+// optional [since, until] window. The shape mirrors getGa4CampaignStats so
+// the UI tables can be reused.
+
+async function _windowParams(since, until) {
+  const where = [];
+  const params = [];
+  if (since) { params.push(since); where.push(`date >= $${params.length}::date`); }
+  if (until) { params.push(until); where.push(`date <= $${params.length}::date`); }
+  return { whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
+}
+
+export async function getGa4LandingPageStats({ since = null, until = null, limit = 100 } = {}) {
+  const p = getPool();
+  const { whereSql, params } = await _windowParams(since, until);
+  const { rows } = await p.query(`
+    SELECT landing_page,
+      SUM(sessions)::int          as sessions,
+      SUM(total_users)::int       as total_users,
+      SUM(new_users)::int         as new_users,
+      SUM(engaged_sessions)::int  as engaged_sessions,
+      SUM(screen_page_views)::int as pageviews,
+      SUM(conversions)::int       as conversions,
+      SUM(total_revenue)::float   as total_revenue,
+      COUNT(DISTINCT date)::int   as active_days
+    FROM ga4_daily_by_landing_page
+    ${whereSql}
+    GROUP BY landing_page
+    HAVING SUM(sessions) > 0
+    ORDER BY sessions DESC
+    LIMIT ${Math.min(500, Math.max(10, parseInt(limit, 10) || 100))}
+  `, params);
+  return rows.map(r => ({
+    landing_page: r.landing_page,
+    sessions: r.sessions,
+    total_users: r.total_users,
+    new_users: r.new_users,
+    engaged_sessions: r.engaged_sessions,
+    pageviews: r.pageviews,
+    conversions: r.conversions,
+    total_revenue: r.total_revenue,
+    active_days: r.active_days,
+    conversion_rate: r.sessions > 0 ? r.conversions / r.sessions : null,
+    engagement_rate: r.sessions > 0 ? r.engaged_sessions / r.sessions : null,
+  }));
+}
+
+export async function getGa4SourceMediumStats({ since = null, until = null, limit = 100 } = {}) {
+  const p = getPool();
+  const { whereSql, params } = await _windowParams(since, until);
+  const { rows } = await p.query(`
+    SELECT source, medium,
+      SUM(sessions)::int          as sessions,
+      SUM(engaged_sessions)::int  as engaged_sessions,
+      SUM(new_users)::int         as new_users,
+      SUM(conversions)::int       as conversions,
+      SUM(total_revenue)::float   as total_revenue,
+      COUNT(DISTINCT date)::int   as active_days
+    FROM ga4_daily_by_source_medium
+    ${whereSql}
+    GROUP BY source, medium
+    HAVING SUM(sessions) > 0
+    ORDER BY sessions DESC
+    LIMIT ${Math.min(500, Math.max(10, parseInt(limit, 10) || 100))}
+  `, params);
+  return rows.map(r => ({
+    source: r.source, medium: r.medium,
+    sessions: r.sessions, engaged_sessions: r.engaged_sessions,
+    new_users: r.new_users, conversions: r.conversions,
+    total_revenue: r.total_revenue, active_days: r.active_days,
+    conversion_rate: r.sessions > 0 ? r.conversions / r.sessions : null,
+    engagement_rate: r.sessions > 0 ? r.engaged_sessions / r.sessions : null,
+  }));
+}
+
+export async function getGa4FirstTouchStats({ since = null, until = null, limit = 100 } = {}) {
+  const p = getPool();
+  const { whereSql, params } = await _windowParams(since, until);
+  const { rows } = await p.query(`
+    SELECT first_source, first_medium,
+      SUM(sessions)::int          as sessions,
+      SUM(engaged_sessions)::int  as engaged_sessions,
+      SUM(new_users)::int         as new_users,
+      SUM(conversions)::int       as conversions,
+      SUM(total_revenue)::float   as total_revenue
+    FROM ga4_daily_by_first_touch
+    ${whereSql}
+    GROUP BY first_source, first_medium
+    HAVING SUM(sessions) > 0
+    ORDER BY sessions DESC
+    LIMIT ${Math.min(500, Math.max(10, parseInt(limit, 10) || 100))}
+  `, params);
+  return rows.map(r => ({
+    first_source: r.first_source, first_medium: r.first_medium,
+    sessions: r.sessions, engaged_sessions: r.engaged_sessions,
+    new_users: r.new_users, conversions: r.conversions,
+    total_revenue: r.total_revenue,
+    conversion_rate: r.sessions > 0 ? r.conversions / r.sessions : null,
+  }));
+}
+
+export async function getGa4DeviceStats({ since = null, until = null } = {}) {
+  const p = getPool();
+  const { whereSql, params } = await _windowParams(since, until);
+  const { rows } = await p.query(`
+    SELECT device,
+      SUM(sessions)::int          as sessions,
+      SUM(engaged_sessions)::int  as engaged_sessions,
+      SUM(new_users)::int         as new_users,
+      SUM(conversions)::int       as conversions,
+      SUM(total_revenue)::float   as total_revenue
+    FROM ga4_daily_by_device
+    ${whereSql}
+    GROUP BY device
+    HAVING SUM(sessions) > 0
+    ORDER BY sessions DESC
+  `, params);
+  return rows.map(r => ({
+    device: r.device,
+    sessions: r.sessions, engaged_sessions: r.engaged_sessions,
+    new_users: r.new_users, conversions: r.conversions,
+    total_revenue: r.total_revenue,
+    conversion_rate: r.sessions > 0 ? r.conversions / r.sessions : null,
+    engagement_rate: r.sessions > 0 ? r.engaged_sessions / r.sessions : null,
+  }));
+}
+
+export async function getGa4CountryStats({ since = null, until = null, limit = 25 } = {}) {
+  const p = getPool();
+  const { whereSql, params } = await _windowParams(since, until);
+  const { rows } = await p.query(`
+    SELECT country,
+      SUM(sessions)::int          as sessions,
+      SUM(engaged_sessions)::int  as engaged_sessions,
+      SUM(new_users)::int         as new_users,
+      SUM(conversions)::int       as conversions,
+      SUM(total_revenue)::float   as total_revenue
+    FROM ga4_daily_by_country
+    ${whereSql}
+    GROUP BY country
+    HAVING SUM(sessions) > 0
+    ORDER BY sessions DESC
+    LIMIT ${Math.min(500, Math.max(5, parseInt(limit, 10) || 25))}
+  `, params);
+  return rows.map(r => ({
+    country: r.country,
+    sessions: r.sessions, engaged_sessions: r.engaged_sessions,
+    new_users: r.new_users, conversions: r.conversions,
+    total_revenue: r.total_revenue,
+    conversion_rate: r.sessions > 0 ? r.conversions / r.sessions : null,
+  }));
+}
+
+export async function getGa4EventStats({ since = null, until = null, conversionsOnly = false } = {}) {
+  const p = getPool();
+  const { whereSql, params } = await _windowParams(since, until);
+  const havingSql = conversionsOnly ? 'HAVING SUM(conversions) > 0' : 'HAVING SUM(event_count) > 0';
+  const { rows } = await p.query(`
+    SELECT event_name,
+      SUM(event_count)::bigint   as event_count,
+      SUM(conversions)::int      as conversions,
+      SUM(total_revenue)::float  as total_revenue,
+      COUNT(DISTINCT date)::int  as active_days
+    FROM ga4_daily_by_event
+    ${whereSql}
+    GROUP BY event_name
+    ${havingSql}
+    ORDER BY ${conversionsOnly ? 'conversions' : 'event_count'} DESC
+    LIMIT 200
+  `, params);
+  return rows.map(r => ({
+    event_name: r.event_name,
+    event_count: Number(r.event_count) || 0,
+    conversions: r.conversions,
+    total_revenue: r.total_revenue,
+    active_days: r.active_days,
+  }));
+}
+
+export async function getGa4NewVsReturningStats({ since = null, until = null } = {}) {
+  const p = getPool();
+  const { whereSql, params } = await _windowParams(since, until);
+  const { rows } = await p.query(`
+    SELECT visitor_type,
+      SUM(sessions)::int          as sessions,
+      SUM(engaged_sessions)::int  as engaged_sessions,
+      SUM(conversions)::int       as conversions,
+      SUM(total_revenue)::float   as total_revenue
+    FROM ga4_daily_by_new_vs_returning
+    ${whereSql}
+    GROUP BY visitor_type
+    HAVING SUM(sessions) > 0
+    ORDER BY sessions DESC
+  `, params);
+  return rows.map(r => ({
+    visitor_type: r.visitor_type,
+    sessions: r.sessions, engaged_sessions: r.engaged_sessions,
+    conversions: r.conversions, total_revenue: r.total_revenue,
+    conversion_rate: r.sessions > 0 ? r.conversions / r.sessions : null,
+    engagement_rate: r.sessions > 0 ? r.engaged_sessions / r.sessions : null,
+  }));
+}
+
 // ── Google Ads helpers ───────────────────────────────────────────────
 
 export async function upsertGoogleAdsDailyByCampaign(rows, { replaceSince = null } = {}) {
@@ -1277,4 +1762,159 @@ export async function getGscTop({ kind, windowEnd = null, limit = 100 } = {}) {
     LIMIT $2
   `, [end, limit]);
   return { window_end: end, rows };
+}
+
+// Trend over time for a specific GSC query — uses the natural snapshot
+// accumulation from gsc_top_queries (PK is (window_end_date, query) so
+// every fetch leaves a daily breadcrumb). Returns one row per snapshot
+// the query appeared in, sorted oldest → newest. Useful for the SEO
+// "is this query slipping in rank" diagnostic that catches losses
+// 2-6 weeks before sessions reflect them.
+export async function getGscQueryHistory({ query, sinceDate = null } = {}) {
+  if (!query) return [];
+  const p = getPool();
+  const params = [query];
+  let whereExtra = '';
+  if (sinceDate) { params.push(sinceDate); whereExtra = `AND window_end_date >= $${params.length}::date`; }
+  const { rows } = await p.query(`
+    SELECT window_end_date::text as date,
+      clicks, impressions,
+      ctr::float      as ctr,
+      position::float as position
+    FROM gsc_top_queries
+    WHERE query = $1
+    ${whereExtra}
+    ORDER BY window_end_date ASC
+  `, params);
+  return rows;
+}
+
+// "Most volatile" queries — top movers by absolute position delta between
+// the most recent two snapshots. Surfaces queries that gained or lost
+// ranking visibility week-over-week.
+export async function getGscQueryMovers({ limit = 25 } = {}) {
+  const p = getPool();
+  const { rows: dateRows } = await p.query(`
+    SELECT DISTINCT window_end_date::text as date
+    FROM gsc_top_queries
+    ORDER BY window_end_date DESC
+    LIMIT 2
+  `);
+  if (dateRows.length < 2) return { latest: null, prior: null, movers: [] };
+  const [latest, prior] = dateRows.map(r => r.date);
+  const { rows } = await p.query(`
+    SELECT
+      l.query,
+      l.clicks::int        as latest_clicks,
+      l.impressions::int   as latest_impressions,
+      l.position::float    as latest_position,
+      p.clicks::int        as prior_clicks,
+      p.impressions::int   as prior_impressions,
+      p.position::float    as prior_position,
+      (p.position - l.position)::float       as position_delta,
+      (l.clicks - COALESCE(p.clicks, 0))::int as click_delta
+    FROM gsc_top_queries l
+    LEFT JOIN gsc_top_queries p
+      ON p.query = l.query AND p.window_end_date = $2::date
+    WHERE l.window_end_date = $1::date
+      AND p.position IS NOT NULL
+    ORDER BY ABS(p.position - l.position) DESC NULLS LAST
+    LIMIT $3
+  `, [latest, prior, Math.min(200, Math.max(5, parseInt(limit, 10) || 25))]);
+  return { latest, prior, movers: rows };
+}
+
+// ── CrUX (Core Web Vitals) helpers ──────────────────────────────────
+
+export async function upsertCruxDaily(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  let upserted = 0;
+  for (const r of rows) {
+    if (!r.date) continue;
+    await p.query(`
+      INSERT INTO crux_daily (date, form_factor, lcp_p75, inp_p75, cls_p75, updated_at)
+      VALUES ($1, $2, $3, $4, $5, NOW())
+      ON CONFLICT (date, form_factor) DO UPDATE SET
+        lcp_p75    = EXCLUDED.lcp_p75,
+        inp_p75    = EXCLUDED.inp_p75,
+        cls_p75    = EXCLUDED.cls_p75,
+        updated_at = NOW()
+    `, [r.date, r.form_factor || 'ALL', r.lcp_p75, r.inp_p75, r.cls_p75]);
+    upserted++;
+  }
+  return upserted;
+}
+
+// Origin-level history. Defaults to the blended ALL series so existing
+// callers / UIs keep working unchanged; the form-factor split is opt-in.
+export async function getCruxDaily({ formFactor = 'ALL' } = {}) {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT date::text, form_factor,
+      lcp_p75::float as lcp_p75,
+      inp_p75::float as inp_p75,
+      cls_p75::float as cls_p75
+    FROM crux_daily
+    WHERE form_factor = $1
+    ORDER BY date ASC
+  `, [formFactor]);
+  return rows;
+}
+
+export async function getCruxDailyAllFormFactors() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT date::text, form_factor,
+      lcp_p75::float as lcp_p75,
+      inp_p75::float as inp_p75,
+      cls_p75::float as cls_p75
+    FROM crux_daily
+    ORDER BY date ASC, form_factor ASC
+  `);
+  return rows;
+}
+
+export async function upsertCruxDailyByPage(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  let upserted = 0;
+  for (const r of rows) {
+    if (!r.date || !r.page || !r.form_factor) continue;
+    await p.query(`
+      INSERT INTO crux_daily_by_page (date, page, form_factor, lcp_p75, inp_p75, cls_p75, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      ON CONFLICT (date, page, form_factor) DO UPDATE SET
+        lcp_p75    = EXCLUDED.lcp_p75,
+        inp_p75    = EXCLUDED.inp_p75,
+        cls_p75    = EXCLUDED.cls_p75,
+        updated_at = NOW()
+    `, [r.date, r.page, r.form_factor, r.lcp_p75, r.inp_p75, r.cls_p75]);
+    upserted++;
+  }
+  return upserted;
+}
+
+// Latest per-page CWV reads — one row per (page, form_factor) using each
+// page's most recent fetch date. Used for the per-page table on the GA4
+// tab so we don't have to render every snapshot we've ever pulled.
+export async function getCruxLatestByPage() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    WITH latest AS (
+      SELECT page, form_factor, MAX(date) as date
+      FROM crux_daily_by_page
+      GROUP BY page, form_factor
+    )
+    SELECT c.date::text, c.page, c.form_factor,
+      c.lcp_p75::float as lcp_p75,
+      c.inp_p75::float as inp_p75,
+      c.cls_p75::float as cls_p75
+    FROM crux_daily_by_page c
+    JOIN latest l ON l.page = c.page
+                 AND l.form_factor = c.form_factor
+                 AND l.date = c.date
+    ORDER BY c.page ASC, c.form_factor ASC
+  `);
+  return rows;
 }

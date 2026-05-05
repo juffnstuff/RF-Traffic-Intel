@@ -4,7 +4,7 @@ import {
   Tooltip, Legend, CartesianGrid,
   BarChart, Bar, Cell, ReferenceLine,
 } from 'recharts';
-import { movingAverage, leadLag, leadLagDetrended, weekdaysOnly } from './utils/analytics';
+import { movingAverage, leadLag, leadLagDetrended, slopeLastN, weekdaysOnly } from './utils/analytics';
 import { RELATIVE_RANGES, RangeDropdown, YearsDropdown, useLocalStorageState, clearAllFilters } from './FilterControls';
 
 export function fmtNum(n) {
@@ -44,7 +44,40 @@ export function fmtAxisDate(d) {
   return `${months[parseInt(parts[1],10)-1]} ${parts[0].slice(2)}`;
 }
 
-export function StatCard({ label, value, sub, small }) {
+// Up/down/flat triangle for a 7-day slope. Sign-only — magnitude is irrelevant
+// here since metrics live on wildly different scales (dollars vs. ratios).
+function TrendArrow({ slope, size = 12 }) {
+  if (slope == null) {
+    return <span style={{ color: 'var(--dso-text-faint)', fontSize: size }}>·</span>;
+  }
+  const up = slope > 0;
+  const flat = slope === 0;
+  const color = flat ? 'var(--dso-text-faint)' : (up ? '#22c55e' : '#ef4444');
+  const glyph = flat ? '→' : (up ? '▲' : '▼');
+  return (
+    <span style={{ color, fontSize: size, fontWeight: 700, lineHeight: 1 }}>
+      {glyph}
+    </span>
+  );
+}
+
+/**
+ * StatCard — top-of-page KPI tile.
+ *
+ * Optional trend props (when supplied) layer on:
+ *   ma30, ma90       raw numeric DMAs — used to derive growth vs contracting
+ *   slope30, slope90 7-day linear-regression slopes — sign drives arrows
+ *   formatter        function used to format ma90 inline
+ *
+ * Without those, the card renders the legacy label/value/sub/small layout.
+ */
+export function StatCard({
+  label, value, sub, small,
+  ma30, ma90, slope30, slope90, formatter,
+}) {
+  const hasCompare = ma30 != null && ma90 != null;
+  const growth = hasCompare ? ma30 > ma90 : null;
+  const showTrendRow = slope30 != null || slope90 != null || hasCompare || ma90 != null;
   return (
     <div style={{
       background: 'var(--dso-surface)',
@@ -63,15 +96,45 @@ export function StatCard({ label, value, sub, small }) {
         textTransform: 'uppercase',
         marginBottom: 6,
       }}>{label}</div>
-      <div style={{
-        color: 'var(--dso-text)',
-        fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
-        fontSize: 26,
-        fontWeight: 700,
-        lineHeight: 1.05,
-        letterSpacing: '-0.01em',
-      }}>{value}</div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{
+          color: 'var(--dso-text)',
+          fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+          fontSize: 26,
+          fontWeight: 700,
+          lineHeight: 1.05,
+          letterSpacing: '-0.01em',
+        }}>{value}</div>
+        {slope30 !== undefined && <TrendArrow slope={slope30} size={14} />}
+      </div>
       {sub && <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginTop: 4 }}>{sub}</div>}
+      {showTrendRow && (
+        <div style={{
+          color: 'var(--dso-text-dim)',
+          fontSize: 11,
+          marginTop: 4,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          flexWrap: 'wrap',
+          fontFeatureSettings: '"tnum"',
+        }}>
+          <span>90 DMA{ma90 != null && formatter ? `: ${formatter(ma90)}` : ''}</span>
+          {slope90 !== undefined && <TrendArrow slope={slope90} size={11} />}
+          {hasCompare && (
+            <span style={{
+              color: growth ? '#22c55e' : '#ef4444',
+              fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+            }}>
+              · {growth ? 'Growing' : 'Contracting'}
+            </span>
+          )}
+        </div>
+      )}
       {small && <div style={{ color: 'var(--dso-text-faint)', fontSize: 10, marginTop: 2 }}>{small}</div>}
     </div>
   );
@@ -248,7 +311,7 @@ function LeadLagCard({ title, subtitle, result }) {
   const atBoundary = absR >= 0.4 && (bestLag <= 1 || bestLag >= maxLag - 4);
 
   const confidenceBlurb = atBoundary
-    ? '⚠ Best lag at scan edge — may be a cycle mismatch or a relationship longer than 45d. Not a reliable forecast; try a different range or channel split.'
+    ? `⚠ Best lag at scan edge — may be a cycle mismatch or a relationship longer than ${maxLag}d. Not a reliable forecast; try a different range or channel split.`
     : absR >= 0.7
       ? 'Reliable forecast signal.'
       : absR >= 0.4
@@ -282,7 +345,16 @@ function LeadLagCard({ title, subtitle, result }) {
       <ResponsiveContainer width="100%" height={110}>
         <BarChart data={data} margin={{ top: 4, right: 6, left: 0, bottom: 2 }}>
           <XAxis
-            dataKey="lag" ticks={[0, 7, 14, 21, 30, 45]}
+            dataKey="lag"
+            ticks={(() => {
+              // Hand-pick ticks so the axis reads at a glance regardless of
+              // scan width. 45-day scans get the original weekly cadence;
+              // wider B2B scans (90, 120, 180) get monthly cadence.
+              if (maxLag <= 45) return [0, 7, 14, 21, 30, 45];
+              if (maxLag <= 90) return [0, 14, 30, 60, 90];
+              if (maxLag <= 120) return [0, 14, 30, 60, 90, 120];
+              return [0, 30, 60, 90, 120, 150, 180].filter(t => t <= maxLag);
+            })()}
             tickFormatter={v => `${v}d`}
             tick={{ fill: '#cbd5e1', fontSize: 10 }}
             axisLine={{ stroke: '#475569' }} tickLine={false}
@@ -331,6 +403,8 @@ function LeadLagCard({ title, subtitle, result }) {
 export default function DashboardView({
   daily = [],
   ga4Daily = [],                       // optional — GA4 daily rows aligned to `daily`
+  gscDaily = [],                       // optional — GSC daily clicks/impressions/ctr/position
+  channelsDaily = [],                  // optional — one row per (date, channel) for channel-split lead-lag
   headerExtras = null,
   subtitle = null,
   onRefresh,
@@ -378,6 +452,19 @@ export default function DashboardView({
     const newUsers     = rows.map(d => ga4ByDate.get(d.date)?.new_users       ?? 0);
     const conversions  = rows.map(d => ga4ByDate.get(d.date)?.conversions     ?? 0);
     const pageviews    = rows.map(d => ga4ByDate.get(d.date)?.screen_page_views ?? 0);
+    // Engaged sessions — better upstream input than raw sessions because it
+    // strips bots and accidental hits, leaving sessions where the user
+    // actually stayed long enough to count.
+    const engagedSessions = rows.map(d => ga4ByDate.get(d.date)?.engaged_sessions ?? 0);
+
+    // Align GSC rows by date — clicks are the cleanest demand-creation signal
+    // (Google decided this user wanted us, the user clicked through), with
+    // none of the GA4 noise from direct/email/bot traffic.
+    const gscByDate = new Map(
+      (gscDaily || []).map(d => [d.date, d])
+    );
+    const gscClicks      = rows.map(d => gscByDate.get(d.date)?.clicks      ?? 0);
+    const gscImpressions = rows.map(d => gscByDate.get(d.date)?.impressions ?? 0);
 
     const qc30 = movingAverage(quotes, 30);
     const qc90 = movingAverage(quotes, 90);
@@ -405,6 +492,13 @@ export default function DashboardView({
     const conv90 = movingAverage(conversions, 90);
     const pv30   = movingAverage(pageviews, 30);
     const pv90   = movingAverage(pageviews, 90);
+    const es30   = movingAverage(engagedSessions, 30);
+    const es90   = movingAverage(engagedSessions, 90);
+    // GSC moving averages
+    const gscC30 = movingAverage(gscClicks, 30);
+    const gscC90 = movingAverage(gscClicks, 90);
+    const gscI30 = movingAverage(gscImpressions, 30);
+    const gscI90 = movingAverage(gscImpressions, 90);
 
     const closeRate = qc30.map((q, i) => (q == null || oc30[i] == null || q === 0 ? null : oc30[i] / q));
     const cr90 = qc90.map((q, i) => (q == null || oc90[i] == null || q === 0 ? null : oc90[i] / q));
@@ -440,8 +534,12 @@ export default function DashboardView({
       newUsers: newUsers[i], nu30: nu30[i], nu90: nu90[i],
       conversions: conversions[i], conv30: conv30[i], conv90: conv90[i],
       pageviews: pageviews[i], pv30: pv30[i], pv90: pv90[i],
+      engagedSessions: engagedSessions[i], es30: es30[i], es90: es90[i],
+      // GSC raw + DMAs
+      gscClicks: gscClicks[i], gscC30: gscC30[i], gscC90: gscC90[i],
+      gscImpressions: gscImpressions[i], gscI30: gscI30[i], gscI90: gscI90[i],
     }));
-  }, [daily, ga4Daily, weekdayOnly]);
+  }, [daily, ga4Daily, gscDaily, weekdayOnly]);
 
   const chartData = useMemo(() => {
     if (!fullSeries.length) return [];
@@ -463,12 +561,28 @@ export default function DashboardView({
     if (chartData.length === 0) return null;
     const last = chartData[chartData.length - 1];
     const sumField = (f) => chartData.reduce((s, d) => s + (d[f] || 0), 0);
+    // 7-day slope of each DMA series across the visible window. Sign feeds the
+    // trend arrows on the StatCards; magnitude is unused.
+    const slopeOf = (f) => slopeLastN(chartData.map(d => d[f]), 7);
     return {
+      // 30 DMA latest values (the headline number on each card)
       q30: last.q30, o30: last.o30, s30: last.s30,
       qc30: last.qc30, oc30: last.oc30, sc30: last.sc30,
       closeRate: last.closeRate,
       captureRate: last.captureRate,
       aovO30: last.aovO30, aovS30: last.aovS30,
+      // 90 DMA latest values — used to derive growth/contracting (30 vs 90)
+      q90: last.q90, o90: last.o90, s90: last.s90,
+      cr90: last.cr90, capt90: last.capt90,
+      aovO90: last.aovO90, aovS90: last.aovS90,
+      // 7-day slopes for the up/down arrows
+      q30Slope: slopeOf('q30'),         q90Slope: slopeOf('q90'),
+      o30Slope: slopeOf('o30'),         o90Slope: slopeOf('o90'),
+      s30Slope: slopeOf('s30'),         s90Slope: slopeOf('s90'),
+      closeRateSlope: slopeOf('closeRate'),     cr90Slope: slopeOf('cr90'),
+      captureRateSlope: slopeOf('captureRate'), capt90Slope: slopeOf('capt90'),
+      aovO30Slope: slopeOf('aovO30'),   aovO90Slope: slopeOf('aovO90'),
+      aovS30Slope: slopeOf('aovS30'),   aovS90Slope: slopeOf('aovS90'),
       totalQuotesDollars: sumField('quotes_total'),
       totalOrdersDollars: sumField('orders_total'),
       totalShippedDollars: sumField('shipped_total'),
@@ -490,8 +604,17 @@ export default function DashboardView({
     const [o30,  o90]  = pluck('o30',  'o90');
     const [s30,  s90]  = pluck('s30',  's90');
 
+    // Upstream lead-lag scans use a wider window (B2B engineered-product
+    // cycles routinely run 60–180 days), but only as wide as the visible
+    // window can support without producing meaningless tiny samples at the
+    // far end. 60% of the chartData length is a conservative cap; 120 is the
+    // hard ceiling so the chart itself stays readable.
+    const upstreamMaxLag = Math.min(120, Math.max(45, Math.floor(chartData.length * 0.6)));
+
     const out = {
       // Count-based — "how many transactions" predicts "how many transactions"
+      // Pipeline (downstream) cards keep the original 45-day scan; that's
+      // where the cycle actually lives.
       quotesToOrdersCount:  leadLagDetrended(qc30, qc90, oc30, oc90),
       ordersToShippedCount: leadLagDetrended(oc30, oc90, sc30, sc90),
       // Dollar-based — "how much $" predicts "how much $" (revenue forecasting)
@@ -499,20 +622,64 @@ export default function DashboardView({
       ordersToShippedDollars: leadLagDetrended(o30, o90, s30, s90),
     };
 
-    // Traffic → Quotes — only when GA4 is populated. This is the funnel
-    // upstream read: does web traffic reliably precede quote activity, and
-    // by how many days?
+    // Upstream — only when GA4 is populated. The "right" upstream signal for
+    // a custom-product B2B funnel isn't raw sessions (bot-inflated, mixes
+    // every intent level): it's engaged sessions, GSC clicks (cleanest demand
+    // capture), and per-channel sessions split by intent.
     const hasGa4 = (ga4Daily?.length ?? 0) > 0;
     if (hasGa4) {
-      const [sess30, sess90] = pluck('sess30', 'sess90');
+      const [es30, es90]     = pluck('es30',  'es90');
       const [conv30, conv90] = pluck('conv30', 'conv90');
-      out.sessionsToQuotesCount   = leadLagDetrended(sess30, sess90, qc30, qc90);
-      out.sessionsToQuotesDollars = leadLagDetrended(sess30, sess90, q30,  q90);
-      out.conversionsToQuotesCount = leadLagDetrended(conv30, conv90, qc30, qc90);
+      out.engagedToQuotesDollars = leadLagDetrended(es30, es90, q30, q90, upstreamMaxLag);
+      out.engagedToQuotesCount   = leadLagDetrended(es30, es90, qc30, qc90, upstreamMaxLag);
+      out.conversionsToQuotesCount   = leadLagDetrended(conv30, conv90, qc30, qc90, upstreamMaxLag);
+      out.conversionsToQuotesDollars = leadLagDetrended(conv30, conv90, q30,  q90,  upstreamMaxLag);
     }
 
+    // GSC clicks — purest demand-capture signal. Skip if GSC isn't populated.
+    const hasGsc = (gscDaily?.length ?? 0) > 0;
+    if (hasGsc) {
+      const [gscC30, gscC90] = pluck('gscC30', 'gscC90');
+      out.gscClicksToQuotesDollars = leadLagDetrended(gscC30, gscC90, q30, q90, upstreamMaxLag);
+      out.gscClicksToQuotesCount   = leadLagDetrended(gscC30, gscC90, qc30, qc90, upstreamMaxLag);
+    }
+
+    // Per-channel sessions → Quote $. We pivot the channels-daily rows once,
+    // pick the top channels by total sessions in the visible window, then run
+    // each as its own lead-lag (its 30/90 DMA detrended against quote $ DMA).
+    // This is the single most useful split: Direct lags short, paid sits in
+    // the middle, organic non-branded lags long.
+    const channelResults = [];
+    if ((channelsDaily?.length ?? 0) > 0) {
+      const dateSet = new Set(chartData.map(d => d.date));
+      const byChannel = new Map(); // channel -> Map<date, sessions>
+      for (const r of channelsDaily) {
+        if (!r.channel || !dateSet.has(r.date)) continue;
+        if (!byChannel.has(r.channel)) byChannel.set(r.channel, new Map());
+        byChannel.get(r.channel).set(r.date, (byChannel.get(r.channel).get(r.date) || 0) + (r.sessions || 0));
+      }
+      const totals = [...byChannel.entries()]
+        .map(([c, m]) => ({ channel: c, total: [...m.values()].reduce((a, b) => a + b, 0), m }))
+        .sort((a, b) => b.total - a.total);
+      // Cap at top 5 by sessions in window — keeps the card grid readable.
+      // Skip "Unassigned" because it's GA4's catch-all and rarely meaningful.
+      const top = totals.filter(t => t.channel !== 'Unassigned').slice(0, 5);
+      for (const { channel, m } of top) {
+        const raw  = chartData.map(d => m.get(d.date) ?? 0);
+        const c30  = movingAverage(raw, 30);
+        const c90  = movingAverage(raw, 90);
+        channelResults.push({
+          channel,
+          dollars: leadLagDetrended(c30, c90, q30,  q90,  upstreamMaxLag),
+          count:   leadLagDetrended(c30, c90, qc30, qc90, upstreamMaxLag),
+        });
+      }
+    }
+    out.channelToQuotes = channelResults;
+    out.upstreamMaxLag = upstreamMaxLag;
+
     return out;
-  }, [chartData, ga4Daily]);
+  }, [chartData, ga4Daily, gscDaily, channelsDaily]);
 
   // Build the compact JSON snapshot Claude reads. Gives explicit anchor points
   // (today / 30d / 90d / YoY) with both 30 DMA and 90 DMA values so the model
@@ -742,13 +909,23 @@ export default function DashboardView({
       <main style={{ padding: '16px clamp(12px, 4vw, 32px)', maxWidth: 1600, margin: '0 auto' }}>
         {summary && (
           <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
-            <StatCard label="Total Quote DMA" value={fmtMoney(summary.q30)} sub="30 DMA avg daily" small={`Period total: ${fmtMoney(summary.totalQuotesDollars)}`} />
-            <StatCard label="Total Orders DMA" value={fmtMoney(summary.o30)} sub="30 DMA avg daily" small={`Period total: ${fmtMoney(summary.totalOrdersDollars)}`} />
-            <StatCard label="Total Shipped DMA" value={fmtMoney(summary.s30)} sub="30 DMA avg daily" small={`Period total: ${fmtMoney(summary.totalShippedDollars)}`} />
-            <StatCard label="Close Rate DMA" value={fmtPct(summary.closeRate)} sub="30 DMA orders/quotes (count)" />
-            <StatCard label="Capture Rate DMA" value={fmtPct(summary.captureRate)} sub="30 DMA orders$/quotes$" />
-            <StatCard label="Avg Order Value" value={fmtMoney(summary.aovO30)} sub="30 DMA orders$/count" />
-            <StatCard label="Avg Shipped Value" value={fmtMoney(summary.aovS30)} sub="30 DMA shipped$/count" />
+            <StatCard label="Total Quote DMA" value={fmtMoney(summary.q30)} sub="30 DMA avg daily"
+              ma30={summary.q30} ma90={summary.q90} slope30={summary.q30Slope} slope90={summary.q90Slope} formatter={fmtMoney}
+              small={`Period total: ${fmtMoney(summary.totalQuotesDollars)}`} />
+            <StatCard label="Total Orders DMA" value={fmtMoney(summary.o30)} sub="30 DMA avg daily"
+              ma30={summary.o30} ma90={summary.o90} slope30={summary.o30Slope} slope90={summary.o90Slope} formatter={fmtMoney}
+              small={`Period total: ${fmtMoney(summary.totalOrdersDollars)}`} />
+            <StatCard label="Total Shipped DMA" value={fmtMoney(summary.s30)} sub="30 DMA avg daily"
+              ma30={summary.s30} ma90={summary.s90} slope30={summary.s30Slope} slope90={summary.s90Slope} formatter={fmtMoney}
+              small={`Period total: ${fmtMoney(summary.totalShippedDollars)}`} />
+            <StatCard label="Close Rate DMA" value={fmtPct(summary.closeRate)} sub="30 DMA orders/quotes (count)"
+              ma30={summary.closeRate} ma90={summary.cr90} slope30={summary.closeRateSlope} slope90={summary.cr90Slope} formatter={fmtPct} />
+            <StatCard label="Capture Rate DMA" value={fmtPct(summary.captureRate)} sub="30 DMA orders$/quotes$"
+              ma30={summary.captureRate} ma90={summary.capt90} slope30={summary.captureRateSlope} slope90={summary.capt90Slope} formatter={fmtPct} />
+            <StatCard label="Avg Order Value" value={fmtMoney(summary.aovO30)} sub="30 DMA orders$/count"
+              ma30={summary.aovO30} ma90={summary.aovO90} slope30={summary.aovO30Slope} slope90={summary.aovO90Slope} formatter={fmtMoney} />
+            <StatCard label="Avg Shipped Value" value={fmtMoney(summary.aovS30)} sub="30 DMA shipped$/count"
+              ma30={summary.aovS30} ma90={summary.aovS90} slope30={summary.aovS30Slope} slope90={summary.aovS90Slope} formatter={fmtMoney} />
           </div>
         )}
 
@@ -798,29 +975,60 @@ export default function DashboardView({
               How many days of delay give the tightest predictive link between the two series.
               Computed on <em>detrended</em> momentum (30 DMA minus 90 DMA) so opposing long-term trends don't
               produce fake inverse correlations. Count r forecasts transaction volume; $ r forecasts revenue.
+              Upstream cards scan up to {leadLagResults.upstreamMaxLag ?? 120} days because B2B engineered-product
+              cycles can run weeks to months; pipeline cards stay at 45.
             </div>
 
-            {leadLagResults.sessionsToQuotesCount && (
+            {(leadLagResults.engagedToQuotesDollars || leadLagResults.gscClicksToQuotesDollars || leadLagResults.conversionsToQuotesCount) && (
               <>
                 <div style={{ fontSize: 11, color: '#a78bfa', marginBottom: 8, fontWeight: 600, letterSpacing: 0.3 }}>
-                  UPSTREAM — web traffic as a leading indicator of quotes
+                  UPSTREAM · OVERALL — quality demand signals as leading indicators of quotes
                 </div>
                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
-                  <LeadLagCard
-                    title="Sessions → Quotes (count)"
-                    subtitle="How many days web sessions typically lead quote count"
-                    result={leadLagResults.sessionsToQuotesCount}
-                  />
-                  <LeadLagCard
-                    title="Sessions → Quotes ($)"
-                    subtitle="How many days web sessions typically lead quote $"
-                    result={leadLagResults.sessionsToQuotesDollars}
-                  />
-                  <LeadLagCard
-                    title="Conversions → Quotes (count)"
-                    subtitle="How many days GA4 conversions typically lead quote count"
-                    result={leadLagResults.conversionsToQuotesCount}
-                  />
+                  {leadLagResults.engagedToQuotesDollars && (
+                    <LeadLagCard
+                      title="Engaged Sessions → Quotes ($)"
+                      subtitle="GA4 engaged sessions (bots + bounces stripped) leading quote $"
+                      result={leadLagResults.engagedToQuotesDollars}
+                    />
+                  )}
+                  {leadLagResults.gscClicksToQuotesDollars && (
+                    <LeadLagCard
+                      title="GSC Clicks → Quotes ($)"
+                      subtitle="Google search clicks (cleanest demand-capture signal) leading quote $"
+                      result={leadLagResults.gscClicksToQuotesDollars}
+                    />
+                  )}
+                  {leadLagResults.conversionsToQuotesCount && (
+                    <LeadLagCard
+                      title="GA4 Conversions → Quotes (count)"
+                      subtitle="GA4 conversion events (form submits, etc.) leading quote count"
+                      result={leadLagResults.conversionsToQuotesCount}
+                    />
+                  )}
+                </div>
+              </>
+            )}
+
+            {leadLagResults.channelToQuotes && leadLagResults.channelToQuotes.length > 0 && (
+              <>
+                <div style={{ fontSize: 11, color: '#a78bfa', marginBottom: 8, fontWeight: 600, letterSpacing: 0.3 }}>
+                  UPSTREAM · BY CHANNEL — different traffic sources lead at different lags
+                </div>
+                <div style={{ fontSize: 10, color: '#64748b', marginBottom: 8 }}>
+                  Direct usually lags shortest (existing buyers); paid sits in the middle; non-branded organic
+                  lags longest (new demand maturing). Top {leadLagResults.channelToQuotes.length} channels by
+                  session volume in this window.
+                </div>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+                  {leadLagResults.channelToQuotes.map(c => (
+                    <LeadLagCard
+                      key={c.channel}
+                      title={`${c.channel} → Quotes ($)`}
+                      subtitle={`How many days ${c.channel.toLowerCase()} sessions typically lead quote $`}
+                      result={c.dollars}
+                    />
+                  ))}
                 </div>
               </>
             )}

@@ -19,6 +19,8 @@ export default function FilteredPage() {
 
   const [data, setData] = useState(null);
   const [ga4, setGa4] = useState(null);
+  const [gscDaily, setGscDaily] = useState(null);
+  const [channelsDaily, setChannelsDaily] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -65,10 +67,14 @@ export default function FilteredPage() {
     Promise.all([
       fetch(`/api/unified-dim${qs ? '?' + qs : ''}`).then(r => { if (!r.ok) throw new Error(`API ${r.status}`); return r.json(); }),
       fetch(ga4Url).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/gsc').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/ga4-channels-daily').then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([dimResp, ga4Resp]) => {
+      .then(([dimResp, ga4Resp, gscResp, channelsResp]) => {
         setData(dimResp);
         setGa4(ga4Resp);
+        setGscDaily(gscResp);
+        setChannelsDaily(channelsResp);
         setError(null);
       })
       .catch(e => setError(e.message))
@@ -259,6 +265,8 @@ export default function FilteredPage() {
     <DashboardView
       daily={data?.daily || []}
       ga4Daily={ga4?.daily || []}
+      gscDaily={gscDaily?.daily || []}
+      channelsDaily={channelsDaily?.daily || []}
       headerExtras={filterPanel}
       subtitle={<>netsuite-dim — filtered: {summary}</>}
       onRefresh={handleRefresh}

@@ -101,6 +101,31 @@ export function leadLagDetrended(leading30, leading90, lagging30, lagging90, max
 }
 
 /**
+ * Linear-regression slope across the last `n` non-null values of a series.
+ * Used by the StatCard trend arrows: only the sign (positive/negative) matters,
+ * so the magnitude can be ignored — but a least-squares fit is more stable
+ * than a simple "last vs n-days-ago" diff against a single noisy endpoint.
+ * Returns null if fewer than 2 valid points are available.
+ */
+export function slopeLastN(values, n = 7) {
+  const tail = [];
+  for (let i = values.length - 1; i >= 0 && tail.length < n; i--) {
+    if (values[i] != null) tail.unshift({ x: i, y: values[i] });
+  }
+  if (tail.length < 2) return null;
+  const meanX = tail.reduce((s, p) => s + p.x, 0) / tail.length;
+  const meanY = tail.reduce((s, p) => s + p.y, 0) / tail.length;
+  let num = 0, den = 0;
+  for (const p of tail) {
+    const dx = p.x - meanX;
+    num += dx * (p.y - meanY);
+    den += dx * dx;
+  }
+  if (den === 0) return null;
+  return num / den;
+}
+
+/**
  * Filter daily rows to weekdays only.
  */
 export function weekdaysOnly(daily) {
