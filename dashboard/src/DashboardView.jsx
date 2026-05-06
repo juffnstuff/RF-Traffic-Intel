@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis,
   Tooltip, Legend, CartesianGrid,
@@ -140,27 +140,16 @@ export function StatCard({
   );
 }
 
-function ChartTooltip({ active, payload, label, formatter }) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div style={{
-      background: 'var(--dso-bg)',
-      border: '1px solid var(--dso-rule)',
-      borderLeft: '3px solid var(--dso-accent-hot)',
-      borderRadius: 4,
-      padding: '10px 14px',
-      fontSize: 12,
-      lineHeight: 1.6,
-      fontFamily: "var(--dso-font-mono, ui-monospace, Menlo, monospace)",
-    }}>
-      <div style={{ color: 'var(--dso-text)', fontWeight: 700, marginBottom: 4 }}>{fmtDate(label)}</div>
-      {payload.map((p, i) => (
-        <div key={i} style={{ color: p.color }}>
-          {p.name}: {formatter ? formatter(p.value) : fmtNum(p.value)}
-        </div>
-      ))}
-    </div>
-  );
+// Recharts requires a tooltip to be present for hover state + activeDot to
+// work, but we don't want a floating box covering the trend lines. This
+// component renders nothing and instead lifts the hover payload up to the
+// parent chart, which displays the values in its header strip.
+function HoverSniffer({ active, payload, label, onHoverChange }) {
+  useEffect(() => {
+    if (active && payload?.length) onHoverChange({ label, payload });
+    else onHoverChange(null);
+  }, [active, payload, label, onHoverChange]);
+  return null;
 }
 
 // Brand-mapped chart palette. raw = faint grey (background context),
@@ -174,6 +163,10 @@ const LINE_COLORS = {
 
 export function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmtNum, currentValue, showDaily = true }) {
   const latest30 = data.length > 0 ? data[data.length - 1]?.[field30] : null;
+  const [hover, setHover] = useState(null);
+  const handleHoverChange = useCallback(setHover, []);
+  const hov30 = hover?.payload.find(p => p.name === '30 DMA')?.value ?? null;
+  const hov90 = hover?.payload.find(p => p.name === '90 DMA')?.value ?? null;
 
   // One tick per month-start date in the visible data. If the view spans many
   // months, thin so labels don't collide (~18 ticks max for a typical tile).
@@ -216,15 +209,57 @@ export function DMALineChart({ title, data, field30, field90, fieldRaw, formatte
             fontSize: 22,
             fontWeight: 700,
             letterSpacing: '-0.01em',
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 12,
+            flexWrap: 'wrap',
           }}>
-            {formatter(currentValue ?? latest30)}
-            <span style={{
-              fontSize: 10,
-              color: 'var(--dso-accent-hot)',
-              marginLeft: 8,
-              letterSpacing: '0.16em',
-              fontWeight: 600,
-            }}>30 DMA</span>
+            {hover ? (
+              <>
+                <span>
+                  {formatter(hov30)}
+                  <span style={{
+                    fontSize: 10,
+                    color: 'var(--dso-accent-hot)',
+                    marginLeft: 8,
+                    letterSpacing: '0.16em',
+                    fontWeight: 600,
+                  }}>30 DMA</span>
+                </span>
+                <span style={{
+                  fontSize: 16,
+                  color: 'var(--dso-text-dim)',
+                  fontWeight: 600,
+                }}>
+                  {formatter(hov90)}
+                  <span style={{
+                    fontSize: 10,
+                    color: 'var(--dso-text-dim)',
+                    marginLeft: 6,
+                    letterSpacing: '0.16em',
+                    fontWeight: 600,
+                  }}>90 DMA</span>
+                </span>
+                <span style={{
+                  fontSize: 11,
+                  color: 'var(--dso-text-dim)',
+                  fontWeight: 500,
+                  letterSpacing: '0.04em',
+                  fontFamily: "var(--dso-font-mono, ui-monospace, Menlo, monospace)",
+                }}>{fmtDate(hover.label)}</span>
+              </>
+            ) : (
+              <span>
+                {formatter(currentValue ?? latest30)}
+                <span style={{
+                  fontSize: 10,
+                  color: 'var(--dso-accent-hot)',
+                  marginLeft: 8,
+                  letterSpacing: '0.16em',
+                  fontWeight: 600,
+                }}>30 DMA</span>
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -242,7 +277,7 @@ export function DMALineChart({ title, data, field30, field90, fieldRaw, formatte
             tick={{ fill: 'var(--dso-text-dim)', fontSize: 10 }}
             axisLine={false} tickLine={false} width={55}
           />
-          <Tooltip content={<ChartTooltip formatter={formatter} />} />
+          <Tooltip content={<HoverSniffer onHoverChange={handleHoverChange} />} cursor={{ stroke: 'var(--dso-rule)', strokeWidth: 1 }} />
           {fieldRaw && showDaily && (
             <Line
               type="monotone" dataKey={fieldRaw} name="Daily"
