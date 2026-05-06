@@ -86,11 +86,11 @@ export async function fetchGoogleAds({ since = null } = {}) {
   const endDate = new Date().toISOString().slice(0, 10);
   const startDate = since || (() => {
     const d = new Date();
-    d.setFullYear(d.getFullYear() - 2);
+    d.setFullYear(d.getFullYear() - 5);
     return d.toISOString().slice(0, 10);
   })();
 
-  const mode = since ? `incremental (since ${since})` : `full history (last 2y)`;
+  const mode = since ? `incremental (since ${since})` : `full history (last 5y)`;
   console.log(`🔎  Google Ads fetch — ${mode}`);
   console.log(`    Customer: ${customerId}${loginCustomer ? ` (via MCC ${loginCustomer})` : ''}`);
 
