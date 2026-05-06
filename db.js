@@ -1795,8 +1795,9 @@ export async function getGscQueryHistory({ query, sinceDate = null } = {}) {
 export async function getGscQueryMovers({ limit = 25 } = {}) {
   const p = getPool();
   const { rows: dateRows } = await p.query(`
-    SELECT DISTINCT window_end_date::text as date
+    SELECT window_end_date::text as date
     FROM gsc_top_queries
+    GROUP BY window_end_date
     ORDER BY window_end_date DESC
     LIMIT 2
   `);
