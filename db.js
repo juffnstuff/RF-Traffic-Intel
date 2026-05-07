@@ -1897,25 +1897,167 @@ export async function upsertCruxDailyByPage(rows) {
 }
 
 // Latest per-page CWV reads — one row per (page, form_factor) using each
-// page's most recent fetch date. Used for the per-page table on the GA4
-// tab so we don't have to render every snapshot we've ever pulled.
-export async function getCruxLatestByPage() {
+// ── Cross-source insights ────────────────────────────────────────────
+//
+// Joins across GA4 / Google Ads / GSC. Each individual table is already
+// well-indexed by date and the joined tuple, so these queries stay cheap
+// even on multi-year ranges.
+
+// Per-campaign aggregation joining Google Ads cost/clicks to GA4
+// sessions/conversions on (date, campaign_name). FULL OUTER JOIN so
+// campaigns visible in only one side still surface — useful for spotting
+// (a) Ads campaigns that GA4 isn't seeing (tagging issue), and
+// (b) GA4 campaigns with no spend (organic UTM, manual tagging).
+export async function getCampaignRoi({ since = null, until = null } = {}) {
+  const p = getPool();
+  // Both CTEs filter by date independently; each gets its own $-placeholders
+  // even though the values are the same. dateFilter pushes into the shared
+  // params array as it builds each WHERE clause, so positional indices stay
+  // monotonic across the two CTEs.
+  const params = [];
+  const dateFilter = (alias) => {
+    const conds = [];
+    if (since) { params.push(since); conds.push(`${alias}.date >= $${params.length}::date`); }
+    if (until) { params.push(until); conds.push(`${alias}.date <= $${params.length}::date`); }
+    return conds.length ? 'WHERE ' + conds.join(' AND ') : '';
+  };
+  const adsWhere = dateFilter('a');
+  const ga4Where = dateFilter('g');
+  const sql = `
+    WITH ads AS (
+      SELECT
+        campaign_name,
+        SUM(cost)::float             as cost,
+        SUM(clicks)::int             as ad_clicks,
+        SUM(impressions)::int        as ad_impressions,
+        SUM(conversions)::float      as ad_conversions,
+        SUM(conversion_value)::float as ad_conversion_value
+      FROM google_ads_daily_by_campaign a
+      ${adsWhere}
+      GROUP BY campaign_name
+    ),
+    ga4 AS (
+      SELECT
+        campaign_name,
+        SUM(sessions)::int         as ga4_sessions,
+        SUM(engaged_sessions)::int as ga4_engaged_sessions,
+        SUM(total_users)::int      as ga4_users,
+        SUM(conversions)::int      as ga4_conversions,
+        SUM(total_revenue)::float  as ga4_revenue
+      FROM ga4_daily_by_campaign g
+      ${ga4Where}
+      GROUP BY campaign_name
+    )
+    SELECT
+      COALESCE(a.campaign_name, g.campaign_name) as campaign_name,
+      COALESCE(a.cost, 0)                 as cost,
+      COALESCE(a.ad_clicks, 0)            as ad_clicks,
+      COALESCE(a.ad_impressions, 0)       as ad_impressions,
+      COALESCE(a.ad_conversions, 0)       as ad_conversions,
+      COALESCE(a.ad_conversion_value, 0)  as ad_conversion_value,
+      COALESCE(g.ga4_sessions, 0)         as ga4_sessions,
+      COALESCE(g.ga4_engaged_sessions, 0) as ga4_engaged_sessions,
+      COALESCE(g.ga4_users, 0)            as ga4_users,
+      COALESCE(g.ga4_conversions, 0)      as ga4_conversions,
+      COALESCE(g.ga4_revenue, 0)          as ga4_revenue,
+      (a.campaign_name IS NOT NULL)       as in_ads,
+      (g.campaign_name IS NOT NULL)       as in_ga4
+    FROM ads a
+    FULL OUTER JOIN ga4 g ON a.campaign_name = g.campaign_name
+    ORDER BY COALESCE(a.cost, 0) DESC, COALESCE(g.ga4_sessions, 0) DESC
+  `;
+  const { rows } = await p.query(sql, params);
+  return rows.map(r => ({
+    campaign_name: r.campaign_name,
+    cost: Number(r.cost),
+    ad_clicks: Number(r.ad_clicks),
+    ad_impressions: Number(r.ad_impressions),
+    ad_conversions: Number(r.ad_conversions),
+    ad_conversion_value: Number(r.ad_conversion_value),
+    ga4_sessions: Number(r.ga4_sessions),
+    ga4_engaged_sessions: Number(r.ga4_engaged_sessions),
+    ga4_users: Number(r.ga4_users),
+    ga4_conversions: Number(r.ga4_conversions),
+    ga4_revenue: Number(r.ga4_revenue),
+    in_ads: r.in_ads,
+    in_ga4: r.in_ga4,
+    // Derived metrics — null when denominator is zero so the UI shows "—".
+    ctr: r.ad_impressions > 0 ? r.ad_clicks / r.ad_impressions : null,
+    avg_cpc: r.ad_clicks > 0 ? r.cost / r.ad_clicks : null,
+    cost_per_session: r.ga4_sessions > 0 ? r.cost / r.ga4_sessions : null,
+    cost_per_ga4_conv: r.ga4_conversions > 0 ? r.cost / r.ga4_conversions : null,
+    roas: r.cost > 0 ? r.ga4_revenue / r.cost : null,
+    sessions_per_click: r.ad_clicks > 0 ? r.ga4_sessions / r.ad_clicks : null,
+  }));
+}
+
+// GSC top-pages snapshot joined to GA4 landing-page metrics aggregated
+// across the same 28-day window. URL normalization: strip protocol+host
+// from GSC's full URL, strip querystring from GA4's path-with-querystring.
+// Result: ranked search pages with engagement/conversion alongside.
+export async function getPagePerformance({ limit = 100 } = {}) {
   const p = getPool();
   const { rows } = await p.query(`
-    WITH latest AS (
-      SELECT page, form_factor, MAX(date) as date
-      FROM crux_daily_by_page
-      GROUP BY page, form_factor
+    WITH latest_gsc AS (
+      SELECT MAX(window_end_date) as max_date FROM gsc_top_pages
+    ),
+    gsc AS (
+      SELECT
+        regexp_replace(page, '^https?://[^/]+', '') as path,
+        page                  as full_url,
+        clicks                as gsc_clicks,
+        impressions           as gsc_impressions,
+        ctr::float            as gsc_ctr,
+        position::float       as gsc_position
+      FROM gsc_top_pages, latest_gsc
+      WHERE window_end_date = latest_gsc.max_date
+    ),
+    ga4 AS (
+      SELECT
+        split_part(landing_page, '?', 1) as path,
+        SUM(sessions)::int         as ga4_sessions,
+        SUM(engaged_sessions)::int as ga4_engaged_sessions,
+        SUM(total_users)::int      as ga4_users,
+        SUM(conversions)::int      as ga4_conversions,
+        SUM(total_revenue)::float  as ga4_revenue
+      FROM ga4_daily_by_landing_page, latest_gsc
+      WHERE date >= latest_gsc.max_date - INTERVAL '27 days'
+        AND date <= latest_gsc.max_date
+      GROUP BY split_part(landing_page, '?', 1)
     )
-    SELECT c.date::text, c.page, c.form_factor,
-      c.lcp_p75::float as lcp_p75,
-      c.inp_p75::float as inp_p75,
-      c.cls_p75::float as cls_p75
-    FROM crux_daily_by_page c
-    JOIN latest l ON l.page = c.page
-                 AND l.form_factor = c.form_factor
-                 AND l.date = c.date
-    ORDER BY c.page ASC, c.form_factor ASC
-  `);
-  return rows;
+    SELECT
+      gsc.path,
+      gsc.full_url,
+      gsc.gsc_clicks,
+      gsc.gsc_impressions,
+      gsc.gsc_ctr,
+      gsc.gsc_position,
+      COALESCE(ga4.ga4_sessions, 0)         as ga4_sessions,
+      COALESCE(ga4.ga4_engaged_sessions, 0) as ga4_engaged_sessions,
+      COALESCE(ga4.ga4_users, 0)            as ga4_users,
+      COALESCE(ga4.ga4_conversions, 0)      as ga4_conversions,
+      COALESCE(ga4.ga4_revenue, 0)          as ga4_revenue,
+      (SELECT max_date::text FROM latest_gsc) as window_end_date
+    FROM gsc
+    LEFT JOIN ga4 ON gsc.path = ga4.path
+    ORDER BY gsc.gsc_clicks DESC
+    LIMIT $1
+  `, [Math.min(500, Math.max(10, parseInt(limit, 10) || 100))]);
+  return rows.map(r => ({
+    path: r.path,
+    full_url: r.full_url,
+    window_end_date: r.window_end_date,
+    gsc_clicks: Number(r.gsc_clicks),
+    gsc_impressions: Number(r.gsc_impressions),
+    gsc_ctr: r.gsc_ctr != null ? Number(r.gsc_ctr) : null,
+    gsc_position: r.gsc_position != null ? Number(r.gsc_position) : null,
+    ga4_sessions: Number(r.ga4_sessions),
+    ga4_engaged_sessions: Number(r.ga4_engaged_sessions),
+    ga4_users: Number(r.ga4_users),
+    ga4_conversions: Number(r.ga4_conversions),
+    ga4_revenue: Number(r.ga4_revenue),
+    // Engagement rate from GA4 (engaged / sessions) for cross-reference
+    // with GSC CTR — high CTR + low engagement = misleading SERP snippet.
+    ga4_engagement_rate: r.ga4_sessions > 0 ? Number(r.ga4_engaged_sessions) / Number(r.ga4_sessions) : null,
+  }));
 }
