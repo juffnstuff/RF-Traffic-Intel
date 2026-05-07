@@ -5,6 +5,7 @@ import PartGroupAnalysisPage from './PartGroupAnalysisPage';
 import GA4InsightsPage from './GA4InsightsPage';
 import PaidKPIsPage from './PaidKPIsPage';
 import SEOKPIsPage from './SEOKPIsPage';
+import CrossSourcePage from './CrossSourcePage';
 import DSOATDLogo from './components/DSOATDLogo';
 import RFTILogo from './components/RFTILogo';
 
@@ -117,6 +118,7 @@ export default function App() {
           <button style={tabStyle(tab === 'ga4')} onClick={() => setTab('ga4')}>GA4 Insights</button>
           <button style={tabStyle(tab === 'paid')} onClick={() => setTab('paid')}>Paid KPIs</button>
           <button style={tabStyle(tab === 'seo')} onClick={() => setTab('seo')}>SEO KPIs</button>
+          <button style={tabStyle(tab === 'cross')} onClick={() => setTab('cross')}>Cross-Source</button>
         </nav>
       </header>
 
@@ -126,6 +128,7 @@ export default function App() {
       {tab === 'ga4' && <GA4InsightsPage />}
       {tab === 'paid' && <PaidKPIsPage />}
       {tab === 'seo' && <SEOKPIsPage />}
+      {tab === 'cross' && <CrossSourcePage />}
     </div>
   );
 }
