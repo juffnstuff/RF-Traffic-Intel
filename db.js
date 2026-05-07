@@ -437,6 +437,26 @@ export async function initDB() {
   await p.query(`CREATE INDEX IF NOT EXISTS idx_crux_page_date ON crux_daily_by_page(date)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_crux_page_path ON crux_daily_by_page(page)`);
 
+  // Part-group attribution rules. Each row maps a pattern (a campaign
+  // name, a GSC query, or a URL path) to a part_group. match_type picks
+  // the source field; match_kind picks how the pattern is compared.
+  // Curated by hand via the Cross-Source admin UI — no fetcher writes
+  // here.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS part_group_mappings (
+      id SERIAL PRIMARY KEY,
+      part_group TEXT NOT NULL,
+      match_type TEXT NOT NULL CHECK (match_type IN ('campaign', 'query', 'url')),
+      match_kind TEXT NOT NULL CHECK (match_kind IN ('exact', 'contains', 'prefix')),
+      pattern TEXT NOT NULL,
+      notes TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_pgm_partgroup ON part_group_mappings(part_group)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_pgm_type ON part_group_mappings(match_type)`);
+
   console.log('✅  Database tables ready');
 }
 
@@ -2060,4 +2080,70 @@ export async function getPagePerformance({ limit = 100 } = {}) {
     // with GSC CTR — high CTR + low engagement = misleading SERP snippet.
     ga4_engagement_rate: r.ga4_sessions > 0 ? Number(r.ga4_engaged_sessions) / Number(r.ga4_sessions) : null,
   }));
+}
+
+// ── Part-group mapping CRUD ──────────────────────────────────────────
+
+const VALID_MATCH_TYPES = new Set(['campaign', 'query', 'url']);
+const VALID_MATCH_KINDS = new Set(['exact', 'contains', 'prefix']);
+
+function validateMappingFields({ part_group, match_type, match_kind, pattern }) {
+  if (!part_group || typeof part_group !== 'string' || !part_group.trim()) {
+    throw new Error('part_group is required');
+  }
+  if (!VALID_MATCH_TYPES.has(match_type)) {
+    throw new Error(`match_type must be one of: ${[...VALID_MATCH_TYPES].join(', ')}`);
+  }
+  if (!VALID_MATCH_KINDS.has(match_kind)) {
+    throw new Error(`match_kind must be one of: ${[...VALID_MATCH_KINDS].join(', ')}`);
+  }
+  if (!pattern || typeof pattern !== 'string' || !pattern.trim()) {
+    throw new Error('pattern is required');
+  }
+}
+
+export async function listPartGroupMappings() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT id, part_group, match_type, match_kind, pattern, notes,
+           created_at, updated_at
+    FROM part_group_mappings
+    ORDER BY part_group ASC, match_type ASC, pattern ASC
+  `);
+  return rows;
+}
+
+export async function createPartGroupMapping({ part_group, match_type, match_kind, pattern, notes = null }) {
+  validateMappingFields({ part_group, match_type, match_kind, pattern });
+  const p = getPool();
+  const { rows } = await p.query(`
+    INSERT INTO part_group_mappings (part_group, match_type, match_kind, pattern, notes)
+    VALUES ($1, $2, $3, $4, $5)
+    RETURNING id, part_group, match_type, match_kind, pattern, notes, created_at, updated_at
+  `, [part_group.trim(), match_type, match_kind, pattern.trim(), notes?.trim() || null]);
+  return rows[0];
+}
+
+export async function updatePartGroupMapping(id, { part_group, match_type, match_kind, pattern, notes }) {
+  validateMappingFields({ part_group, match_type, match_kind, pattern });
+  const p = getPool();
+  const { rows } = await p.query(`
+    UPDATE part_group_mappings
+    SET part_group = $2,
+        match_type = $3,
+        match_kind = $4,
+        pattern    = $5,
+        notes      = $6,
+        updated_at = NOW()
+    WHERE id = $1
+    RETURNING id, part_group, match_type, match_kind, pattern, notes, created_at, updated_at
+  `, [id, part_group.trim(), match_type, match_kind, pattern.trim(), notes?.trim() || null]);
+  if (rows.length === 0) throw new Error('Mapping not found');
+  return rows[0];
+}
+
+export async function deletePartGroupMapping(id) {
+  const p = getPool();
+  const { rowCount } = await p.query(`DELETE FROM part_group_mappings WHERE id = $1`, [id]);
+  return rowCount > 0;
 }

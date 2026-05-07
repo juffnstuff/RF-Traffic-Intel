@@ -276,7 +276,7 @@ export default function CrossSourcePage() {
         <CampaignRoiTable rows={campaigns} />
       </section>
 
-      <section>
+      <section style={{ marginBottom: 28 }}>
         <h3 style={{
           fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
           fontSize: 14,
@@ -288,6 +288,268 @@ export default function CrossSourcePage() {
         }}>Page Performance — GSC × GA4</h3>
         <PagePerformanceTable rows={pages} windowEnd={pageWindowEnd} />
       </section>
+
+      <PartGroupMappingsAdmin />
     </div>
+  );
+}
+
+// ─── Part-group mapping admin ───────────────────────────────────────
+//
+// Curated table linking campaign names / GSC queries / page URLs to a
+// part_group. Surfaces nothing on its own — a downstream attribution
+// view (TBD) will use these rules to roll up campaign spend, search
+// impressions, and page traffic to part-group level.
+
+const MATCH_TYPE_LABELS = {
+  campaign: 'Google Ads / GA4 campaign name',
+  query:    'GSC search query',
+  url:      'Page URL path',
+};
+
+const MATCH_KIND_LABELS = {
+  exact:    'exact match',
+  contains: 'contains substring',
+  prefix:   'starts with',
+};
+
+function PartGroupMappingsAdmin() {
+  const [mappings, setMappings] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [form, setForm] = useState({ part_group: '', match_type: 'campaign', match_kind: 'contains', pattern: '', notes: '' });
+
+  const reload = () => {
+    setLoading(true);
+    fetch('/api/mappings')
+      .then(r => r.json())
+      .then(d => setMappings(d.mappings || []))
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(reload, []);
+
+  const resetForm = () => {
+    setForm({ part_group: '', match_type: 'campaign', match_kind: 'contains', pattern: '', notes: '' });
+    setEditingId(null);
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    try {
+      const url = editingId ? `/api/mappings/${editingId}` : '/api/mappings';
+      const method = editingId ? 'PATCH' : 'POST';
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || `HTTP ${res.status}`);
+      }
+      resetForm();
+      reload();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const startEdit = (m) => {
+    setEditingId(m.id);
+    setForm({
+      part_group: m.part_group,
+      match_type: m.match_type,
+      match_kind: m.match_kind,
+      pattern: m.pattern,
+      notes: m.notes || '',
+    });
+  };
+
+  const remove = async (id) => {
+    if (!confirm('Delete this mapping?')) return;
+    setError(null);
+    try {
+      const res = await fetch(`/api/mappings/${id}`, { method: 'DELETE' });
+      if (!res.ok && res.status !== 204) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || `HTTP ${res.status}`);
+      }
+      if (editingId === id) resetForm();
+      reload();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const inputStyle = {
+    background: 'var(--dso-bg)',
+    color: 'var(--dso-text)',
+    border: '1px solid var(--dso-rule)',
+    borderRadius: 3,
+    padding: '6px 8px',
+    fontSize: 12,
+    fontFamily: 'inherit',
+  };
+
+  return (
+    <section>
+      <h3 style={{
+        fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+        fontSize: 14,
+        fontWeight: 600,
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        color: 'var(--dso-text-dim)',
+        marginBottom: 10,
+      }}>Part-Group Mappings</h3>
+      <div style={{
+        background: 'var(--dso-surface)',
+        borderRadius: 4,
+        padding: '14px 16px',
+        border: '1px solid var(--dso-rule)',
+      }}>
+        <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 12, lineHeight: 1.5 }}>
+          Curated rules linking campaign names, search queries, and page URLs to part groups.
+          Used for downstream attribution — pure config, fetchers don't write here.
+        </div>
+
+        <form onSubmit={submit} style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.4fr 1.2fr 2fr 1.5fr auto', gap: 8, marginBottom: 14, alignItems: 'end' }}>
+          <label style={{ fontSize: 10, color: 'var(--dso-text-dim)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+            Part Group
+            <input
+              required
+              type="text"
+              value={form.part_group}
+              onChange={e => setForm({ ...form, part_group: e.target.value })}
+              placeholder="Gaskets"
+              style={{ ...inputStyle, width: '100%', marginTop: 4 }}
+            />
+          </label>
+          <label style={{ fontSize: 10, color: 'var(--dso-text-dim)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+            Match Type
+            <select
+              value={form.match_type}
+              onChange={e => setForm({ ...form, match_type: e.target.value })}
+              style={{ ...inputStyle, width: '100%', marginTop: 4 }}
+            >
+              {Object.entries(MATCH_TYPE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          </label>
+          <label style={{ fontSize: 10, color: 'var(--dso-text-dim)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+            Match Kind
+            <select
+              value={form.match_kind}
+              onChange={e => setForm({ ...form, match_kind: e.target.value })}
+              style={{ ...inputStyle, width: '100%', marginTop: 4 }}
+            >
+              {Object.entries(MATCH_KIND_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          </label>
+          <label style={{ fontSize: 10, color: 'var(--dso-text-dim)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+            Pattern
+            <input
+              required
+              type="text"
+              value={form.pattern}
+              onChange={e => setForm({ ...form, pattern: e.target.value })}
+              placeholder="gasket / /products/gaskets / Gaskets_Search"
+              style={{ ...inputStyle, width: '100%', marginTop: 4 }}
+            />
+          </label>
+          <label style={{ fontSize: 10, color: 'var(--dso-text-dim)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+            Notes (optional)
+            <input
+              type="text"
+              value={form.notes}
+              onChange={e => setForm({ ...form, notes: e.target.value })}
+              style={{ ...inputStyle, width: '100%', marginTop: 4 }}
+            />
+          </label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button type="submit" style={{
+              background: 'var(--dso-accent-hot)',
+              color: 'white',
+              border: 'none',
+              padding: '7px 14px',
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+              cursor: 'pointer',
+              borderRadius: 3,
+            }}>{editingId ? 'Save' : 'Add'}</button>
+            {editingId && (
+              <button type="button" onClick={resetForm} style={{
+                background: 'transparent',
+                color: 'var(--dso-text-dim)',
+                border: '1px solid var(--dso-rule)',
+                padding: '7px 14px',
+                fontSize: 11,
+                cursor: 'pointer',
+                borderRadius: 3,
+              }}>Cancel</button>
+            )}
+          </div>
+        </form>
+
+        {error && <div style={{ color: '#f87171', fontSize: 12, marginBottom: 10 }}>Error: {error}</div>}
+        {loading && <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, marginBottom: 10 }}>Loading…</div>}
+
+        {mappings.length === 0 && !loading ? (
+          <div style={{ color: 'var(--dso-text-faint)', fontSize: 12, padding: '12px 0' }}>
+            No mappings yet. Add a row above to start linking campaigns / queries / pages to part groups.
+          </div>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
+            <thead>
+              <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+                <th style={{ padding: '8px 10px', fontWeight: 600 }}>Part Group</th>
+                <th style={{ padding: '8px 10px', fontWeight: 600 }}>Type</th>
+                <th style={{ padding: '8px 10px', fontWeight: 600 }}>Kind</th>
+                <th style={{ padding: '8px 10px', fontWeight: 600 }}>Pattern</th>
+                <th style={{ padding: '8px 10px', fontWeight: 600 }}>Notes</th>
+                <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mappings.map(m => (
+                <tr key={m.id} style={{ borderTop: '1px solid var(--dso-rule)', background: editingId === m.id ? 'var(--dso-bg)' : 'transparent' }}>
+                  <td style={{ padding: '8px 10px', fontWeight: 600 }}>{m.part_group}</td>
+                  <td style={{ padding: '8px 10px' }}>{m.match_type}</td>
+                  <td style={{ padding: '8px 10px' }}>{m.match_kind}</td>
+                  <td style={{ padding: '8px 10px', fontFamily: 'var(--dso-font-mono, monospace)' }}>{m.pattern}</td>
+                  <td style={{ padding: '8px 10px', color: 'var(--dso-text-dim)' }}>{m.notes || ''}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                    <button onClick={() => startEdit(m)} style={{
+                      background: 'transparent',
+                      border: '1px solid var(--dso-rule)',
+                      color: 'var(--dso-text-dim)',
+                      padding: '3px 8px',
+                      fontSize: 10,
+                      cursor: 'pointer',
+                      borderRadius: 3,
+                      marginRight: 4,
+                    }}>Edit</button>
+                    <button onClick={() => remove(m.id)} style={{
+                      background: 'transparent',
+                      border: '1px solid #b91c1c',
+                      color: '#f87171',
+                      padding: '3px 8px',
+                      fontSize: 10,
+                      cursor: 'pointer',
+                      borderRadius: 3,
+                    }}>Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </section>
   );
 }
