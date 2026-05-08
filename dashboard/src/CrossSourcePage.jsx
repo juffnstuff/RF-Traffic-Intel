@@ -15,14 +15,17 @@ function rangeCutoff(range, selectedYears) {
   return d.toISOString().slice(0, 10);
 }
 
-function VisibilityBadge({ inAds, inGa4 }) {
-  // Visual diagnostic for tagging health: a campaign in Ads but not GA4
-  // means UTM/auto-tagging isn't reaching analytics. The reverse means
-  // GA4 is seeing a UTM that has no live spend (likely organic UTM or
-  // legacy campaign).
-  if (inAds && inGa4) return null;
-  const label = inAds ? 'Ads only' : 'GA4 only';
-  const color = inAds ? '#f59e0b' : '#94a3b8';
+function VisibilityBadge({ inAds, inGa4, inCallRail }) {
+  // Visual diagnostic for tagging health. Show a chip only when a row
+  // appears in just one source — that's the actionable case. Two-of-
+  // three is common (e.g. an organic UTM with calls but no spend).
+  const present = [inAds, inGa4, inCallRail].filter(Boolean).length;
+  if (present >= 2) return null;
+  let label, color;
+  if (inAds)           { label = 'Ads only';   color = '#f59e0b'; }
+  else if (inGa4)      { label = 'GA4 only';   color = '#94a3b8'; }
+  else if (inCallRail) { label = 'Calls only'; color = '#a78bfa'; }
+  else return null;
   return (
     <span style={{
       fontSize: 9,
@@ -48,10 +51,16 @@ function CampaignRoiTable({ rows }) {
     acc.ga4_sessions += r.ga4_sessions;
     acc.ga4_conversions += r.ga4_conversions;
     acc.ga4_revenue += r.ga4_revenue;
+    acc.cr_calls    += r.cr_calls    || 0;
+    acc.cr_answered += r.cr_answered || 0;
     return acc;
-  }, { cost: 0, ad_clicks: 0, ad_impressions: 0, ga4_sessions: 0, ga4_conversions: 0, ga4_revenue: 0 });
+  }, { cost: 0, ad_clicks: 0, ad_impressions: 0, ga4_sessions: 0,
+       ga4_conversions: 0, ga4_revenue: 0, cr_calls: 0, cr_answered: 0 });
   const totalRoas = totals.cost > 0 ? totals.ga4_revenue / totals.cost : null;
   const totalCpa = totals.ga4_conversions > 0 ? totals.cost / totals.ga4_conversions : null;
+  const totalCostPerCall = totals.cr_calls > 0 ? totals.cost / totals.cr_calls : null;
+  const totalAnsweredRate = totals.cr_calls > 0 ? totals.cr_answered / totals.cr_calls : null;
+  const anyCalls = totals.cr_calls > 0;
   return (
     <div style={{
       background: 'var(--dso-surface)',
@@ -66,11 +75,13 @@ function CampaignRoiTable({ rows }) {
             <th style={{ padding: '8px 10px', fontWeight: 600 }}>Campaign</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Cost</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Ad Clicks</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Impr.</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>GA4 Sessions</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Sess/Click</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>GA4 Conv.</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>GA4 Revenue</th>
+            {anyCalls && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', borderLeft: '1px solid var(--dso-rule)', color: '#a78bfa' }}>Calls</th>}
+            {anyCalls && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', color: '#a78bfa' }}>Answered</th>}
+            {anyCalls && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', color: '#a78bfa' }}>$/Call</th>}
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>CPA</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>ROAS</th>
           </tr>
@@ -80,15 +91,17 @@ function CampaignRoiTable({ rows }) {
             <tr key={r.campaign_name + i} style={{ borderTop: '1px solid var(--dso-rule)' }}>
               <td style={{ padding: '8px 10px', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.campaign_name}>
                 {r.campaign_name || <span style={{ color: 'var(--dso-text-faint)' }}>(unnamed)</span>}
-                <VisibilityBadge inAds={r.in_ads} inGa4={r.in_ga4} />
+                <VisibilityBadge inAds={r.in_ads} inGa4={r.in_ga4} inCallRail={r.in_callrail} />
               </td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.cost)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.ad_clicks)}</td>
-              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.ad_impressions)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.ga4_sessions)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.sessions_per_click != null ? fmtRatio(r.sessions_per_click) : '—'}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.ga4_conversions)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.ga4_revenue)}</td>
+              {anyCalls && <td style={{ padding: '8px 10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{fmtNum(r.cr_calls)}</td>}
+              {anyCalls && <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.answered_rate != null ? `${fmtNum(r.cr_answered)} (${fmtPct(r.answered_rate)})` : '—'}</td>}
+              {anyCalls && <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.cost_per_call != null ? fmtMoney(r.cost_per_call) : '—'}</td>}
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.cost_per_ga4_conv != null ? fmtMoney(r.cost_per_ga4_conv) : '—'}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{r.roas != null ? fmtRatio(r.roas) : '—'}</td>
             </tr>
@@ -99,11 +112,13 @@ function CampaignRoiTable({ rows }) {
             <td style={{ padding: '10px', color: 'var(--dso-text-dim)', fontSize: 11, letterSpacing: '0.12em', textTransform: 'uppercase' }}>Total</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.cost)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.ad_clicks)}</td>
-            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.ad_impressions)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.ga4_sessions)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>—</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.ga4_conversions)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.ga4_revenue)}</td>
+            {anyCalls && <td style={{ padding: '10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{fmtNum(totals.cr_calls)}</td>}
+            {anyCalls && <td style={{ padding: '10px', textAlign: 'right' }}>{totalAnsweredRate != null ? `${fmtNum(totals.cr_answered)} (${fmtPct(totalAnsweredRate)})` : '—'}</td>}
+            {anyCalls && <td style={{ padding: '10px', textAlign: 'right' }}>{totalCostPerCall != null ? fmtMoney(totalCostPerCall) : '—'}</td>}
             <td style={{ padding: '10px', textAlign: 'right' }}>{totalCpa != null ? fmtMoney(totalCpa) : '—'}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{totalRoas != null ? fmtRatio(totalRoas) : '—'}</td>
           </tr>

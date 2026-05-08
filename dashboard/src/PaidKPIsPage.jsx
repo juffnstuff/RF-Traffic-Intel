@@ -102,6 +102,9 @@ export default function PaidKPIsPage() {
   const [hsDealsWindow, setHsDealsWindow] = useState(null);
   const [ga4Channels, setGa4Channels] = useState(null);
   const [ga4Agg, setGa4Agg] = useState(null);
+  // CallRail daily totals (calls / answered / duration / value). Optional —
+  // page renders fine if CallRail isn't wired yet.
+  const [crDaily, setCrDaily] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -112,12 +115,14 @@ export default function PaidKPIsPage() {
       fetch('/api/hubspot-deals-daily').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/ga4-channels-daily').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/ga4').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/callrail-daily').then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([g, h, c, a]) => {
+      .then(([g, h, c, a, cr]) => {
         setGads(g);
         setHsDealsDaily(h);
         setGa4Channels(c);
         setGa4Agg(a);
+        setCrDaily(cr);
         if (!g || (g.daily || []).length === 0) {
           setError('No Google Ads data yet. Add GOOGLE_ADS_* credentials and run a Google Ads fetch.');
         } else {
@@ -224,6 +229,24 @@ export default function PaidKPIsPage() {
     return fullSeries.filter(d => inRange(d, cutoff, selectedYears));
   }, [fullSeries, cutoff, selectedYears]);
 
+  // CallRail totals over the same date window. Independent of chartData
+  // — CallRail rows aren't merged into the chart series — so this is its
+  // own filter pass against crDaily.daily.
+  const crKpi = useMemo(() => {
+    const rows = crDaily?.daily || [];
+    if (!rows.length) return null;
+    const inWin = rows.filter(r => inRange({ date: r.date }, cutoff, selectedYears));
+    if (inWin.length === 0) return { calls: 0, answered: 0, value: 0, durationMin: 0 };
+    const sum = (f) => inWin.reduce((s, r) => s + (Number(r[f]) || 0), 0);
+    return {
+      calls: sum('calls'),
+      answered: sum('answered'),
+      firstCalls: sum('first_calls'),
+      durationMin: Math.round(sum('duration_seconds') / 60),
+      value: sum('value_sum'),
+    };
+  }, [crDaily, cutoff, selectedYears]);
+
   const kpi = useMemo(() => {
     if (chartData.length === 0) return null;
     const sum = (f) => chartData.reduce((s, r) => s + (r[f] || 0), 0);
@@ -234,16 +257,22 @@ export default function PaidKPIsPage() {
     const paidSessions = sum('paidSessions');
     const hsDeals = sum('hsDeals');
     const hsRevenue = sum('hsRevenue');
+    const calls = crKpi?.calls || 0;
     return {
       cost, clicks, impressions, gadsConv, paidSessions, hsDeals, hsRevenue,
+      calls,
+      answered: crKpi?.answered || 0,
+      callDurationMin: crKpi?.durationMin || 0,
       ctr: impressions > 0 ? clicks / impressions : null,
       avgCpc: clicks > 0 ? cost / clicks : null,
       costPerSession: paidSessions > 0 ? cost / paidSessions : null,
+      costPerCall: calls > 0 ? cost / calls : null,
+      answeredRate: calls > 0 ? (crKpi?.answered || 0) / calls : null,
       cpa: hsDeals > 0 ? cost / hsDeals : null,
       cpaGa4: gadsConv > 0 ? cost / gadsConv : null,
       roas: cost > 0 ? hsRevenue / cost : null,
     };
-  }, [chartData]);
+  }, [chartData, crKpi]);
 
   // Deal counts by campaign — joins GAds campaign_name (and deal's
   // source_data_1 / campaign_guid) so the campaign table can show a deals
@@ -336,6 +365,13 @@ export default function PaidKPIsPage() {
             <StatCard label="CPA" value={kpi.cpa != null ? fmtMoney(kpi.cpa) : '—'} sub="cost / HubSpot deals" />
             <StatCard label="ROAS" value={kpi.roas != null ? fmtRatio(kpi.roas) : '—'} sub="revenue / cost" />
             <StatCard label="CPA (GAds conv.)" value={kpi.cpaGa4 != null ? fmtMoney(kpi.cpaGa4) : '—'} sub="cost / GAds conversions" />
+            {kpi.calls > 0 && (
+              <>
+                <StatCard label="Calls" value={fmtNum(kpi.calls)} sub="CallRail, in range" />
+                <StatCard label="Answered" value={kpi.answeredRate != null ? `${fmtNum(kpi.answered)} (${fmtPct(kpi.answeredRate)})` : '—'} sub="CallRail" />
+                <StatCard label="Cost / call" value={kpi.costPerCall != null ? fmtMoney(kpi.costPerCall) : '—'} sub="cost / CallRail calls" />
+              </>
+            )}
           </div>
         )}
 

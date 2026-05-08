@@ -2086,10 +2086,10 @@ export async function upsertCruxDailyByPage(rows) {
 // (b) GA4 campaigns with no spend (organic UTM, manual tagging).
 export async function getCampaignRoi({ since = null, until = null } = {}) {
   const p = getPool();
-  // Both CTEs filter by date independently; each gets its own $-placeholders
-  // even though the values are the same. dateFilter pushes into the shared
-  // params array as it builds each WHERE clause, so positional indices stay
-  // monotonic across the two CTEs.
+  // Each CTE filters by date independently; each gets its own $-placeholders
+  // even though the values are the same. The ads/ga4 CTEs filter on a date
+  // column; CallRail filters on start_time (timestamptz) so it gets a
+  // separate helper.
   const params = [];
   const dateFilter = (alias) => {
     const conds = [];
@@ -2097,8 +2097,21 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
     if (until) { params.push(until); conds.push(`${alias}.date <= $${params.length}::date`); }
     return conds.length ? 'WHERE ' + conds.join(' AND ') : '';
   };
+  const tsFilter = (alias) => {
+    const conds = [];
+    if (since) { params.push(since); conds.push(`${alias}.start_time >= $${params.length}::date`); }
+    // until is treated inclusive of the entire day — < (until + 1 day).
+    if (until) { params.push(until); conds.push(`${alias}.start_time <  $${params.length}::date + INTERVAL '1 day'`); }
+    return conds;
+  };
   const adsWhere = dateFilter('a');
   const ga4Where = dateFilter('g');
+  const crConds = tsFilter('c');
+  // CallRail join key: prefer raw utm_campaign, fall back to CallRail's
+  // normalized `campaign`. Excludes calls with no campaign attribution
+  // so they don't pollute the per-campaign rollup.
+  crConds.push(`COALESCE(NULLIF(c.utm_campaign, ''), NULLIF(c.campaign, '')) IS NOT NULL`);
+  const crWhere = 'WHERE ' + crConds.join(' AND ');
   const sql = `
     WITH ads AS (
       SELECT
@@ -2123,9 +2136,29 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
       FROM ga4_daily_by_campaign g
       ${ga4Where}
       GROUP BY campaign_name
+    ),
+    callrail AS (
+      SELECT
+        COALESCE(NULLIF(c.utm_campaign, ''), NULLIF(c.campaign, '')) as campaign_name,
+        COUNT(*)::int                                                as cr_calls,
+        SUM(CASE WHEN c.answered THEN 1 ELSE 0 END)::int             as cr_answered,
+        SUM(CASE WHEN c.first_call THEN 1 ELSE 0 END)::int           as cr_first_calls,
+        SUM(COALESCE(c.duration, 0))::int                            as cr_duration_seconds,
+        SUM(COALESCE(c.value, 0))::float                             as cr_value,
+        SUM(CASE WHEN c.lead_status = 'good_lead' THEN 1 ELSE 0 END)::int as cr_good_leads
+      FROM callrail_calls c
+      ${crWhere}
+      GROUP BY 1
+    ),
+    names AS (
+      SELECT campaign_name FROM ads      WHERE campaign_name IS NOT NULL
+      UNION
+      SELECT campaign_name FROM ga4      WHERE campaign_name IS NOT NULL
+      UNION
+      SELECT campaign_name FROM callrail WHERE campaign_name IS NOT NULL
     )
     SELECT
-      COALESCE(a.campaign_name, g.campaign_name) as campaign_name,
+      n.campaign_name,
       COALESCE(a.cost, 0)                 as cost,
       COALESCE(a.ad_clicks, 0)            as ad_clicks,
       COALESCE(a.ad_impressions, 0)       as ad_impressions,
@@ -2136,11 +2169,20 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
       COALESCE(g.ga4_users, 0)            as ga4_users,
       COALESCE(g.ga4_conversions, 0)      as ga4_conversions,
       COALESCE(g.ga4_revenue, 0)          as ga4_revenue,
+      COALESCE(c.cr_calls, 0)             as cr_calls,
+      COALESCE(c.cr_answered, 0)          as cr_answered,
+      COALESCE(c.cr_first_calls, 0)       as cr_first_calls,
+      COALESCE(c.cr_duration_seconds, 0)  as cr_duration_seconds,
+      COALESCE(c.cr_value, 0)             as cr_value,
+      COALESCE(c.cr_good_leads, 0)        as cr_good_leads,
       (a.campaign_name IS NOT NULL)       as in_ads,
-      (g.campaign_name IS NOT NULL)       as in_ga4
-    FROM ads a
-    FULL OUTER JOIN ga4 g ON a.campaign_name = g.campaign_name
-    ORDER BY COALESCE(a.cost, 0) DESC, COALESCE(g.ga4_sessions, 0) DESC
+      (g.campaign_name IS NOT NULL)       as in_ga4,
+      (c.campaign_name IS NOT NULL)       as in_callrail
+    FROM names n
+    LEFT JOIN ads      a ON a.campaign_name = n.campaign_name
+    LEFT JOIN ga4      g ON g.campaign_name = n.campaign_name
+    LEFT JOIN callrail c ON c.campaign_name = n.campaign_name
+    ORDER BY COALESCE(a.cost, 0) DESC, COALESCE(g.ga4_sessions, 0) DESC, COALESCE(c.cr_calls, 0) DESC
   `;
   const { rows } = await p.query(sql, params);
   return rows.map(r => ({
@@ -2155,13 +2197,23 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
     ga4_users: Number(r.ga4_users),
     ga4_conversions: Number(r.ga4_conversions),
     ga4_revenue: Number(r.ga4_revenue),
+    cr_calls: Number(r.cr_calls),
+    cr_answered: Number(r.cr_answered),
+    cr_first_calls: Number(r.cr_first_calls),
+    cr_duration_seconds: Number(r.cr_duration_seconds),
+    cr_value: Number(r.cr_value),
+    cr_good_leads: Number(r.cr_good_leads),
     in_ads: r.in_ads,
     in_ga4: r.in_ga4,
+    in_callrail: r.in_callrail,
     // Derived metrics — null when denominator is zero so the UI shows "—".
     ctr: r.ad_impressions > 0 ? r.ad_clicks / r.ad_impressions : null,
     avg_cpc: r.ad_clicks > 0 ? r.cost / r.ad_clicks : null,
     cost_per_session: r.ga4_sessions > 0 ? r.cost / r.ga4_sessions : null,
     cost_per_ga4_conv: r.ga4_conversions > 0 ? r.cost / r.ga4_conversions : null,
+    cost_per_call: r.cr_calls > 0 ? r.cost / r.cr_calls : null,
+    cost_per_answered: r.cr_answered > 0 ? r.cost / r.cr_answered : null,
+    answered_rate: r.cr_calls > 0 ? r.cr_answered / r.cr_calls : null,
     roas: r.cost > 0 ? r.ga4_revenue / r.cost : null,
     sessions_per_click: r.ad_clicks > 0 ? r.ga4_sessions / r.ad_clicks : null,
   }));
