@@ -1153,10 +1153,9 @@ export default function DashboardView({
                   <DMALineChart title="Conversions DMA" data={chartData}
                     fieldRaw="conversions" field30="conv30" field90="conv90" formatter={fmtNum} showDaily={showDaily} />
                 </div>
-                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
                   <DMALineChart title="Pageviews DMA" data={chartData}
                     fieldRaw="pageviews" field30="pv30" field90="pv90" formatter={fmtNum} showDaily={showDaily} />
-                  <div style={{ flex: '1 1 480px', minWidth: 0 }} />
                 </div>
               </>
             )}
