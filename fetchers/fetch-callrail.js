@@ -124,25 +124,28 @@ const CALL_FIELDS = [
   'keywords_spotted', 'agent_email', 'prior_calls',
 ].join(',');
 
+// Form submissions accept a much smaller fields= allowlist than calls —
+// no utm_*, no click IDs, no tracker_id. Per CallRail's own validation
+// error, valid form fields include id, company_id, person_id, form_data,
+// form_url, landing_page_url, referrer, referring_url, submitted_at,
+// first_form, customer_*, formatted_*, source, keywords, campaign,
+// medium, lead_status, note. We list explicitly so a future schema
+// change won't silently drop fields we need.
 const FORM_FIELDS = [
-  'submitted_at', 'form_url', 'landing_page_url', 'referrer', 'form_data',
-  'company_id', 'tracker_id', 'source', 'campaign', 'medium', 'keywords',
-  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
-  'gclid', 'fbclid', 'msclkid', 'lead_status',
+  'submitted_at', 'form_url', 'landing_page_url', 'referrer', 'referring_url',
+  'form_data', 'company_id', 'source', 'campaign', 'medium', 'keywords',
+  'lead_status', 'first_form', 'customer_phone_number', 'customer_name',
+  'customer_email', 'note',
 ].join(',');
 
-const TEXT_FIELDS = [
-  'customer_phone_number', 'tracking_phone_number', 'customer_name',
-  'initial_response', 'state', 'last_message_time', 'lead_status',
-  'company_id', 'tracker_id', 'source', 'campaign', 'medium',
-].join(',');
-
-const TRACKER_FIELDS = [
-  'name', 'type', 'status', 'source', 'source_name', 'destination_number',
-  'tracking_numbers', 'company_id', 'campaign_name',
-].join(',');
-
-const COMPANY_FIELDS = ['name', 'status', 'time_zone', 'created_at'].join(',');
+// text-messages, trackers, and companies don't document a stable fields=
+// allowlist. We omit the param entirely and let CallRail return its
+// default set — the normalizers tolerate missing fields by defaulting
+// to null. If a specific field we need ends up missing, surface it
+// here.
+const TEXT_FIELDS = null;
+const TRACKER_FIELDS = null;
+const COMPANY_FIELDS = null;
 
 // ── Normalizers (API payload → DB row) ──────────────────────────────
 
@@ -294,49 +297,75 @@ export async function fetchCallRail({ since = null } = {}) {
   if (startDateParam) console.log(`    incremental since ${startDateParam}`);
   else                console.log(`    full pull (no start_date filter)`);
 
+  // Each resource runs in its own try/catch — CallRail validates fields=
+  // per-endpoint and a 4xx on one resource shouldn't abort the rest.
+  // Add-on-gated endpoints (e.g. text-messages without SMS) return 403/404
+  // and skip silently.
+  const fetchOne = async (label, fn) => {
+    try {
+      return await fn();
+    } catch (e) {
+      if (e.status === 403 || e.status === 404) {
+        console.log(`    skipped (HTTP ${e.status}) — ${label} not enabled on this account`);
+      } else {
+        console.error(`    ⚠️  ${label} fetch failed: ${e.message}`);
+      }
+      return [];
+    }
+  };
+
+  // Build the params object, only including fields= when the caller has
+  // a curated allowlist for this endpoint.
+  const withFields = (fields, extra = {}) => ({
+    ...extra,
+    ...(fields ? { fields } : {}),
+  });
+
   console.log('  → calls…');
-  const rawCalls = await fetchPaginated(accountId, 'calls.json', 'calls',
-    { fields: CALL_FIELDS, sorting: 'start_time', order: 'asc',
-      ...(startDateParam ? { start_date: startDateParam } : {}) },
-    'calls');
+  const rawCalls = await fetchOne('calls', () => fetchPaginated(
+    accountId, 'calls.json', 'calls',
+    withFields(CALL_FIELDS, {
+      sorting: 'start_time', order: 'asc',
+      ...(startDateParam ? { start_date: startDateParam } : {}),
+    }),
+    'calls'));
   const calls = rawCalls.map(normalizeCall);
   console.log(`    ${calls.length} calls`);
 
   console.log('  → form submissions…');
-  const rawForms = await fetchPaginated(accountId, 'form_submissions.json', 'form_submissions',
-    { fields: FORM_FIELDS, sorting: 'submitted_at', order: 'asc',
-      ...(startDateParam ? { start_date: startDateParam } : {}) },
-    'forms');
+  const rawForms = await fetchOne('form_submissions', () => fetchPaginated(
+    accountId, 'form_submissions.json', 'form_submissions',
+    withFields(FORM_FIELDS, {
+      sorting: 'submitted_at', order: 'asc',
+      ...(startDateParam ? { start_date: startDateParam } : {}),
+    }),
+    'forms'));
   const forms = rawForms.map(normalizeForm);
   console.log(`    ${forms.length} form submissions`);
 
   console.log('  → text messages…');
   // text-messages.json doesn't accept start_date — pull current page set
   // and let the upsert dedupe by id. Conversations are long-lived.
-  const rawTexts = await fetchPaginated(accountId, 'text-messages.json', 'text_messages',
-    { fields: TEXT_FIELDS },
-    'texts').catch(e => {
-      // text-messages requires the SMS add-on; 403 for accounts without it.
-      if (e.status === 403 || e.status === 404) {
-        console.log(`    skipped (HTTP ${e.status}) — text messaging not enabled on this account`);
-        return [];
-      }
-      throw e;
-    });
+  const rawTexts = await fetchOne('text_messages', () => fetchPaginated(
+    accountId, 'text-messages.json', 'text_messages',
+    withFields(TEXT_FIELDS),
+    'texts'));
   const texts = rawTexts.map(normalizeText);
   console.log(`    ${texts.length} text-message conversations`);
 
   console.log('  → trackers…');
-  const rawTrackers = await fetchPaginated(accountId, 'trackers.json', 'trackers',
-    { fields: TRACKER_FIELDS },
-    'trackers');
+  const rawTrackers = await fetchOne('trackers', () => fetchPaginated(
+    accountId, 'trackers.json', 'trackers',
+    withFields(TRACKER_FIELDS),
+    'trackers'));
   const trackers = rawTrackers.map(normalizeTracker);
   console.log(`    ${trackers.length} trackers`);
 
   console.log('  → companies…');
-  const rawCompanies = await fetchPaginated(accountId, 'companies.json', 'companies',
-    { fields: COMPANY_FIELDS },
-    'companies');
+  const rawCompanies = await fetchOne('companies', () => fetchPaginated(
+    accountId, 'companies.json', 'companies',
+    withFields(COMPANY_FIELDS),
+    'companies'));
   const companies = rawCompanies.map(normalizeCompany);
   console.log(`    ${companies.length} companies`);
 
