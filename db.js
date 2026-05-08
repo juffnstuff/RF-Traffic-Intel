@@ -457,6 +457,162 @@ export async function initDB() {
   await p.query(`CREATE INDEX IF NOT EXISTS idx_pgm_partgroup ON part_group_mappings(part_group)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_pgm_type ON part_group_mappings(match_type)`);
 
+  // ── CallRail ─────────────────────────────────────────────────────
+  // Per-call rows (one row = one phone call). Attribution columns mirror
+  // GA4/Ads tagging so we can join: utm_campaign → ga4_daily_by_campaign
+  // and google_ads_daily_by_campaign; gclid → direct Ads click match;
+  // landing_page_url → ga4_daily_by_landing_page.
+  // raw JSONB preserves the full API payload so we can add fields later
+  // without a migration.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS callrail_calls (
+      id TEXT PRIMARY KEY,
+      start_time TIMESTAMPTZ NOT NULL,
+      customer_phone_number TEXT,
+      customer_name TEXT,
+      customer_city TEXT,
+      customer_state TEXT,
+      customer_country TEXT,
+      tracking_phone_number TEXT,
+      business_phone_number TEXT,
+      duration INTEGER,
+      answered BOOLEAN,
+      voicemail BOOLEAN,
+      direction TEXT,
+      call_type TEXT,
+      lead_status TEXT,
+      value NUMERIC(15,2),
+      first_call BOOLEAN,
+      total_calls INTEGER,
+      prior_calls INTEGER,
+      agent_email TEXT,
+      device_type TEXT,
+      tracker_id TEXT,
+      company_id TEXT,
+      company_name TEXT,
+      source TEXT,
+      source_name TEXT,
+      campaign TEXT,
+      medium TEXT,
+      keywords TEXT,
+      referring_url TEXT,
+      landing_page_url TEXT,
+      last_requested_url TEXT,
+      referrer_domain TEXT,
+      utm_source TEXT,
+      utm_medium TEXT,
+      utm_campaign TEXT,
+      utm_term TEXT,
+      utm_content TEXT,
+      gclid TEXT,
+      fbclid TEXT,
+      msclkid TEXT,
+      ga_client_id TEXT,
+      recording TEXT,
+      recording_duration INTEGER,
+      tags JSONB,
+      keywords_spotted JSONB,
+      raw JSONB,
+      fetched_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_callrail_calls_start ON callrail_calls(start_time)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_callrail_calls_utm_campaign ON callrail_calls(utm_campaign)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_callrail_calls_campaign ON callrail_calls(campaign)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_callrail_calls_gclid ON callrail_calls(gclid) WHERE gclid IS NOT NULL`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_callrail_calls_landing ON callrail_calls(landing_page_url)`);
+
+  // Form submissions captured by CallRail tracking pixel — same shape as
+  // calls minus call-specific fields, plus form_data.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS callrail_form_submissions (
+      id TEXT PRIMARY KEY,
+      submitted_at TIMESTAMPTZ NOT NULL,
+      form_url TEXT,
+      landing_page_url TEXT,
+      referrer TEXT,
+      form_data JSONB,
+      customer_name TEXT,
+      customer_email TEXT,
+      customer_phone_number TEXT,
+      source TEXT,
+      campaign TEXT,
+      medium TEXT,
+      keywords TEXT,
+      utm_source TEXT,
+      utm_medium TEXT,
+      utm_campaign TEXT,
+      utm_term TEXT,
+      utm_content TEXT,
+      gclid TEXT,
+      fbclid TEXT,
+      msclkid TEXT,
+      company_id TEXT,
+      tracker_id TEXT,
+      lead_status TEXT,
+      raw JSONB,
+      fetched_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_callrail_forms_submitted ON callrail_form_submissions(submitted_at)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_callrail_forms_utm_campaign ON callrail_form_submissions(utm_campaign)`);
+
+  // Text-message conversations on tracking numbers. CallRail returns one
+  // row per conversation (the message body lives in raw.messages[]).
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS callrail_text_messages (
+      id TEXT PRIMARY KEY,
+      customer_phone_number TEXT,
+      tracking_phone_number TEXT,
+      customer_name TEXT,
+      initial_response TEXT,
+      state TEXT,
+      last_message_time TIMESTAMPTZ,
+      lead_status TEXT,
+      company_id TEXT,
+      tracker_id TEXT,
+      source TEXT,
+      campaign TEXT,
+      medium TEXT,
+      raw JSONB,
+      fetched_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_callrail_texts_last ON callrail_text_messages(last_message_time)`);
+
+  // Tracker config — which tracking number routes which campaign/source.
+  // Rarely changes; rebuilt fresh each fetch (DELETE + INSERT).
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS callrail_trackers (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      type TEXT,
+      status TEXT,
+      source TEXT,
+      source_name TEXT,
+      destination_number TEXT,
+      tracking_numbers JSONB,
+      company_id TEXT,
+      campaign_name TEXT,
+      raw JSONB,
+      fetched_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Companies — the org tier in CallRail. Single-business installs have
+  // exactly one row; agencies have many. Used for filtering downstream.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS callrail_companies (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      status TEXT,
+      time_zone TEXT,
+      created_at_callrail TIMESTAMPTZ,
+      raw JSONB,
+      fetched_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   console.log('✅  Database tables ready');
 }
 
@@ -2146,4 +2302,318 @@ export async function deletePartGroupMapping(id) {
   const p = getPool();
   const { rowCount } = await p.query(`DELETE FROM part_group_mappings WHERE id = $1`, [id]);
   return rowCount > 0;
+}
+
+// ── CallRail helpers ─────────────────────────────────────────────────
+
+// Upsert a batch of call rows. Each row is the normalized object the
+// fetcher produces (NOT the raw API payload). Conflicts on id are
+// updated in place — CallRail mutates lead_status, value, tags, and
+// recording metadata after the fact when a user reviews the call.
+export async function upsertCallRailCalls(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    let n = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO callrail_calls (
+          id, start_time, customer_phone_number, customer_name, customer_city,
+          customer_state, customer_country, tracking_phone_number, business_phone_number,
+          duration, answered, voicemail, direction, call_type, lead_status, value,
+          first_call, total_calls, prior_calls, agent_email, device_type,
+          tracker_id, company_id, company_name,
+          source, source_name, campaign, medium, keywords,
+          referring_url, landing_page_url, last_requested_url, referrer_domain,
+          utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+          gclid, fbclid, msclkid, ga_client_id,
+          recording, recording_duration, tags, keywords_spotted, raw, fetched_at
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+          $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+          $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,
+          $31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
+          $41,$42,$43,$44,$45,$46,$47,NOW()
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          start_time            = EXCLUDED.start_time,
+          duration              = EXCLUDED.duration,
+          answered              = EXCLUDED.answered,
+          voicemail             = EXCLUDED.voicemail,
+          lead_status           = EXCLUDED.lead_status,
+          value                 = EXCLUDED.value,
+          total_calls           = EXCLUDED.total_calls,
+          tags                  = EXCLUDED.tags,
+          keywords_spotted      = EXCLUDED.keywords_spotted,
+          recording             = EXCLUDED.recording,
+          recording_duration    = EXCLUDED.recording_duration,
+          raw                   = EXCLUDED.raw,
+          fetched_at            = NOW()
+      `, [
+        r.id, r.start_time, r.customer_phone_number, r.customer_name, r.customer_city,
+        r.customer_state, r.customer_country, r.tracking_phone_number, r.business_phone_number,
+        r.duration, r.answered, r.voicemail, r.direction, r.call_type, r.lead_status, r.value,
+        r.first_call, r.total_calls, r.prior_calls, r.agent_email, r.device_type,
+        r.tracker_id, r.company_id, r.company_name,
+        r.source, r.source_name, r.campaign, r.medium, r.keywords,
+        r.referring_url, r.landing_page_url, r.last_requested_url, r.referrer_domain,
+        r.utm_source, r.utm_medium, r.utm_campaign, r.utm_term, r.utm_content,
+        r.gclid, r.fbclid, r.msclkid, r.ga_client_id,
+        r.recording, r.recording_duration,
+        r.tags ? JSON.stringify(r.tags) : null,
+        r.keywords_spotted ? JSON.stringify(r.keywords_spotted) : null,
+        r.raw ? JSON.stringify(r.raw) : null,
+      ]);
+      n++;
+    }
+    await client.query('COMMIT');
+    return n;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function upsertCallRailFormSubmissions(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    let n = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO callrail_form_submissions (
+          id, submitted_at, form_url, landing_page_url, referrer, form_data,
+          customer_name, customer_email, customer_phone_number,
+          source, campaign, medium, keywords,
+          utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+          gclid, fbclid, msclkid, company_id, tracker_id, lead_status, raw, fetched_at
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+          $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+          $21,$22,$23,$24,$25,NOW()
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          submitted_at = EXCLUDED.submitted_at,
+          form_data    = EXCLUDED.form_data,
+          lead_status  = EXCLUDED.lead_status,
+          raw          = EXCLUDED.raw,
+          fetched_at   = NOW()
+      `, [
+        r.id, r.submitted_at, r.form_url, r.landing_page_url, r.referrer,
+        r.form_data ? JSON.stringify(r.form_data) : null,
+        r.customer_name, r.customer_email, r.customer_phone_number,
+        r.source, r.campaign, r.medium, r.keywords,
+        r.utm_source, r.utm_medium, r.utm_campaign, r.utm_term, r.utm_content,
+        r.gclid, r.fbclid, r.msclkid, r.company_id, r.tracker_id, r.lead_status,
+        r.raw ? JSON.stringify(r.raw) : null,
+      ]);
+      n++;
+    }
+    await client.query('COMMIT');
+    return n;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function upsertCallRailTextMessages(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    let n = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO callrail_text_messages (
+          id, customer_phone_number, tracking_phone_number, customer_name,
+          initial_response, state, last_message_time, lead_status,
+          company_id, tracker_id, source, campaign, medium, raw, fetched_at
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW()
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          state             = EXCLUDED.state,
+          last_message_time = EXCLUDED.last_message_time,
+          lead_status       = EXCLUDED.lead_status,
+          raw               = EXCLUDED.raw,
+          fetched_at        = NOW()
+      `, [
+        r.id, r.customer_phone_number, r.tracking_phone_number, r.customer_name,
+        r.initial_response, r.state, r.last_message_time, r.lead_status,
+        r.company_id, r.tracker_id, r.source, r.campaign, r.medium,
+        r.raw ? JSON.stringify(r.raw) : null,
+      ]);
+      n++;
+    }
+    await client.query('COMMIT');
+    return n;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// Trackers + companies are config — small, mostly static. Replace whole
+// table on each fetch so deletions on the CallRail side propagate.
+export async function replaceCallRailTrackers(rows) {
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM callrail_trackers');
+    let n = 0;
+    for (const r of rows || []) {
+      await client.query(`
+        INSERT INTO callrail_trackers (
+          id, name, type, status, source, source_name, destination_number,
+          tracking_numbers, company_id, campaign_name, raw, fetched_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+      `, [
+        r.id, r.name, r.type, r.status, r.source, r.source_name, r.destination_number,
+        r.tracking_numbers ? JSON.stringify(r.tracking_numbers) : null,
+        r.company_id, r.campaign_name,
+        r.raw ? JSON.stringify(r.raw) : null,
+      ]);
+      n++;
+    }
+    await client.query('COMMIT');
+    return n;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function replaceCallRailCompanies(rows) {
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM callrail_companies');
+    let n = 0;
+    for (const r of rows || []) {
+      await client.query(`
+        INSERT INTO callrail_companies (id, name, status, time_zone, created_at_callrail, raw, fetched_at)
+        VALUES ($1,$2,$3,$4,$5,$6,NOW())
+      `, [r.id, r.name, r.status, r.time_zone, r.created_at_callrail,
+          r.raw ? JSON.stringify(r.raw) : null]);
+      n++;
+    }
+    await client.query('COMMIT');
+    return n;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// Last-seen call timestamp — used by the fetcher for incremental pulls.
+export async function getCallRailMaxStartTime() {
+  const p = getPool();
+  const { rows } = await p.query(`SELECT MAX(start_time) AS max FROM callrail_calls`);
+  return rows[0]?.max || null;
+}
+
+export async function getCallRailRowCount() {
+  const p = getPool();
+  const { rows } = await p.query(`SELECT COUNT(*)::int AS cnt FROM callrail_calls`);
+  return rows[0]?.cnt || 0;
+}
+
+// ── CallRail read APIs ───────────────────────────────────────────────
+
+// Daily totals — calls, answered, total duration, lead value sum. Drives
+// a timeseries chart and the calls KPI tile.
+export async function getCallRailDaily({ since = null, until = null } = {}) {
+  const p = getPool();
+  const where = [];
+  const params = [];
+  if (since) { params.push(since); where.push(`start_time >= $${params.length}::date`); }
+  if (until) { params.push(until); where.push(`start_time <  $${params.length}::date + INTERVAL '1 day'`); }
+  const whereSQL = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  const { rows } = await p.query(`
+    SELECT
+      (start_time AT TIME ZONE 'UTC')::date::text   AS date,
+      COUNT(*)::int                                  AS calls,
+      SUM(CASE WHEN answered THEN 1 ELSE 0 END)::int AS answered,
+      SUM(CASE WHEN first_call THEN 1 ELSE 0 END)::int AS first_calls,
+      SUM(COALESCE(duration, 0))::int                AS duration_seconds,
+      SUM(COALESCE(value, 0))::float                 AS value_sum
+    FROM callrail_calls
+    ${whereSQL}
+    GROUP BY 1
+    ORDER BY 1 ASC
+  `, params);
+  return rows;
+}
+
+// Per-campaign aggregation. Coalesces utm_campaign → campaign so calls
+// tagged via UTM and via CallRail's "source" engine both roll up.
+export async function getCallRailByCampaign({ since = null, until = null } = {}) {
+  const p = getPool();
+  const where = [];
+  const params = [];
+  if (since) { params.push(since); where.push(`start_time >= $${params.length}::date`); }
+  if (until) { params.push(until); where.push(`start_time <  $${params.length}::date + INTERVAL '1 day'`); }
+  const whereSQL = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  const { rows } = await p.query(`
+    SELECT
+      COALESCE(NULLIF(utm_campaign, ''), NULLIF(campaign, ''), '(not set)') AS campaign_name,
+      COUNT(*)::int                                                   AS calls,
+      SUM(CASE WHEN answered THEN 1 ELSE 0 END)::int                  AS answered,
+      SUM(CASE WHEN first_call THEN 1 ELSE 0 END)::int                AS first_calls,
+      SUM(COALESCE(duration, 0))::int                                 AS duration_seconds,
+      SUM(COALESCE(value, 0))::float                                  AS value_sum,
+      SUM(CASE WHEN lead_status = 'good_lead' THEN 1 ELSE 0 END)::int AS good_leads
+    FROM callrail_calls
+    ${whereSQL}
+    GROUP BY 1
+    ORDER BY calls DESC
+  `, params);
+  return rows;
+}
+
+// Recent calls list for the calls table view. Defaults to 100 most recent.
+export async function getCallRailCalls({ since = null, until = null, limit = 100 } = {}) {
+  const p = getPool();
+  const where = [];
+  const params = [];
+  if (since) { params.push(since); where.push(`start_time >= $${params.length}::date`); }
+  if (until) { params.push(until); where.push(`start_time <  $${params.length}::date + INTERVAL '1 day'`); }
+  const whereSQL = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  params.push(Math.min(1000, Math.max(1, parseInt(limit, 10) || 100)));
+  const { rows } = await p.query(`
+    SELECT
+      id, start_time, duration, answered, voicemail, direction, call_type,
+      lead_status, value, first_call, total_calls, agent_email,
+      customer_phone_number, customer_name, customer_city, customer_state,
+      tracking_phone_number, source, source_name, campaign, medium, keywords,
+      utm_source, utm_medium, utm_campaign, gclid, landing_page_url,
+      tracker_id, company_name
+    FROM callrail_calls
+    ${whereSQL}
+    ORDER BY start_time DESC
+    LIMIT $${params.length}
+  `, params);
+  return rows.map(r => ({
+    ...r,
+    start_time: r.start_time?.toISOString() || null,
+    value: r.value != null ? Number(r.value) : null,
+  }));
 }
