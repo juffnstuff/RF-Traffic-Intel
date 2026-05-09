@@ -15,16 +15,17 @@ function rangeCutoff(range, selectedYears) {
   return d.toISOString().slice(0, 10);
 }
 
-function VisibilityBadge({ inAds, inGa4, inCallRail }) {
+function VisibilityBadge({ inAds, inGa4, inCallRail, inForms }) {
   // Visual diagnostic for tagging health. Show a chip only when a row
   // appears in just one source — that's the actionable case. Two-of-
-  // three is common (e.g. an organic UTM with calls but no spend).
-  const present = [inAds, inGa4, inCallRail].filter(Boolean).length;
+  // four is common (e.g. an organic UTM with calls but no spend).
+  const present = [inAds, inGa4, inCallRail, inForms].filter(Boolean).length;
   if (present >= 2) return null;
   let label, color;
   if (inAds)           { label = 'Ads only';   color = '#f59e0b'; }
   else if (inGa4)      { label = 'GA4 only';   color = '#94a3b8'; }
   else if (inCallRail) { label = 'Calls only'; color = '#a78bfa'; }
+  else if (inForms)    { label = 'Forms only'; color = '#34d399'; }
   else return null;
   return (
     <span style={{
@@ -53,14 +54,20 @@ function CampaignRoiTable({ rows }) {
     acc.ga4_revenue += r.ga4_revenue;
     acc.cr_calls    += r.cr_calls    || 0;
     acc.cr_answered += r.cr_answered || 0;
+    acc.form_subs   += r.form_subs   || 0;
     return acc;
   }, { cost: 0, ad_clicks: 0, ad_impressions: 0, ga4_sessions: 0,
-       ga4_conversions: 0, ga4_revenue: 0, cr_calls: 0, cr_answered: 0 });
+       ga4_conversions: 0, ga4_revenue: 0, cr_calls: 0, cr_answered: 0,
+       form_subs: 0 });
   const totalRoas = totals.cost > 0 ? totals.ga4_revenue / totals.cost : null;
   const totalCpa = totals.ga4_conversions > 0 ? totals.cost / totals.ga4_conversions : null;
   const totalCostPerCall = totals.cr_calls > 0 ? totals.cost / totals.cr_calls : null;
+  const totalCostPerForm = totals.form_subs > 0 ? totals.cost / totals.form_subs : null;
   const totalAnsweredRate = totals.cr_calls > 0 ? totals.cr_answered / totals.cr_calls : null;
+  const totalLeads = totals.cr_answered + totals.form_subs;
+  const totalCostPerLead = totalLeads > 0 ? totals.cost / totalLeads : null;
   const anyCalls = totals.cr_calls > 0;
+  const anyForms = totals.form_subs > 0;
   return (
     <div style={{
       background: 'var(--dso-surface)',
@@ -82,6 +89,9 @@ function CampaignRoiTable({ rows }) {
             {anyCalls && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', borderLeft: '1px solid var(--dso-rule)', color: '#a78bfa' }}>Calls</th>}
             {anyCalls && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', color: '#a78bfa' }}>Answered</th>}
             {anyCalls && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', color: '#a78bfa' }}>$/Call</th>}
+            {anyForms && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', borderLeft: '1px solid var(--dso-rule)', color: '#34d399' }}>Forms</th>}
+            {anyForms && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', color: '#34d399' }}>$/Form</th>}
+            {(anyCalls || anyForms) && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>$/Lead</th>}
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>CPA</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>ROAS</th>
           </tr>
@@ -91,7 +101,7 @@ function CampaignRoiTable({ rows }) {
             <tr key={r.campaign_name + i} style={{ borderTop: '1px solid var(--dso-rule)' }}>
               <td style={{ padding: '8px 10px', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.campaign_name}>
                 {r.campaign_name || <span style={{ color: 'var(--dso-text-faint)' }}>(unnamed)</span>}
-                <VisibilityBadge inAds={r.in_ads} inGa4={r.in_ga4} inCallRail={r.in_callrail} />
+                <VisibilityBadge inAds={r.in_ads} inGa4={r.in_ga4} inCallRail={r.in_callrail} inForms={r.in_forms} />
               </td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.cost)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.ad_clicks)}</td>
@@ -102,6 +112,9 @@ function CampaignRoiTable({ rows }) {
               {anyCalls && <td style={{ padding: '8px 10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{fmtNum(r.cr_calls)}</td>}
               {anyCalls && <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.answered_rate != null ? `${fmtNum(r.cr_answered)} (${fmtPct(r.answered_rate)})` : '—'}</td>}
               {anyCalls && <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.cost_per_call != null ? fmtMoney(r.cost_per_call) : '—'}</td>}
+              {anyForms && <td style={{ padding: '8px 10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{fmtNum(r.form_subs)}</td>}
+              {anyForms && <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.cost_per_form != null ? fmtMoney(r.cost_per_form) : '—'}</td>}
+              {(anyCalls || anyForms) && <td style={{ padding: '8px 10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{r.cost_per_lead != null ? fmtMoney(r.cost_per_lead) : '—'}</td>}
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.cost_per_ga4_conv != null ? fmtMoney(r.cost_per_ga4_conv) : '—'}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{r.roas != null ? fmtRatio(r.roas) : '—'}</td>
             </tr>
@@ -119,6 +132,9 @@ function CampaignRoiTable({ rows }) {
             {anyCalls && <td style={{ padding: '10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{fmtNum(totals.cr_calls)}</td>}
             {anyCalls && <td style={{ padding: '10px', textAlign: 'right' }}>{totalAnsweredRate != null ? `${fmtNum(totals.cr_answered)} (${fmtPct(totalAnsweredRate)})` : '—'}</td>}
             {anyCalls && <td style={{ padding: '10px', textAlign: 'right' }}>{totalCostPerCall != null ? fmtMoney(totalCostPerCall) : '—'}</td>}
+            {anyForms && <td style={{ padding: '10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{fmtNum(totals.form_subs)}</td>}
+            {anyForms && <td style={{ padding: '10px', textAlign: 'right' }}>{totalCostPerForm != null ? fmtMoney(totalCostPerForm) : '—'}</td>}
+            {(anyCalls || anyForms) && <td style={{ padding: '10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{totalCostPerLead != null ? fmtMoney(totalCostPerLead) : '—'}</td>}
             <td style={{ padding: '10px', textAlign: 'right' }}>{totalCpa != null ? fmtMoney(totalCpa) : '—'}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{totalRoas != null ? fmtRatio(totalRoas) : '—'}</td>
           </tr>
@@ -188,6 +204,8 @@ export default function CrossSourcePage() {
   const [campaigns, setCampaigns] = useState(null);
   const [pages, setPages] = useState(null);
   const [pageWindowEnd, setPageWindowEnd] = useState(null);
+  const [trackers, setTrackers] = useState(null);
+  const [texts, setTexts] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -210,11 +228,18 @@ export default function CrossSourcePage() {
     Promise.all([
       fetch(`/api/insights/campaign-roi${qs ? '?' + qs : ''}`).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/insights/page-performance?limit=100').then(r => r.ok ? r.json() : null).catch(() => null),
+      // Trackers + texts are not date-windowed — fetch once on mount and
+      // re-fetch when the window changes is unnecessary, but Promise.all
+      // here keeps the loading state coherent and the cost is trivial.
+      fetch('/api/callrail-trackers').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/callrail-text-messages?limit=50').then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([c, p]) => {
+      .then(([c, p, t, m]) => {
         setCampaigns(c?.campaigns || []);
         setPages(p?.pages || []);
         setPageWindowEnd(p?.pages?.[0]?.window_end_date || null);
+        setTrackers(t?.trackers || []);
+        setTexts(m?.messages || []);
         if (!c && !p) setError('Cross-source endpoints returned no data. Are GA4 and Ads/GSC backfilled?');
         else setError(null);
       })
@@ -304,7 +329,137 @@ export default function CrossSourcePage() {
         <PagePerformanceTable rows={pages} windowEnd={pageWindowEnd} />
       </section>
 
+      {trackers && trackers.length > 0 && (
+        <section style={{ marginBottom: 28 }}>
+          <h3 style={{
+            fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+            fontSize: 14,
+            fontWeight: 600,
+            letterSpacing: '0.14em',
+            textTransform: 'uppercase',
+            color: 'var(--dso-text-dim)',
+            marginBottom: 10,
+          }}>CallRail Trackers</h3>
+          <TrackersTable rows={trackers} />
+        </section>
+      )}
+
+      {texts && texts.length > 0 && (
+        <section style={{ marginBottom: 28 }}>
+          <h3 style={{
+            fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+            fontSize: 14,
+            fontWeight: 600,
+            letterSpacing: '0.14em',
+            textTransform: 'uppercase',
+            color: 'var(--dso-text-dim)',
+            marginBottom: 10,
+          }}>Recent Text Conversations</h3>
+          <TextsTable rows={texts} />
+        </section>
+      )}
+
       <PartGroupMappingsAdmin />
+    </div>
+  );
+}
+
+// CallRail trackers — config showing which tracking number routes which
+// campaign. Useful diagnostic for "is this number set up correctly?"
+// Status of 'disabled' is rendered dimmed.
+function TrackersTable({ rows }) {
+  return (
+    <div style={{
+      background: 'var(--dso-surface)',
+      borderRadius: 4,
+      padding: '14px 16px',
+      border: '1px solid var(--dso-rule)',
+      overflowX: 'auto',
+    }}>
+      <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 8 }}>
+        {rows.length} tracker{rows.length === 1 ? '' : 's'} configured. Tracking numbers come from CallRail; campaign attribution is set per-tracker in the CallRail UI.
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
+        <thead>
+          <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Name</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Type</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Status</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Source</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Campaign</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Tracking #</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Forwards to</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((t, i) => {
+            const numbers = Array.isArray(t.tracking_numbers) ? t.tracking_numbers : [];
+            const dim = t.status && t.status !== 'active';
+            return (
+              <tr key={t.id} style={{ borderTop: '1px solid var(--dso-rule)', opacity: dim ? 0.55 : 1 }}>
+                <td style={{ padding: '8px 10px', fontWeight: 600, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.name}>{t.name || <span style={{ color: 'var(--dso-text-faint)' }}>(unnamed)</span>}</td>
+                <td style={{ padding: '8px 10px', color: 'var(--dso-text-dim)' }}>{t.type || '—'}</td>
+                <td style={{ padding: '8px 10px' }}>{t.status || '—'}</td>
+                <td style={{ padding: '8px 10px', color: 'var(--dso-text-dim)' }}>{t.source_name || t.source || '—'}</td>
+                <td style={{ padding: '8px 10px' }}>{t.campaign_name || <span style={{ color: 'var(--dso-text-faint)' }}>—</span>}</td>
+                <td style={{ padding: '8px 10px', fontFamily: 'var(--dso-font-mono, monospace)' }}>{numbers.length > 0 ? numbers.join(', ') : '—'}</td>
+                <td style={{ padding: '8px 10px', fontFamily: 'var(--dso-font-mono, monospace)', color: 'var(--dso-text-dim)' }}>{t.destination_number || '—'}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Recent text-message conversations. CallRail surfaces one row per
+// conversation (the underlying messages live in raw on the server).
+function TextsTable({ rows }) {
+  return (
+    <div style={{
+      background: 'var(--dso-surface)',
+      borderRadius: 4,
+      padding: '14px 16px',
+      border: '1px solid var(--dso-rule)',
+      overflowX: 'auto',
+    }}>
+      <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 8 }}>
+        {rows.length} most-recent conversation{rows.length === 1 ? '' : 's'}.
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
+        <thead>
+          <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Last activity</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Customer</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Phone</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Tracking #</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>State</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Lead Status</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Source</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Campaign</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((m) => {
+            const ts = m.last_message_time
+              ? new Date(m.last_message_time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+              : '—';
+            return (
+              <tr key={m.id} style={{ borderTop: '1px solid var(--dso-rule)' }}>
+                <td style={{ padding: '8px 10px', whiteSpace: 'nowrap', color: 'var(--dso-text-dim)' }}>{ts}</td>
+                <td style={{ padding: '8px 10px' }}>{m.customer_name || <span style={{ color: 'var(--dso-text-faint)' }}>—</span>}</td>
+                <td style={{ padding: '8px 10px', fontFamily: 'var(--dso-font-mono, monospace)' }}>{m.customer_phone_number || '—'}</td>
+                <td style={{ padding: '8px 10px', fontFamily: 'var(--dso-font-mono, monospace)', color: 'var(--dso-text-dim)' }}>{m.tracking_phone_number || '—'}</td>
+                <td style={{ padding: '8px 10px' }}>{m.state || '—'}</td>
+                <td style={{ padding: '8px 10px' }}>{m.lead_status || '—'}</td>
+                <td style={{ padding: '8px 10px', color: 'var(--dso-text-dim)' }}>{m.source || '—'}</td>
+                <td style={{ padding: '8px 10px', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={m.campaign}>{m.campaign || '—'}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

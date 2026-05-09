@@ -2097,16 +2097,16 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
     if (until) { params.push(until); conds.push(`${alias}.date <= $${params.length}::date`); }
     return conds.length ? 'WHERE ' + conds.join(' AND ') : '';
   };
-  const tsFilter = (alias) => {
+  const tsFilter = (alias, column) => {
     const conds = [];
-    if (since) { params.push(since); conds.push(`${alias}.start_time >= $${params.length}::date`); }
+    if (since) { params.push(since); conds.push(`${alias}.${column} >= $${params.length}::date`); }
     // until is treated inclusive of the entire day — < (until + 1 day).
-    if (until) { params.push(until); conds.push(`${alias}.start_time <  $${params.length}::date + INTERVAL '1 day'`); }
+    if (until) { params.push(until); conds.push(`${alias}.${column} <  $${params.length}::date + INTERVAL '1 day'`); }
     return conds;
   };
   const adsWhere = dateFilter('a');
   const ga4Where = dateFilter('g');
-  const crConds = tsFilter('c');
+  const crConds = tsFilter('c', 'start_time');
   // Keep calls with any attribution signal: explicit campaign tagging OR
   // a click-ID we'll bucket into a network-level "untagged" pseudo-
   // campaign in the SELECT. Calls with neither (organic phone, direct
@@ -2118,6 +2118,14 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
     OR COALESCE(c.msclkid, '') <> ''
   )`);
   const crWhere = 'WHERE ' + crConds.join(' AND ');
+
+  // Forms only have CallRail's normalized `campaign` field for
+  // attribution — the API doesn't surface utm_campaign or click IDs on
+  // form submissions. Filter on submitted_at and require a non-empty
+  // campaign so untagged form submissions don't pollute the rollup.
+  const formConds = tsFilter('f', 'submitted_at');
+  formConds.push(`NULLIF(f.campaign, '') IS NOT NULL`);
+  const formWhere = 'WHERE ' + formConds.join(' AND ');
   const sql = `
     WITH ads AS (
       SELECT
@@ -2171,12 +2179,23 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
       ${crWhere}
       GROUP BY 1
     ),
+    forms AS (
+      SELECT
+        f.campaign as campaign_name,
+        COUNT(*)::int                                                       as form_subs,
+        SUM(CASE WHEN f.lead_status = 'good_lead' THEN 1 ELSE 0 END)::int   as form_good_leads
+      FROM callrail_form_submissions f
+      ${formWhere}
+      GROUP BY 1
+    ),
     names AS (
       SELECT campaign_name FROM ads      WHERE campaign_name IS NOT NULL
       UNION
       SELECT campaign_name FROM ga4      WHERE campaign_name IS NOT NULL
       UNION
       SELECT campaign_name FROM callrail WHERE campaign_name IS NOT NULL
+      UNION
+      SELECT campaign_name FROM forms    WHERE campaign_name IS NOT NULL
     )
     SELECT
       n.campaign_name,
@@ -2196,13 +2215,17 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
       COALESCE(c.cr_duration_seconds, 0)  as cr_duration_seconds,
       COALESCE(c.cr_value, 0)             as cr_value,
       COALESCE(c.cr_good_leads, 0)        as cr_good_leads,
+      COALESCE(f.form_subs, 0)            as form_subs,
+      COALESCE(f.form_good_leads, 0)      as form_good_leads,
       (a.campaign_name IS NOT NULL)       as in_ads,
       (g.campaign_name IS NOT NULL)       as in_ga4,
-      (c.campaign_name IS NOT NULL)       as in_callrail
+      (c.campaign_name IS NOT NULL)       as in_callrail,
+      (f.campaign_name IS NOT NULL)       as in_forms
     FROM names n
     LEFT JOIN ads      a ON a.campaign_name = n.campaign_name
     LEFT JOIN ga4      g ON g.campaign_name = n.campaign_name
     LEFT JOIN callrail c ON c.campaign_name = n.campaign_name
+    LEFT JOIN forms    f ON f.campaign_name = n.campaign_name
     ORDER BY COALESCE(a.cost, 0) DESC, COALESCE(g.ga4_sessions, 0) DESC, COALESCE(c.cr_calls, 0) DESC
   `;
   const { rows } = await p.query(sql, params);
@@ -2224,9 +2247,12 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
     cr_duration_seconds: Number(r.cr_duration_seconds),
     cr_value: Number(r.cr_value),
     cr_good_leads: Number(r.cr_good_leads),
+    form_subs: Number(r.form_subs),
+    form_good_leads: Number(r.form_good_leads),
     in_ads: r.in_ads,
     in_ga4: r.in_ga4,
     in_callrail: r.in_callrail,
+    in_forms: r.in_forms,
     // Derived metrics — null when denominator is zero so the UI shows "—".
     ctr: r.ad_impressions > 0 ? r.ad_clicks / r.ad_impressions : null,
     avg_cpc: r.ad_clicks > 0 ? r.cost / r.ad_clicks : null,
@@ -2234,7 +2260,13 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
     cost_per_ga4_conv: r.ga4_conversions > 0 ? r.cost / r.ga4_conversions : null,
     cost_per_call: r.cr_calls > 0 ? r.cost / r.cr_calls : null,
     cost_per_answered: r.cr_answered > 0 ? r.cost / r.cr_answered : null,
+    cost_per_form: r.form_subs > 0 ? r.cost / r.form_subs : null,
     answered_rate: r.cr_calls > 0 ? r.cr_answered / r.cr_calls : null,
+    // Combined leads = answered calls + form submissions, treated as a
+    // unified "phone+form" denominator. Cost-per-lead reads naturally
+    // ("we paid X to land each tracked lead, regardless of channel").
+    cost_per_lead: (r.cr_answered + r.form_subs) > 0 ? r.cost / (Number(r.cr_answered) + Number(r.form_subs)) : null,
+    total_leads: Number(r.cr_answered) + Number(r.form_subs),
     roas: r.cost > 0 ? r.ga4_revenue / r.cost : null,
     sessions_per_click: r.ad_clicks > 0 ? r.ga4_sessions / r.ad_clicks : null,
   }));
@@ -2699,5 +2731,75 @@ export async function getCallRailCalls({ since = null, until = null, limit = 100
     ...r,
     start_time: r.start_time?.toISOString() || null,
     value: r.value != null ? Number(r.value) : null,
+  }));
+}
+
+// Recent form submissions — newest first.
+export async function getCallRailFormSubmissions({ since = null, until = null, limit = 100 } = {}) {
+  const p = getPool();
+  const where = [];
+  const params = [];
+  if (since) { params.push(since); where.push(`submitted_at >= $${params.length}::date`); }
+  if (until) { params.push(until); where.push(`submitted_at <  $${params.length}::date + INTERVAL '1 day'`); }
+  const whereSQL = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  params.push(Math.min(1000, Math.max(1, parseInt(limit, 10) || 100)));
+  const { rows } = await p.query(`
+    SELECT
+      id, submitted_at, form_url, landing_page_url, referrer,
+      customer_name, customer_email, customer_phone_number,
+      source, campaign, medium, keywords, lead_status,
+      company_id, tracker_id, form_data
+    FROM callrail_form_submissions
+    ${whereSQL}
+    ORDER BY submitted_at DESC
+    LIMIT $${params.length}
+  `, params);
+  return rows.map(r => ({
+    ...r,
+    submitted_at: r.submitted_at?.toISOString() || null,
+  }));
+}
+
+// Recent text-message conversations — newest activity first.
+export async function getCallRailTextMessages({ limit = 100 } = {}) {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT
+      id, customer_phone_number, tracking_phone_number, customer_name,
+      initial_response, state, last_message_time, lead_status,
+      company_id, tracker_id, source, campaign, medium
+    FROM callrail_text_messages
+    ORDER BY last_message_time DESC NULLS LAST
+    LIMIT $1
+  `, [Math.min(1000, Math.max(1, parseInt(limit, 10) || 100))]);
+  return rows.map(r => ({
+    ...r,
+    last_message_time: r.last_message_time?.toISOString() || null,
+  }));
+}
+
+// Trackers config — which tracking number routes which campaign. Small
+// table; the UI shows everything.
+export async function listCallRailTrackers() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT id, name, type, status, source, source_name, destination_number,
+           tracking_numbers, company_id, campaign_name
+    FROM callrail_trackers
+    ORDER BY status DESC, name ASC
+  `);
+  return rows;
+}
+
+export async function listCallRailCompanies() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT id, name, status, time_zone, created_at_callrail
+    FROM callrail_companies
+    ORDER BY name ASC
+  `);
+  return rows.map(r => ({
+    ...r,
+    created_at_callrail: r.created_at_callrail?.toISOString() || null,
   }));
 }
