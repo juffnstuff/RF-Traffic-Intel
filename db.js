@@ -2107,10 +2107,16 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
   const adsWhere = dateFilter('a');
   const ga4Where = dateFilter('g');
   const crConds = tsFilter('c');
-  // CallRail join key: prefer raw utm_campaign, fall back to CallRail's
-  // normalized `campaign`. Excludes calls with no campaign attribution
-  // so they don't pollute the per-campaign rollup.
-  crConds.push(`COALESCE(NULLIF(c.utm_campaign, ''), NULLIF(c.campaign, '')) IS NOT NULL`);
+  // Keep calls with any attribution signal: explicit campaign tagging OR
+  // a click-ID we'll bucket into a network-level "untagged" pseudo-
+  // campaign in the SELECT. Calls with neither (organic phone, direct
+  // dial, no tagging at all) are excluded from the per-campaign rollup.
+  crConds.push(`(
+    COALESCE(NULLIF(c.utm_campaign, ''), NULLIF(c.campaign, '')) IS NOT NULL
+    OR COALESCE(c.gclid,   '') <> ''
+    OR COALESCE(c.fbclid,  '') <> ''
+    OR COALESCE(c.msclkid, '') <> ''
+  )`);
   const crWhere = 'WHERE ' + crConds.join(' AND ');
   const sql = `
     WITH ads AS (
@@ -2139,7 +2145,22 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
     ),
     callrail AS (
       SELECT
-        COALESCE(NULLIF(c.utm_campaign, ''), NULLIF(c.campaign, '')) as campaign_name,
+        -- Campaign attribution priority:
+        --   1. utm_campaign (manual UTM, most reliable)
+        --   2. campaign (CallRail's normalized field; populated when GA
+        --      auto-tagging or first-party UTM is present)
+        --   3. click-ID fallback bucket — preserves the call in the
+        --      rollup even when no campaign tagging arrived. Lets the
+        --      operator see "X calls from Google Ads, untagged" and
+        --      fix the tagging gap rather than silently dropping the
+        --      attribution.
+        COALESCE(
+          NULLIF(c.utm_campaign, ''),
+          NULLIF(c.campaign, ''),
+          CASE WHEN COALESCE(c.gclid, '')   <> '' THEN '(google ads — untagged)' END,
+          CASE WHEN COALESCE(c.fbclid, '')  <> '' THEN '(facebook — untagged)'   END,
+          CASE WHEN COALESCE(c.msclkid, '') <> '' THEN '(microsoft ads — untagged)' END
+        ) as campaign_name,
         COUNT(*)::int                                                as cr_calls,
         SUM(CASE WHEN c.answered THEN 1 ELSE 0 END)::int             as cr_answered,
         SUM(CASE WHEN c.first_call THEN 1 ELSE 0 END)::int           as cr_first_calls,
@@ -2626,7 +2647,18 @@ export async function getCallRailByCampaign({ since = null, until = null } = {})
   const whereSQL = where.length ? 'WHERE ' + where.join(' AND ') : '';
   const { rows } = await p.query(`
     SELECT
-      COALESCE(NULLIF(utm_campaign, ''), NULLIF(campaign, ''), '(not set)') AS campaign_name,
+      -- Attribution priority: utm_campaign → campaign → click-ID
+      -- network bucket → '(not set)'. Click-ID fallbacks surface
+      -- auto-tagged calls that would otherwise drop from per-campaign
+      -- views. See getCampaignRoi for the same logic.
+      COALESCE(
+        NULLIF(utm_campaign, ''),
+        NULLIF(campaign, ''),
+        CASE WHEN COALESCE(gclid, '')   <> '' THEN '(google ads — untagged)' END,
+        CASE WHEN COALESCE(fbclid, '')  <> '' THEN '(facebook — untagged)'   END,
+        CASE WHEN COALESCE(msclkid, '') <> '' THEN '(microsoft ads — untagged)' END,
+        '(not set)'
+      ) AS campaign_name,
       COUNT(*)::int                                                   AS calls,
       SUM(CASE WHEN answered THEN 1 ELSE 0 END)::int                  AS answered,
       SUM(CASE WHEN first_call THEN 1 ELSE 0 END)::int                AS first_calls,

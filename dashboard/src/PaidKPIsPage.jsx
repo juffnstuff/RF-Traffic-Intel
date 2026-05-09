@@ -188,6 +188,14 @@ export default function PaidKPIsPage() {
       paidRevByDate.set(r.date, (paidRevByDate.get(r.date) || 0) + (r.revenue || 0));
     }
 
+    // CallRail totals per day. /api/callrail-daily already pre-aggregates
+    // calls / answered / duration / value by date — index by date so we
+    // can align to the Ads-driven order.
+    const crByDate = new Map();
+    for (const r of (crDaily?.daily || [])) {
+      crByDate.set(r.date, r);
+    }
+
     const cost      = ordered.map(d => Number(d.cost) || 0);
     const clicks    = ordered.map(d => Number(d.clicks) || 0);
     const impr      = ordered.map(d => Number(d.impressions) || 0);
@@ -195,10 +203,17 @@ export default function PaidKPIsPage() {
     const paidSess  = ordered.map(d => paidSessByDate.get(d.date) || 0);
     const hsDeals   = ordered.map(d => paidDealsByDate.get(d.date) || 0);
     const hsRev     = ordered.map(d => paidRevByDate.get(d.date) || 0);
+    const calls     = ordered.map(d => Number(crByDate.get(d.date)?.calls)    || 0);
+    const callsAns  = ordered.map(d => Number(crByDate.get(d.date)?.answered) || 0);
     const cpa       = ordered.map((_, i) => hsDeals[i] > 0 ? cost[i] / hsDeals[i] : 0);
     const roas      = ordered.map((_, i) => cost[i] > 0 ? hsRev[i] / cost[i] : 0);
     const ctr       = ordered.map((_, i) => impr[i] > 0 ? clicks[i] / impr[i] : 0);
     const cpc       = ordered.map((_, i) => clicks[i] > 0 ? cost[i] / clicks[i] : 0);
+    // $/call uses cost across ALL paid networks but calls only from
+    // CallRail's tracked numbers. Reads as "what each tracked phone
+    // lead cost the paid budget on this day" — useful for spotting
+    // days when calls cratered without spend changing.
+    const cpCall    = ordered.map((_, i) => calls[i] > 0 ? cost[i] / calls[i] : 0);
 
     const mmm = (xs) => [movingAverage(xs, 30), movingAverage(xs, 90)];
     const [cost30, cost90]     = mmm(cost);
@@ -207,6 +222,8 @@ export default function PaidKPIsPage() {
     const [cpc30, cpc90]       = mmm(cpc);
     const [cpa30, cpa90]       = mmm(cpa);
     const [roas30, roas90]     = mmm(roas);
+    const [calls30, calls90]   = mmm(calls);
+    const [cpCall30, cpCall90] = mmm(cpCall);
 
     return ordered.map((d, i) => ({
       date: d.date,
@@ -217,12 +234,15 @@ export default function PaidKPIsPage() {
       paidSessions: paidSess[i],
       hsDeals: hsDeals[i],
       hsRevenue: hsRev[i],
+      calls: calls[i], calls30: calls30[i], calls90: calls90[i],
+      callsAnswered: callsAns[i],
+      costPerCall: cpCall[i], cpCall30: cpCall30[i], cpCall90: cpCall90[i],
       ctr: ctr[i], ctr30: ctr30[i], ctr90: ctr90[i],
       avgCpc: cpc[i], cpc30: cpc30[i], cpc90: cpc90[i],
       cpa: cpa[i], cpa30: cpa30[i], cpa90: cpa90[i],
       roas: roas[i], roas30: roas30[i], roas90: roas90[i],
     }));
-  }, [gads, ga4Channels, hsDealsDaily, weekdayOnly]);
+  }, [gads, ga4Channels, hsDealsDaily, crDaily, weekdayOnly]);
 
   const chartData = useMemo(() => {
     if (!fullSeries.length) return [];
@@ -408,6 +428,22 @@ export default function PaidKPIsPage() {
                 fieldRaw="roas" field30="roas30" field90="roas90"
                 formatter={fmtRatio} showDaily={showDaily} />
             </div>
+
+            {kpi?.calls > 0 && (
+              <>
+                <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
+                  Phone leads (CallRail)
+                </h2>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+                  <DMALineChart title="Calls DMA" data={chartData}
+                    fieldRaw="calls" field30="calls30" field90="calls90"
+                    formatter={fmtNum} showDaily={showDaily} />
+                  <DMALineChart title="Cost / Call DMA" data={chartData}
+                    fieldRaw="costPerCall" field30="cpCall30" field90="cpCall90"
+                    formatter={(v) => v == null || v === 0 ? '—' : fmtMoney(v)} showDaily={showDaily} />
+                </div>
+              </>
+            )}
 
             <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
               Campaign performance
