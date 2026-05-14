@@ -96,6 +96,79 @@ export async function initDB() {
   await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_size ON netsuite_daily_dim(size_bucket)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_dim_first ON netsuite_daily_dim(is_first)`);
 
+  // ── NetSuite per-customer identity ─────────────────────────────────
+  // One row per active NetSuite customer. Carries the identifiers we use to
+  // bridge to CallRail (by phone_digits) and HubSpot (by email_normalized).
+  // raw JSONB preserves the full SuiteQL row so we can add columns later
+  // without a refetch.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS netsuite_customers (
+      customer_id BIGINT PRIMARY KEY,
+      entity_id TEXT,
+      company_name TEXT,
+      first_name TEXT,
+      last_name TEXT,
+      email TEXT,
+      email_normalized TEXT,
+      alt_email TEXT,
+      phone TEXT,
+      phone_digits TEXT,
+      url TEXT,
+      is_inactive BOOLEAN,
+      is_person BOOLEAN,
+      category_name TEXT,
+      lead_source_name TEXT,
+      sales_rep_id BIGINT,
+      sales_rep_name TEXT,
+      date_created TIMESTAMPTZ,
+      last_modified_date TIMESTAMPTZ,
+      first_order_date DATE,
+      last_order_date DATE,
+      first_sale_date DATE,
+      last_sale_date DATE,
+      raw JSONB,
+      fetched_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ns_cust_phone ON netsuite_customers(phone_digits) WHERE phone_digits IS NOT NULL`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ns_cust_email ON netsuite_customers(email_normalized) WHERE email_normalized IS NOT NULL`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ns_cust_lastmod ON netsuite_customers(last_modified_date)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ns_cust_first_order ON netsuite_customers(first_order_date) WHERE first_order_date IS NOT NULL`);
+
+  // ── NetSuite per-transaction (Estimate + SalesOrd) ─────────────────
+  // One row per quote or sales order. Linked back to a customer by
+  // customer_id, enabling order-level revenue attribution to the customer's
+  // first-touch campaign (joined via netsuite_customers → phone/email →
+  // CallRail/HubSpot). createdfrom_id chains SalesOrd → originating Estimate.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS netsuite_transactions (
+      transaction_id BIGINT PRIMARY KEY,
+      tran_type TEXT NOT NULL,
+      tran_id TEXT,
+      customer_id BIGINT,
+      tran_date DATE,
+      created_date TIMESTAMPTZ,
+      last_modified_date TIMESTAMPTZ,
+      status TEXT,
+      total NUMERIC(15,2),
+      actual_ship_date DATE,
+      sales_rep_id BIGINT,
+      sales_rep_name TEXT,
+      created_from_id BIGINT,
+      is_first_quote BOOLEAN,
+      is_first_order BOOLEAN,
+      lost_reason_id INTEGER,
+      raw JSONB,
+      fetched_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ns_txn_customer ON netsuite_transactions(customer_id)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ns_txn_date ON netsuite_transactions(tran_date)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ns_txn_type ON netsuite_transactions(tran_type)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ns_txn_ship ON netsuite_transactions(actual_ship_date) WHERE actual_ship_date IS NOT NULL`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ns_txn_lastmod ON netsuite_transactions(last_modified_date)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_ns_txn_createdfrom ON netsuite_transactions(created_from_id) WHERE created_from_id IS NOT NULL`);
+
   // GA4 aggregate daily — one row per date, whole-account totals.
   await p.query(`
     CREATE TABLE IF NOT EXISTS ga4_daily (
@@ -754,6 +827,266 @@ export async function getDimRowCount() {
   const p = getPool();
   const { rows } = await p.query('SELECT COUNT(*) as cnt FROM netsuite_daily_dim');
   return parseInt(rows[0].cnt, 10);
+}
+
+// ── NetSuite per-customer + per-transaction ─────────────────────────
+
+export async function upsertNetSuiteCustomers(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    let n = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO netsuite_customers (
+          customer_id, entity_id, company_name, first_name, last_name,
+          email, email_normalized, alt_email, phone, phone_digits, url,
+          is_inactive, is_person, category_name, lead_source_name,
+          sales_rep_id, sales_rep_name,
+          date_created, last_modified_date,
+          first_order_date, last_order_date, first_sale_date, last_sale_date,
+          raw, fetched_at
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+          $11,$12,$13,$14,$15,$16,$17,$18,$19,
+          $20,$21,$22,$23,$24,NOW()
+        )
+        ON CONFLICT (customer_id) DO UPDATE SET
+          entity_id          = EXCLUDED.entity_id,
+          company_name       = EXCLUDED.company_name,
+          first_name         = EXCLUDED.first_name,
+          last_name          = EXCLUDED.last_name,
+          email              = EXCLUDED.email,
+          email_normalized   = EXCLUDED.email_normalized,
+          alt_email          = EXCLUDED.alt_email,
+          phone              = EXCLUDED.phone,
+          phone_digits       = EXCLUDED.phone_digits,
+          url                = EXCLUDED.url,
+          is_inactive        = EXCLUDED.is_inactive,
+          is_person          = EXCLUDED.is_person,
+          category_name      = EXCLUDED.category_name,
+          lead_source_name   = EXCLUDED.lead_source_name,
+          sales_rep_id       = EXCLUDED.sales_rep_id,
+          sales_rep_name     = EXCLUDED.sales_rep_name,
+          date_created       = EXCLUDED.date_created,
+          last_modified_date = EXCLUDED.last_modified_date,
+          first_order_date   = EXCLUDED.first_order_date,
+          last_order_date    = EXCLUDED.last_order_date,
+          first_sale_date    = EXCLUDED.first_sale_date,
+          last_sale_date     = EXCLUDED.last_sale_date,
+          raw                = EXCLUDED.raw,
+          fetched_at         = NOW()
+      `, [
+        r.customer_id, r.entity_id, r.company_name, r.first_name, r.last_name,
+        r.email, r.email_normalized, r.alt_email, r.phone, r.phone_digits, r.url,
+        r.is_inactive, r.is_person, r.category_name, r.lead_source_name,
+        r.sales_rep_id, r.sales_rep_name,
+        r.date_created, r.last_modified_date,
+        r.first_order_date, r.last_order_date, r.first_sale_date, r.last_sale_date,
+        r.raw ? JSON.stringify(r.raw) : null,
+      ]);
+      n++;
+    }
+    await client.query('COMMIT');
+    return n;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getNetSuiteCustomerCount() {
+  const p = getPool();
+  const { rows } = await p.query('SELECT COUNT(*)::int as cnt FROM netsuite_customers');
+  return rows[0].cnt;
+}
+
+export async function getNetSuiteCustomerMaxLastModified() {
+  const p = getPool();
+  const { rows } = await p.query('SELECT MAX(last_modified_date) as m FROM netsuite_customers');
+  return rows[0].m || null;
+}
+
+export async function getNetSuiteCustomers({ since = null, until = null, limit = 100, phoneDigits = null, emailNormalized = null } = {}) {
+  const p = getPool();
+  const params = [];
+  const conds = [];
+  if (since) { params.push(since); conds.push(`last_modified_date >= $${params.length}`); }
+  if (until) { params.push(until); conds.push(`last_modified_date < $${params.length}`); }
+  if (phoneDigits) { params.push(phoneDigits); conds.push(`phone_digits = $${params.length}`); }
+  if (emailNormalized) { params.push(emailNormalized); conds.push(`email_normalized = $${params.length}`); }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  params.push(Math.min(Math.max(Number(limit) || 100, 1), 1000));
+  const { rows } = await p.query(`
+    SELECT customer_id, entity_id, company_name, email, phone, phone_digits, email_normalized,
+           sales_rep_name, lead_source_name, first_order_date, last_order_date,
+           date_created, last_modified_date
+    FROM netsuite_customers
+    ${where}
+    ORDER BY last_modified_date DESC NULLS LAST
+    LIMIT $${params.length}
+  `, params);
+  return rows;
+}
+
+export async function upsertNetSuiteTransactions(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    let n = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO netsuite_transactions (
+          transaction_id, tran_type, tran_id, customer_id,
+          tran_date, created_date, last_modified_date, status, total,
+          actual_ship_date, sales_rep_id, sales_rep_name, created_from_id,
+          is_first_quote, is_first_order, lost_reason_id, raw, fetched_at
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+          $11,$12,$13,$14,$15,$16,$17,NOW()
+        )
+        ON CONFLICT (transaction_id) DO UPDATE SET
+          tran_type          = EXCLUDED.tran_type,
+          tran_id            = EXCLUDED.tran_id,
+          customer_id        = EXCLUDED.customer_id,
+          tran_date          = EXCLUDED.tran_date,
+          created_date       = EXCLUDED.created_date,
+          last_modified_date = EXCLUDED.last_modified_date,
+          status             = EXCLUDED.status,
+          total              = EXCLUDED.total,
+          actual_ship_date   = EXCLUDED.actual_ship_date,
+          sales_rep_id       = EXCLUDED.sales_rep_id,
+          sales_rep_name     = EXCLUDED.sales_rep_name,
+          created_from_id    = EXCLUDED.created_from_id,
+          is_first_quote     = EXCLUDED.is_first_quote,
+          is_first_order     = EXCLUDED.is_first_order,
+          lost_reason_id     = EXCLUDED.lost_reason_id,
+          raw                = EXCLUDED.raw,
+          fetched_at         = NOW()
+      `, [
+        r.transaction_id, r.tran_type, r.tran_id, r.customer_id,
+        r.tran_date, r.created_date, r.last_modified_date, r.status, r.total,
+        r.actual_ship_date, r.sales_rep_id, r.sales_rep_name, r.created_from_id,
+        r.is_first_quote, r.is_first_order, r.lost_reason_id,
+        r.raw ? JSON.stringify(r.raw) : null,
+      ]);
+      n++;
+    }
+    await client.query('COMMIT');
+    return n;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getNetSuiteTransactionCount() {
+  const p = getPool();
+  const { rows } = await p.query('SELECT COUNT(*)::int as cnt FROM netsuite_transactions');
+  return rows[0].cnt;
+}
+
+export async function getNetSuiteTransactionMaxLastModified() {
+  const p = getPool();
+  const { rows } = await p.query('SELECT MAX(last_modified_date) as m FROM netsuite_transactions');
+  return rows[0].m || null;
+}
+
+export async function getNetSuiteTransactions({ since = null, until = null, customerId = null, tranType = null, limit = 100 } = {}) {
+  const p = getPool();
+  const params = [];
+  const conds = [];
+  if (since) { params.push(since); conds.push(`tran_date >= $${params.length}`); }
+  if (until) { params.push(until); conds.push(`tran_date < $${params.length}`); }
+  if (customerId) { params.push(Number(customerId)); conds.push(`customer_id = $${params.length}`); }
+  if (tranType) { params.push(tranType); conds.push(`tran_type = $${params.length}`); }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  params.push(Math.min(Math.max(Number(limit) || 100, 1), 1000));
+  const { rows } = await p.query(`
+    SELECT transaction_id, tran_type, tran_id, customer_id, tran_date, total, status,
+           actual_ship_date, sales_rep_name, created_from_id,
+           is_first_quote, is_first_order, lost_reason_id,
+           created_date, last_modified_date
+    FROM netsuite_transactions
+    ${where}
+    ORDER BY tran_date DESC NULLS LAST, transaction_id DESC
+    LIMIT $${params.length}
+  `, params);
+  return rows;
+}
+
+/**
+ * Diagnostic: how many CallRail calls / form submissions can be matched
+ * to a NetSuite customer by phone (calls) or email (forms)?
+ * Phase 1 validation that the identity bridge actually links real data.
+ */
+export async function getCallRailNetSuiteMatch({ sample = 25 } = {}) {
+  const p = getPool();
+  const sampleN = Math.min(Math.max(Number(sample) || 25, 0), 200);
+
+  const summary = await p.query(`
+    WITH call_match AS (
+      SELECT
+        COUNT(*) AS total_calls,
+        COUNT(c.customer_id) AS matched_calls,
+        COUNT(DISTINCT c.customer_id) FILTER (WHERE c.customer_id IS NOT NULL) AS matched_customers
+      FROM callrail_calls cr
+      LEFT JOIN netsuite_customers c
+        ON c.phone_digits = RIGHT(REGEXP_REPLACE(cr.customer_phone_number, '\\D', '', 'g'), 10)
+       AND LENGTH(REGEXP_REPLACE(cr.customer_phone_number, '\\D', '', 'g')) >= 10
+    ),
+    form_match AS (
+      SELECT
+        COUNT(*) AS total_forms,
+        COUNT(c1.customer_id) AS matched_forms_by_email,
+        COUNT(c2.customer_id) AS matched_forms_by_phone
+      FROM callrail_form_submissions f
+      LEFT JOIN netsuite_customers c1
+        ON c1.email_normalized = LOWER(TRIM(f.customer_email))
+       AND f.customer_email IS NOT NULL AND POSITION('@' IN f.customer_email) > 0
+      LEFT JOIN netsuite_customers c2
+        ON c2.phone_digits = RIGHT(REGEXP_REPLACE(f.customer_phone_number, '\\D', '', 'g'), 10)
+       AND LENGTH(REGEXP_REPLACE(f.customer_phone_number, '\\D', '', 'g')) >= 10
+    )
+    SELECT cm.total_calls, cm.matched_calls, cm.matched_customers,
+           fm.total_forms, fm.matched_forms_by_email, fm.matched_forms_by_phone
+    FROM call_match cm, form_match fm
+  `);
+
+  const samples = sampleN > 0 ? await p.query(`
+    SELECT
+      cr.id AS call_id,
+      cr.start_time,
+      cr.customer_name AS callrail_name,
+      cr.customer_phone_number,
+      cr.utm_campaign,
+      cr.gclid,
+      c.customer_id,
+      c.entity_id,
+      c.company_name AS netsuite_name,
+      c.email,
+      c.first_order_date,
+      c.last_order_date
+    FROM callrail_calls cr
+    JOIN netsuite_customers c
+      ON c.phone_digits = RIGHT(REGEXP_REPLACE(cr.customer_phone_number, '\\D', '', 'g'), 10)
+     AND LENGTH(REGEXP_REPLACE(cr.customer_phone_number, '\\D', '', 'g')) >= 10
+    ORDER BY cr.start_time DESC
+    LIMIT $1
+  `, [sampleN]) : { rows: [] };
+
+  return {
+    summary: summary.rows[0] || {},
+    sample_matches: samples.rows,
+  };
 }
 
 export async function getFilterOptions() {
