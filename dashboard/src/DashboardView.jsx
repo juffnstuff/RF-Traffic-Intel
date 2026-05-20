@@ -194,12 +194,14 @@ export function DMALineChart({ title, data: rawData, field30, field90, fieldRaw,
     };
   }), [pins, data, field30, field90]);
 
-  const delta = pinValues.length === 2 && pinValues[0].v30 != null && pinValues[1].v30 != null
-    ? {
-        abs: pinValues[1].v30 - pinValues[0].v30,
-        pct: pinValues[0].v30 !== 0 ? (pinValues[1].v30 - pinValues[0].v30) / Math.abs(pinValues[0].v30) : null,
-      }
-    : null;
+  // Deltas computed separately for 30 DMA and 90 DMA so a divergence
+  // between the two (e.g. 30 down but 90 still rising) is visible.
+  const computeDelta = (a, b) => {
+    if (a == null || b == null) return null;
+    return { abs: b - a, pct: a !== 0 ? (b - a) / Math.abs(a) : null };
+  };
+  const delta30 = pinValues.length === 2 ? computeDelta(pinValues[0].v30, pinValues[1].v30) : null;
+  const delta90 = pinValues.length === 2 ? computeDelta(pinValues[0].v90, pinValues[1].v90) : null;
 
   // One tick per month-start date in the visible data. If the view spans many
   // months, thin so labels don't collide (~18 ticks max for a typical tile).
@@ -300,7 +302,7 @@ export function DMALineChart({ title, data: rawData, field30, field90, fieldRaw,
         <div style={{
           display: 'flex',
           flexWrap: 'wrap',
-          gap: 12,
+          gap: '4px 14px',
           fontSize: 10,
           fontFamily: "var(--dso-font-mono, ui-monospace, Menlo, monospace)",
           color: '#94a3b8',
@@ -309,22 +311,42 @@ export function DMALineChart({ title, data: rawData, field30, field90, fieldRaw,
           borderBottom: '1px dashed #334155',
         }}>
           {pinValues.map(p => (
-            <span key={p.date} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <span key={p.date} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
               <span style={{ width: 8, height: 8, background: p.color, borderRadius: 2, display: 'inline-block' }} />
               <span style={{ color: p.color, fontWeight: 700 }}>{p.label}</span>
               <span>{p.date}:</span>
-              <span style={{ color: '#cbd5e1', fontWeight: 600 }}>{formatter(p.v30)}</span>
+              <span style={{ color: LINE_COLORS.ma30, fontWeight: 600 }}>30d {formatter(p.v30)}</span>
+              {field90 && (
+                <span style={{ color: LINE_COLORS.ma90, fontWeight: 600 }}>90d {formatter(p.v90)}</span>
+              )}
             </span>
           ))}
-          {delta && (
-            <span style={{ marginLeft: 'auto', color: '#cbd5e1' }}>
-              Δ&nbsp;
-              <span style={{ color: delta.abs >= 0 ? '#22d3ee' : '#ff2d6f', fontWeight: 700 }}>
-                {delta.abs >= 0 ? '+' : ''}{formatter(delta.abs)}
-              </span>
-              {delta.pct != null && (
-                <span style={{ color: delta.abs >= 0 ? '#22d3ee' : '#ff2d6f', marginLeft: 4 }}>
-                  ({delta.abs >= 0 ? '+' : ''}{(delta.pct * 100).toFixed(1)}%)
+          {(delta30 || delta90) && (
+            <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+              {delta30 && (
+                <span style={{ color: '#94a3b8' }}>
+                  <span style={{ color: LINE_COLORS.ma30 }}>Δ30</span>&nbsp;
+                  <span style={{ color: delta30.abs >= 0 ? '#22d3ee' : '#ff2d6f', fontWeight: 700 }}>
+                    {delta30.abs >= 0 ? '+' : ''}{formatter(delta30.abs)}
+                  </span>
+                  {delta30.pct != null && (
+                    <span style={{ color: delta30.abs >= 0 ? '#22d3ee' : '#ff2d6f', marginLeft: 4 }}>
+                      ({delta30.abs >= 0 ? '+' : ''}{(delta30.pct * 100).toFixed(1)}%)
+                    </span>
+                  )}
+                </span>
+              )}
+              {delta90 && (
+                <span style={{ color: '#94a3b8' }}>
+                  <span style={{ color: LINE_COLORS.ma90 }}>Δ90</span>&nbsp;
+                  <span style={{ color: delta90.abs >= 0 ? '#22d3ee' : '#ff2d6f', fontWeight: 700 }}>
+                    {delta90.abs >= 0 ? '+' : ''}{formatter(delta90.abs)}
+                  </span>
+                  {delta90.pct != null && (
+                    <span style={{ color: delta90.abs >= 0 ? '#22d3ee' : '#ff2d6f', marginLeft: 4 }}>
+                      ({delta90.abs >= 0 ? '+' : ''}{(delta90.pct * 100).toFixed(1)}%)
+                    </span>
+                  )}
                 </span>
               )}
             </span>
