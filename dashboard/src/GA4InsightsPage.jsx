@@ -11,6 +11,8 @@ import {
   useLocalStorageState, clearAllFilters,
 } from './FilterControls';
 import { movingAverage, slopeLastN, weekdaysOnly } from './utils/analytics';
+import { usePins, trimToYesterday } from './utils/pins';
+import { ReferenceLine } from 'recharts';
 
 // Seconds → "1m 23s" or "45s". Used for avg session duration KPI.
 function fmtDuration(secs) {
@@ -63,7 +65,13 @@ function ChartTooltip({ active, payload, label, formatter }) {
   );
 }
 
-function StackedChannelChart({ data, channels, formatter = fmtNum }) {
+function StackedChannelChart({ data: rawData, channels, formatter = fmtNum }) {
+  const data = useMemo(() => trimToYesterday(rawData), [rawData]);
+  const { pins, togglePin } = usePins();
+  const handleChartClick = useCallback((state) => {
+    if (state && typeof state.activeLabel === 'string') togglePin(state.activeLabel);
+  }, [togglePin]);
+
   const monthTicks = useMemo(() => {
     const starts = [];
     let prev = null;
@@ -84,8 +92,14 @@ function StackedChannelChart({ data, channels, formatter = fmtNum }) {
         Sessions by channel (stacked daily)
       </div>
       <ResponsiveContainer width="100%" height={280}>
-        <AreaChart data={data} syncId="rf-dashboard-charts" syncMethod="value"
-          margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+        <AreaChart
+          data={data}
+          syncId="rf-dashboard-charts"
+          syncMethod="value"
+          margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
+          onClick={handleChartClick}
+          style={{ cursor: 'crosshair' }}
+        >
           <CartesianGrid strokeDasharray="3 3" stroke="#64748b" strokeOpacity={0.4} />
           <XAxis
             dataKey="date" tickFormatter={fmtAxisDate}
@@ -99,6 +113,17 @@ function StackedChannelChart({ data, channels, formatter = fmtNum }) {
             axisLine={false} tickLine={false} width={55}
           />
           <Tooltip content={<ChartTooltip formatter={formatter} />} />
+          {pins.map(p => (
+            <ReferenceLine
+              key={p.date}
+              x={p.date}
+              stroke={p.color}
+              strokeWidth={1.5}
+              strokeDasharray="4 3"
+              ifOverflow="hidden"
+              label={{ value: p.label, position: 'top', fill: p.color, fontSize: 10, fontWeight: 700 }}
+            />
+          ))}
           {channels.map((ch, i) => (
             <Area
               key={ch} type="monotone" dataKey={ch} name={ch}

@@ -8,6 +8,7 @@ import SEOKPIsPage from './SEOKPIsPage';
 import CrossSourcePage from './CrossSourcePage';
 import DSOATDLogo from './components/DSOATDLogo';
 import RFTILogo from './components/RFTILogo';
+import { PinProvider, PinPanel } from './utils/pins';
 
 function OverviewPage() {
   const [data, setData] = useState(null);
@@ -94,41 +95,44 @@ export default function App() {
   });
 
   return (
-    <div style={{
-      background: 'var(--dso-bg)',
-      color: 'var(--dso-text)',
-      minHeight: '100vh',
-      fontFamily: "var(--dso-font-body, system-ui, -apple-system, sans-serif)",
-    }}>
-      <header style={{ padding: '16px clamp(12px, 4vw, 32px) 0', borderBottom: '1px solid var(--dso-rule)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, paddingBottom: 12 }}>
-          <RFTILogo
-            size={22}
-            color="var(--dso-sky-bright, #a8d8e8)"
-            hot="var(--dso-accent-hot)"
-            showFrame={false}
-            showTagline={false}
-          />
-          <span className="dso-auto-tag" style={{ fontSize: 11 }}>Traffic Intelligence · Live</span>
-        </div>
-        <nav style={{ display: 'flex', gap: 2, overflowX: 'auto', whiteSpace: 'nowrap' }}>
-          <button style={tabStyle(tab === 'overview')} onClick={() => setTab('overview')}>Overview</button>
-          <button style={tabStyle(tab === 'filtered')} onClick={() => setTab('filtered')}>By Part Group / Rep</button>
-          <button style={tabStyle(tab === 'pg-r')} onClick={() => setTab('pg-r')}>Part Group r-Analysis</button>
-          <button style={tabStyle(tab === 'ga4')} onClick={() => setTab('ga4')}>GA4 Insights</button>
-          <button style={tabStyle(tab === 'paid')} onClick={() => setTab('paid')}>Paid KPIs</button>
-          <button style={tabStyle(tab === 'seo')} onClick={() => setTab('seo')}>SEO KPIs</button>
-          <button style={tabStyle(tab === 'cross')} onClick={() => setTab('cross')}>Cross-Source</button>
-        </nav>
-      </header>
+    <PinProvider>
+      <div style={{
+        background: 'var(--dso-bg)',
+        color: 'var(--dso-text)',
+        minHeight: '100vh',
+        fontFamily: "var(--dso-font-body, system-ui, -apple-system, sans-serif)",
+      }}>
+        <PinPanel />
+        <header style={{ padding: '16px clamp(12px, 4vw, 32px) 0', borderBottom: '1px solid var(--dso-rule)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, paddingBottom: 12 }}>
+            <RFTILogo
+              size={22}
+              color="var(--dso-sky-bright, #a8d8e8)"
+              hot="var(--dso-accent-hot)"
+              showFrame={false}
+              showTagline={false}
+            />
+            <span className="dso-auto-tag" style={{ fontSize: 11 }}>Traffic Intelligence · Live</span>
+          </div>
+          <nav style={{ display: 'flex', gap: 2, overflowX: 'auto', whiteSpace: 'nowrap' }}>
+            <button style={tabStyle(tab === 'overview')} onClick={() => setTab('overview')}>Overview</button>
+            <button style={tabStyle(tab === 'filtered')} onClick={() => setTab('filtered')}>By Part Group / Rep</button>
+            <button style={tabStyle(tab === 'pg-r')} onClick={() => setTab('pg-r')}>Part Group r-Analysis</button>
+            <button style={tabStyle(tab === 'ga4')} onClick={() => setTab('ga4')}>GA4 Insights</button>
+            <button style={tabStyle(tab === 'paid')} onClick={() => setTab('paid')}>Paid KPIs</button>
+            <button style={tabStyle(tab === 'seo')} onClick={() => setTab('seo')}>SEO KPIs</button>
+            <button style={tabStyle(tab === 'cross')} onClick={() => setTab('cross')}>Cross-Source</button>
+          </nav>
+        </header>
 
-      {tab === 'overview' && <OverviewPage />}
-      {tab === 'filtered' && <FilteredPage />}
-      {tab === 'pg-r' && <PartGroupAnalysisPage />}
-      {tab === 'ga4' && <GA4InsightsPage />}
-      {tab === 'paid' && <PaidKPIsPage />}
-      {tab === 'seo' && <SEOKPIsPage />}
-      {tab === 'cross' && <CrossSourcePage />}
-    </div>
+        {tab === 'overview' && <OverviewPage />}
+        {tab === 'filtered' && <FilteredPage />}
+        {tab === 'pg-r' && <PartGroupAnalysisPage />}
+        {tab === 'ga4' && <GA4InsightsPage />}
+        {tab === 'paid' && <PaidKPIsPage />}
+        {tab === 'seo' && <SEOKPIsPage />}
+        {tab === 'cross' && <CrossSourcePage />}
+      </div>
+    </PinProvider>
   );
 }

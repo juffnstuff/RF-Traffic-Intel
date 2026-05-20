@@ -6,6 +6,7 @@ import {
 } from 'recharts';
 import { movingAverage, leadLag, leadLagDetrended, slopeLastN, weekdaysOnly } from './utils/analytics';
 import { RELATIVE_RANGES, RangeDropdown, YearsDropdown, useLocalStorageState, clearAllFilters } from './FilterControls';
+import { usePins, trimToYesterday } from './utils/pins';
 
 export function fmtNum(n) {
   if (n == null || Number.isNaN(n)) return '—';
@@ -161,12 +162,44 @@ const LINE_COLORS = {
   ma90: '#a8d8e8',
 };
 
-export function DMALineChart({ title, data, field30, field90, fieldRaw, formatter = fmtNum, currentValue, showDaily = true }) {
+export function DMALineChart({ title, data: rawData, field30, field90, fieldRaw, formatter = fmtNum, currentValue, showDaily = true }) {
+  // Drop today's still-in-progress row from every chart. Today's quotes /
+  // orders / ship totals aren't done updating yet, so the trailing tail
+  // of any DMA collapses unless we cut it. Trim happens here (in the one
+  // chart component every page uses) so callsites stay simple.
+  const data = useMemo(() => trimToYesterday(rawData), [rawData]);
+
   const latest30 = data.length > 0 ? data[data.length - 1]?.[field30] : null;
   const [hover, setHover] = useState(null);
   const handleHoverChange = useCallback(setHover, []);
   const hov30 = hover?.payload.find(p => p.name === '30 DMA')?.value ?? null;
   const hov90 = hover?.payload.find(p => p.name === '90 DMA')?.value ?? null;
+
+  // Cross-chart pinned dates. Click anywhere on the chart to pin that
+  // date; clicking an already-pinned date removes it. Up to 2 pins.
+  const { pins, togglePin } = usePins();
+  const handleChartClick = useCallback((state) => {
+    if (state && typeof state.activeLabel === 'string') togglePin(state.activeLabel);
+  }, [togglePin]);
+
+  // Look up each pin's value on this chart's data (30 DMA + 90 DMA series).
+  // Falls back to "—" when the pin date isn't in this chart's dataset (e.g.
+  // weekday-only filter excluded that day).
+  const pinValues = useMemo(() => pins.map(p => {
+    const row = data.find(r => r.date === p.date);
+    return {
+      ...p,
+      v30: row ? row[field30] : null,
+      v90: row && field90 ? row[field90] : null,
+    };
+  }), [pins, data, field30, field90]);
+
+  const delta = pinValues.length === 2 && pinValues[0].v30 != null && pinValues[1].v30 != null
+    ? {
+        abs: pinValues[1].v30 - pinValues[0].v30,
+        pct: pinValues[0].v30 !== 0 ? (pinValues[1].v30 - pinValues[0].v30) / Math.abs(pinValues[0].v30) : null,
+      }
+    : null;
 
   // One tick per month-start date in the visible data. If the view spans many
   // months, thin so labels don't collide (~18 ticks max for a typical tile).
@@ -263,8 +296,50 @@ export function DMALineChart({ title, data, field30, field90, fieldRaw, formatte
           </div>
         </div>
       </div>
+      {pinValues.length > 0 && (
+        <div style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 12,
+          fontSize: 10,
+          fontFamily: "var(--dso-font-mono, ui-monospace, Menlo, monospace)",
+          color: '#94a3b8',
+          marginBottom: 6,
+          paddingBottom: 4,
+          borderBottom: '1px dashed #334155',
+        }}>
+          {pinValues.map(p => (
+            <span key={p.date} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ width: 8, height: 8, background: p.color, borderRadius: 2, display: 'inline-block' }} />
+              <span style={{ color: p.color, fontWeight: 700 }}>{p.label}</span>
+              <span>{p.date}:</span>
+              <span style={{ color: '#cbd5e1', fontWeight: 600 }}>{formatter(p.v30)}</span>
+            </span>
+          ))}
+          {delta && (
+            <span style={{ marginLeft: 'auto', color: '#cbd5e1' }}>
+              Δ&nbsp;
+              <span style={{ color: delta.abs >= 0 ? '#22d3ee' : '#ff2d6f', fontWeight: 700 }}>
+                {delta.abs >= 0 ? '+' : ''}{formatter(delta.abs)}
+              </span>
+              {delta.pct != null && (
+                <span style={{ color: delta.abs >= 0 ? '#22d3ee' : '#ff2d6f', marginLeft: 4 }}>
+                  ({delta.abs >= 0 ? '+' : ''}{(delta.pct * 100).toFixed(1)}%)
+                </span>
+              )}
+            </span>
+          )}
+        </div>
+      )}
       <ResponsiveContainer width="100%" height={220}>
-        <LineChart data={data} syncId="rf-dashboard-charts" syncMethod="value" margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+        <LineChart
+          data={data}
+          syncId="rf-dashboard-charts"
+          syncMethod="value"
+          margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
+          onClick={handleChartClick}
+          style={{ cursor: 'crosshair' }}
+        >
           <CartesianGrid strokeDasharray="3 3" stroke="var(--dso-rule)" strokeOpacity={0.5} />
           <XAxis
             dataKey="date" tickFormatter={fmtAxisDate}
@@ -278,6 +353,23 @@ export function DMALineChart({ title, data, field30, field90, fieldRaw, formatte
             axisLine={false} tickLine={false} width={55}
           />
           <Tooltip content={<HoverSniffer onHoverChange={handleHoverChange} />} cursor={{ stroke: 'var(--dso-rule)', strokeWidth: 1 }} />
+          {pins.map(p => (
+            <ReferenceLine
+              key={p.date}
+              x={p.date}
+              stroke={p.color}
+              strokeWidth={1.5}
+              strokeDasharray="4 3"
+              ifOverflow="hidden"
+              label={{
+                value: p.label,
+                position: 'top',
+                fill: p.color,
+                fontSize: 10,
+                fontWeight: 700,
+              }}
+            />
+          ))}
           {fieldRaw && showDaily && (
             <Line
               type="monotone" dataKey={fieldRaw} name="Daily"
