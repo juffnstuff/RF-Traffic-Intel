@@ -208,6 +208,9 @@ export default function CrossSourcePage() {
   const [texts, setTexts] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Bumped after any mapping mutation so both the suggester and the
+  // editable mappings table re-fetch.
+  const [mappingsVersion, setMappingsVersion] = useState(0);
 
   // Years available depend on Ads + GA4 data extents — fetch a probe call
   // first so we can populate the YearsDropdown with real options.
@@ -359,7 +362,11 @@ export default function CrossSourcePage() {
         </section>
       )}
 
-      <PartGroupMappingsAdmin />
+      <CampaignMappingSuggester
+        version={mappingsVersion}
+        onChange={() => setMappingsVersion(v => v + 1)}
+      />
+      <PartGroupMappingsAdmin reloadKey={mappingsVersion} />
     </div>
   );
 }
@@ -483,7 +490,7 @@ const MATCH_KIND_LABELS = {
   prefix:   'starts with',
 };
 
-function PartGroupMappingsAdmin() {
+function PartGroupMappingsAdmin({ reloadKey = 0 } = {}) {
   const [mappings, setMappings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -499,7 +506,7 @@ function PartGroupMappingsAdmin() {
       .finally(() => setLoading(false));
   };
 
-  useEffect(reload, []);
+  useEffect(reload, [reloadKey]);
 
   const resetForm = () => {
     setForm({ part_group: '', match_type: 'campaign', match_kind: 'contains', pattern: '', notes: '' });
@@ -718,6 +725,251 @@ function PartGroupMappingsAdmin() {
               ))}
             </tbody>
           </table>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ─── Campaign → part-group mapping suggester ───────────────────────
+//
+// Surfaces every distinct Ads / GA4 campaign name with the top 3 ranked
+// part-group candidates derived from token overlap (server-side). One
+// click on a candidate chip POSTs to /api/mappings — which means the new
+// row drops straight into the editable table below where it can be
+// tweaked (match_kind switched to 'contains', pattern shortened, etc.)
+// or deleted if the suggester guessed wrong.
+function CampaignMappingSuggester({ version = 0, onChange }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [filter, setFilter] = useState('unmapped');
+  const [busy, setBusy] = useState(new Set());
+  const [showAll, setShowAll] = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    fetch('/api/mappings/suggest-campaigns')
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(j => setData(j))
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [version]);
+
+  const accept = async (campaignName, partGroup) => {
+    setBusy(prev => new Set([...prev, campaignName]));
+    setError(null);
+    try {
+      const res = await fetch('/api/mappings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          part_group: partGroup,
+          match_type: 'campaign',
+          match_kind: 'exact',
+          pattern: campaignName,
+          notes: 'Auto-suggested',
+        }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || `HTTP ${res.status}`);
+      }
+      onChange?.();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(prev => { const n = new Set(prev); n.delete(campaignName); return n; });
+    }
+  };
+
+  const filtered = (data?.suggestions || []).filter(s => {
+    if (filter === 'unmapped') return !s.existing_mapping;
+    if (filter === 'mapped')   return !!s.existing_mapping;
+    return true;
+  });
+  const visible = showAll ? filtered : filtered.slice(0, 100);
+
+  const counts = useMemo(() => {
+    const all = data?.suggestions || [];
+    const mapped = all.filter(s => s.existing_mapping).length;
+    return { all: all.length, mapped, unmapped: all.length - mapped };
+  }, [data]);
+
+  const filterBtn = (key, label, n) => (
+    <button
+      type="button"
+      onClick={() => { setFilter(key); setShowAll(false); }}
+      style={{
+        background: filter === key ? 'var(--dso-accent-hot)' : 'transparent',
+        color: filter === key ? 'white' : 'var(--dso-text-dim)',
+        border: `1px solid ${filter === key ? 'var(--dso-accent-hot)' : 'var(--dso-rule)'}`,
+        padding: '5px 12px',
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: '0.12em',
+        textTransform: 'uppercase',
+        cursor: 'pointer',
+        borderRadius: 3,
+      }}
+    >
+      {label} <span style={{ opacity: 0.7, marginLeft: 4 }}>{n}</span>
+    </button>
+  );
+
+  return (
+    <section style={{ marginBottom: 20 }}>
+      <h3 style={{
+        fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+        fontSize: 14,
+        fontWeight: 600,
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        color: 'var(--dso-text-dim)',
+        marginBottom: 10,
+      }}>Campaign → Part-Group Suggestions</h3>
+
+      <div style={{
+        background: 'var(--dso-surface)',
+        borderRadius: 4,
+        padding: '14px 16px',
+        border: '1px solid var(--dso-rule)',
+      }}>
+        <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 12, lineHeight: 1.5 }}>
+          Every distinct campaign across Google Ads + GA4, ranked against your NetSuite part groups by name-token overlap.
+          Click a candidate chip to auto-create a mapping — it lands in the editable table below where you can fine-tune match kind, pattern, or notes.
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+          {filterBtn('unmapped', 'Unmapped', counts.unmapped)}
+          {filterBtn('mapped',   'Mapped',   counts.mapped)}
+          {filterBtn('all',      'All',      counts.all)}
+          {data && (
+            <span style={{ color: 'var(--dso-text-faint)', fontSize: 10, marginLeft: 'auto' }}>
+              {data.part_group_count} part groups · refreshed {new Date(data.generated).toLocaleTimeString()}
+            </span>
+          )}
+        </div>
+
+        {error  && <div style={{ color: '#f87171', fontSize: 12, marginBottom: 10 }}>Error: {error}</div>}
+        {loading && <div style={{ color: 'var(--dso-text-dim)', fontSize: 12 }}>Loading suggestions…</div>}
+
+        {!loading && filtered.length === 0 && (
+          <div style={{ color: 'var(--dso-text-faint)', fontSize: 12, padding: '12px 0' }}>
+            {filter === 'unmapped' && counts.all > 0 && counts.mapped === counts.all
+              ? 'All campaigns are mapped. Switch to "Mapped" or "All" to review.'
+              : 'No campaigns to suggest. Make sure Google Ads and GA4 fetchers have run.'}
+          </div>
+        )}
+
+        {!loading && filtered.length > 0 && (
+          <>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
+              <thead>
+                <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+                  <th style={{ padding: '8px 10px', fontWeight: 600 }}>Campaign</th>
+                  <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Spend</th>
+                  <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Sessions</th>
+                  <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Conv.</th>
+                  <th style={{ padding: '8px 10px', fontWeight: 600 }}>Last seen</th>
+                  <th style={{ padding: '8px 10px', fontWeight: 600 }}>Candidates</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visible.map((s, i) => {
+                  const isBusy = busy.has(s.campaign_name);
+                  return (
+                    <tr key={s.campaign_name} style={{ borderTop: i === 0 ? '1px solid var(--dso-rule)' : '1px solid var(--dso-rule)' }}>
+                      <td style={{
+                        padding: '8px 10px', fontFamily: 'var(--dso-font-mono, monospace)',
+                        maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }} title={s.campaign_name}>
+                        {s.campaign_name}
+                      </td>
+                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFeatureSettings: '"tnum"' }}>
+                        {s.total_cost > 0 ? fmtMoney(s.total_cost) : <span style={{ color: 'var(--dso-text-faint)' }}>—</span>}
+                      </td>
+                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFeatureSettings: '"tnum"' }}>
+                        {fmtNum(s.total_sessions)}
+                      </td>
+                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFeatureSettings: '"tnum"' }}>
+                        {fmtNum(s.total_conversions)}
+                      </td>
+                      <td style={{ padding: '8px 10px', color: 'var(--dso-text-dim)' }}>
+                        {s.last_seen || '—'}
+                      </td>
+                      <td style={{ padding: '8px 10px' }}>
+                        {s.existing_mapping ? (
+                          <span style={{ color: '#34d399', fontSize: 11 }}>
+                            ✓ Mapped to <strong>{s.existing_mapping.part_group}</strong>
+                            <span style={{ color: 'var(--dso-text-faint)', marginLeft: 6 }}>
+                              ({s.existing_mapping.match_kind}: {s.existing_mapping.pattern})
+                            </span>
+                          </span>
+                        ) : s.candidates.length === 0 ? (
+                          <span style={{ color: 'var(--dso-text-faint)', fontSize: 11, fontStyle: 'italic' }}>
+                            No keyword match — add manually below
+                          </span>
+                        ) : (
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            {s.candidates.map((c, ci) => {
+                              const isStrong = c.score >= 1.0;
+                              const isMid    = c.score >= 0.5 && c.score < 1.0;
+                              const color = isStrong ? '#34d399' : isMid ? '#fbbf24' : '#94a3b8';
+                              return (
+                                <button
+                                  key={c.part_group}
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => accept(s.campaign_name, c.part_group)}
+                                  title={`Accept · score ${c.score.toFixed(2)} · ${c.reason}`}
+                                  style={{
+                                    background: ci === 0 ? color : 'transparent',
+                                    color: ci === 0 ? '#0f172a' : color,
+                                    border: `1px solid ${color}`,
+                                    padding: '3px 9px',
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    cursor: isBusy ? 'wait' : 'pointer',
+                                    borderRadius: 3,
+                                    opacity: isBusy ? 0.5 : 1,
+                                  }}
+                                >
+                                  {c.part_group}
+                                  <span style={{ opacity: 0.7, marginLeft: 5, fontSize: 9 }}>
+                                    {c.score.toFixed(2)}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {filtered.length > visible.length && (
+              <button
+                type="button"
+                onClick={() => setShowAll(true)}
+                style={{
+                  marginTop: 10,
+                  background: 'transparent',
+                  color: 'var(--dso-text-dim)',
+                  border: '1px solid var(--dso-rule)',
+                  padding: '6px 14px',
+                  fontSize: 11,
+                  cursor: 'pointer',
+                  borderRadius: 3,
+                }}
+              >
+                Show all {filtered.length} →
+              </button>
+            )}
+          </>
         )}
       </div>
     </section>

@@ -2696,6 +2696,63 @@ function validateMappingFields({ part_group, match_type, match_kind, pattern }) 
   }
 }
 
+// Used by the campaign → part-group mapping suggester. Returns one row
+// per distinct campaign_name across Google Ads + GA4, with rollup metrics
+// so the UI can sort by spend / sessions / conversions. The OUTER JOIN
+// catches campaigns that appear in one table but not the other (paid
+// names without GA4 tagging, or organic campaigns from GA4 that don't
+// exist in Ads).
+export async function getDistinctCampaignsForSuggester() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    WITH ads AS (
+      SELECT campaign_name,
+             SUM(cost)::float        AS total_cost,
+             SUM(conversions)::float AS total_conversions,
+             MAX(date)::text         AS last_seen
+      FROM google_ads_daily_by_campaign
+      WHERE campaign_name <> ''
+      GROUP BY campaign_name
+    ),
+    ga4 AS (
+      SELECT campaign_name,
+             SUM(sessions)::int      AS total_sessions,
+             SUM(conversions)::float AS ga4_conversions,
+             MAX(date)::text         AS last_seen
+      FROM ga4_daily_by_campaign
+      WHERE campaign_name <> ''
+        AND campaign_name <> '(not set)'
+        AND campaign_name <> '(direct)'
+      GROUP BY campaign_name
+    )
+    SELECT
+      COALESCE(ads.campaign_name, ga4.campaign_name) AS campaign_name,
+      COALESCE(ads.total_cost, 0)::float             AS total_cost,
+      COALESCE(ga4.total_sessions, 0)::int           AS total_sessions,
+      COALESCE(ads.total_conversions, ga4.ga4_conversions, 0)::float AS total_conversions,
+      GREATEST(ads.last_seen, ga4.last_seen)         AS last_seen
+    FROM ads
+    FULL OUTER JOIN ga4 USING (campaign_name)
+    ORDER BY total_cost DESC NULLS LAST, total_sessions DESC NULLS LAST
+  `);
+  return rows;
+}
+
+// Distinct non-empty part groups from the NetSuite line-level dim table.
+// The canonical source — these strings exactly match what's stored on
+// quote/SO lines, so a mapping pattern set against them roll up
+// correctly downstream.
+export async function getDistinctPartGroups() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT DISTINCT part_group
+    FROM netsuite_daily_dim
+    WHERE part_group <> ''
+    ORDER BY part_group ASC
+  `);
+  return rows.map(r => r.part_group);
+}
+
 export async function listPartGroupMappings() {
   const p = getPool();
   const { rows } = await p.query(`
