@@ -1,16 +1,20 @@
 /**
  * fetch-hubspot.js
  *
- * Pulls closed-won deals + marketing campaigns (when available) from HubSpot
- * using a Private App token. Feeds the Paid / SEO KPI tabs: deals act as the
- * "true acquisition" denominator for CPA, and `hs_analytics_source` drives
- * the paid-vs-organic attribution split.
+ * Pulls deals + contacts + marketing campaigns from HubSpot using a Private
+ * App token. Contacts carry NetSuite-linked custom properties
+ * (`netsuite_quote_number`, `netsuite_quote_status`, …) that the existing
+ * NS↔HS middleware writes — those give us a direct primary-key bridge from a
+ * HubSpot contact to a NetSuite transaction (tran_id), so we can attribute
+ * NetSuite revenue back to HubSpot's first-touch source/campaign.
  *
  * Env required:
  *   HUBSPOT_PRIVATE_APP_TOKEN — Settings → Integrations → Private Apps → Create
  *     Minimum scopes:
  *       crm.objects.deals.read
  *       crm.schemas.deals.read
+ *       crm.objects.contacts.read
+ *       crm.schemas.contacts.read
  *     For campaigns (Marketing Hub only; safe to omit):
  *       crm.objects.marketing_events.read
  *
@@ -104,6 +108,33 @@ const DEAL_PROPS = [
   'createdate', 'hs_lastmodifieddate',
 ];
 
+// Contact properties we care about. Two clusters:
+//   1. HubSpot's first-touch attribution (hs_analytics_*, lead_source, gclid)
+//      — this is the *real* lead-source signal we want to attribute revenue to.
+//   2. NetSuite-linked fields written into HubSpot by the existing NS↔HS
+//      middleware (netsuite_quote_*). These give us a direct, primary-key-style
+//      bridge from a HubSpot contact to a NetSuite transaction via tran_id —
+//      no email-normalization fuzz needed.
+const CONTACT_PROPS = [
+  // identity
+  'email', 'firstname', 'lastname',
+  // HubSpot first-touch + recent-touch attribution
+  'hs_analytics_source', 'hs_analytics_source_data_1', 'hs_analytics_source_data_2',
+  'hs_latest_source', 'hs_latest_source_data_1', 'hs_latest_source_data_2',
+  'lead_source', 'source',
+  'gclid',
+  'first_campaign_contacted', 'last_campaign_contacted', 'current_roi_campaign',
+  // NetSuite bridge fields (written by the existing NS↔HS integration)
+  'netsuite_quote_number', 'netsuite_quote_date', 'netsuite_quote_status',
+  'netsuite_contact_status', 'netsuite_lifecycle_stage',
+  'netsuite_sales_rep', 'netsuite_subsidiary',
+  'customer_type', 'company_type',
+  // form metadata (useful for diagnostic on conversion path)
+  'form_type',
+  // lifecycle timestamps
+  'createdate', 'lastmodifieddate',
+];
+
 // ── Deal search (paginated) ───────────────────────────────────────────
 async function fetchDeals({ sinceEpochMs = null } = {}) {
   const results = [];
@@ -137,6 +168,66 @@ async function fetchDeals({ sinceEpochMs = null } = {}) {
   return results;
 }
 
+// ── Contact search (paginated) ────────────────────────────────────────
+// We pull every contact that has an email (anonymous contacts can't be
+// joined to NetSuite anyway). Incremental mode filters by lastmodifieddate.
+async function fetchContacts({ sinceEpochMs = null } = {}) {
+  const results = [];
+  let after = undefined;
+  const filters = [
+    // Require an email so the email-fallback NS join has something to work
+    // with. Contacts without an email but with netsuite_quote_number set are
+    // rare — but if it happens, we still want them: OR'd in via a separate
+    // filterGroup (HubSpot treats filterGroups as OR'd together).
+    { propertyName: 'email', operator: 'HAS_PROPERTY' },
+  ];
+  if (sinceEpochMs) {
+    filters.push({
+      propertyName: 'lastmodifieddate',
+      operator: 'GTE',
+      value: String(sinceEpochMs),
+    });
+  }
+  const filterGroups = [
+    { filters },
+    // Always include contacts with a NetSuite quote number, even if no email.
+    {
+      filters: [
+        { propertyName: 'netsuite_quote_number', operator: 'HAS_PROPERTY' },
+        ...(sinceEpochMs ? [{
+          propertyName: 'lastmodifieddate',
+          operator: 'GTE',
+          value: String(sinceEpochMs),
+        }] : []),
+      ],
+    },
+  ];
+  while (true) {
+    const body = {
+      filterGroups,
+      properties: CONTACT_PROPS,
+      sorts: [{ propertyName: 'lastmodifieddate', direction: 'DESCENDING' }],
+      limit: 100,
+      after,
+    };
+    const res = await hsFetch(`${BASE}/crm/v3/objects/contacts/search`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }, 'contacts.search');
+    const j = await res.json();
+    for (const c of (j.results || [])) results.push(c);
+    after = j.paging?.next?.after;
+    if (!after) break;
+    // Same bail-out cap pattern as deals. HubSpot's search API caps at
+    // ~10k results per query anyway, so this is mainly belt-and-suspenders.
+    if (results.length > 200000) {
+      console.warn('    ⚠️  contact pagination exceeded 200k — stopping');
+      break;
+    }
+  }
+  return results;
+}
+
 // ── Marketing campaigns (tier-gated, optional) ────────────────────────
 async function fetchCampaigns() {
   const results = [];
@@ -161,6 +252,14 @@ async function fetchCampaigns() {
     if (!after) break;
   }
   return { results, available: true };
+}
+
+function normalizeEmail(e) {
+  if (!e || typeof e !== 'string') return null;
+  const trimmed = e.trim().toLowerCase();
+  // Same shape as netsuite_customers.email_normalized so the email-fallback
+  // join works as a plain equality.
+  return trimmed || null;
 }
 
 function parseDate(s) {
@@ -208,6 +307,46 @@ export async function fetchHubSpot({ since = null } = {}) {
     };
   });
 
+  console.log('  → contacts...');
+  const rawContacts = await fetchContacts({ sinceEpochMs });
+  console.log(`    ${rawContacts.length} contacts fetched`);
+
+  const contactRows = rawContacts.map(c => {
+    const p = c.properties || {};
+    return {
+      contact_id:                c.id,
+      email:                     p.email || '',
+      email_normalized:          normalizeEmail(p.email),
+      first_name:                p.firstname || '',
+      last_name:                 p.lastname || '',
+      hs_analytics_source:       p.hs_analytics_source || '',
+      hs_analytics_source_data_1:p.hs_analytics_source_data_1 || '',
+      hs_analytics_source_data_2:p.hs_analytics_source_data_2 || '',
+      hs_latest_source:          p.hs_latest_source || '',
+      hs_latest_source_data_1:   p.hs_latest_source_data_1 || '',
+      hs_latest_source_data_2:   p.hs_latest_source_data_2 || '',
+      lead_source:               p.lead_source || '',
+      source:                    p.source || '',
+      gclid:                     p.gclid || '',
+      first_campaign_contacted:  p.first_campaign_contacted || '',
+      last_campaign_contacted:   p.last_campaign_contacted || '',
+      current_roi_campaign:      p.current_roi_campaign || '',
+      // NetSuite bridge — the high-confidence join key to netsuite_transactions.tran_id
+      netsuite_quote_number:     p.netsuite_quote_number || '',
+      netsuite_quote_date:       p.netsuite_quote_date ? p.netsuite_quote_date.slice(0, 10) : null,
+      netsuite_quote_status:     p.netsuite_quote_status || '',
+      netsuite_contact_status:   p.netsuite_contact_status || '',
+      netsuite_lifecycle_stage:  p.netsuite_lifecycle_stage || '',
+      netsuite_sales_rep:        p.netsuite_sales_rep || '',
+      netsuite_subsidiary:       p.netsuite_subsidiary || '',
+      customer_type:             p.customer_type || '',
+      company_type:              p.company_type || '',
+      form_type:                 p.form_type || '',
+      created_at:                parseDate(p.createdate),
+      modified_at:               parseDate(p.lastmodifieddate),
+    };
+  });
+
   console.log('  → marketing campaigns...');
   const { results: rawCampaigns, available: campaignsAvailable } = await fetchCampaigns();
   const campaignRows = rawCampaigns.map(c => ({
@@ -225,20 +364,22 @@ export async function fetchHubSpot({ since = null } = {}) {
     since,
     campaignsAvailable,
     deals: dealRows,
+    contacts: contactRows,
     campaigns: campaignRows,
   }, null, 2));
-  console.log(`✅  Wrote HubSpot cache: ${dealRows.length} deals + ${campaignRows.length} campaigns`);
+  console.log(`✅  Wrote HubSpot cache: ${dealRows.length} deals + ${contactRows.length} contacts + ${campaignRows.length} campaigns`);
 
   if (process.env.DATABASE_URL) {
-    const { upsertHubSpotDeals, upsertHubSpotCampaigns } = await import('../db.js');
+    const { upsertHubSpotDeals, upsertHubSpotContacts, upsertHubSpotCampaigns } = await import('../db.js');
     const dealsInserted = await upsertHubSpotDeals(dealRows);
+    const contactsInserted = await upsertHubSpotContacts(contactRows);
     const campaignsInserted = campaignRows.length > 0
       ? await upsertHubSpotCampaigns(campaignRows)
       : 0;
-    console.log(`✅  Upserted ${dealsInserted} deals + ${campaignsInserted} campaigns into PostgreSQL`);
-    return { deals: dealsInserted, campaigns: campaignsInserted, campaignsAvailable };
+    console.log(`✅  Upserted ${dealsInserted} deals + ${contactsInserted} contacts + ${campaignsInserted} campaigns into PostgreSQL`);
+    return { deals: dealsInserted, contacts: contactsInserted, campaigns: campaignsInserted, campaignsAvailable };
   }
-  return { deals: dealRows.length, campaigns: campaignRows.length, campaignsAvailable };
+  return { deals: dealRows.length, contacts: contactRows.length, campaigns: campaignRows.length, campaignsAvailable };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
