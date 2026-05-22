@@ -471,7 +471,16 @@ function CoreWebVitalsByPagePanel({ rows, origin }) {
   );
 }
 
-function FunnelTable({ title, subtitle, rows, columns, emptyMessage = 'No data in the current range.' }) {
+function FunnelTable({
+  title, subtitle, rows, columns,
+  emptyMessage = 'No data in the current range.',
+  // Optional per-row expansion. `isExpandable(row)` decides which rows are
+  // clickable; `onRowToggle(row, i)` is the click handler; `expandedKey` is
+  // a stable value identifying the currently-expanded row (compared against
+  // `getRowKey(row)`); `renderExpanded(row)` returns JSX rendered in a
+  // colSpan'd row underneath.
+  isExpandable, onRowToggle, getRowKey, expandedKey, renderExpanded,
+}) {
   return (
     <div style={{
       background: '#1e293b', borderRadius: 8, padding: '14px 16px',
@@ -490,26 +499,53 @@ function FunnelTable({ title, subtitle, rows, columns, emptyMessage = 'No data i
           </tr>
         </thead>
         <tbody>
-          {(rows || []).map((r, i) => (
-            <tr key={i} style={{ borderTop: i === 0 ? 'none' : '1px solid #334155' }}>
-              {columns.map(c => {
-                const v = r[c.key];
-                const formatted = c.format ? c.format(v, r) : v;
-                return (
-                  <td key={c.key} style={{
-                    padding: '6px 8px',
-                    textAlign: c.align || 'left',
-                    fontFeatureSettings: c.align === 'right' ? '"tnum"' : 'normal',
-                    color: c.dim ? '#94a3b8' : '#e2e8f0',
-                    maxWidth: c.maxWidth, overflow: 'hidden',
-                    textOverflow: 'ellipsis', whiteSpace: c.maxWidth ? 'nowrap' : 'normal',
-                  }} title={c.maxWidth ? String(v ?? '') : undefined}>
-                    {formatted}
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
+          {(rows || []).map((r, i) => {
+            const expandable = isExpandable ? isExpandable(r) : false;
+            const rowKey = getRowKey ? getRowKey(r) : i;
+            const isOpen = expandable && expandedKey != null && expandedKey === rowKey;
+            return (
+              <React.Fragment key={i}>
+                <tr
+                  style={{
+                    borderTop: i === 0 ? 'none' : '1px solid #334155',
+                    cursor: expandable ? 'pointer' : 'default',
+                    background: isOpen ? '#22304a' : 'transparent',
+                  }}
+                  onClick={expandable ? () => onRowToggle?.(r, i) : undefined}
+                  title={expandable ? 'Click to investigate' : undefined}
+                >
+                  {columns.map((c, ci) => {
+                    const v = r[c.key];
+                    const formatted = c.format ? c.format(v, r) : v;
+                    return (
+                      <td key={c.key} style={{
+                        padding: '6px 8px',
+                        textAlign: c.align || 'left',
+                        fontFeatureSettings: c.align === 'right' ? '"tnum"' : 'normal',
+                        color: c.dim ? '#94a3b8' : '#e2e8f0',
+                        maxWidth: c.maxWidth, overflow: 'hidden',
+                        textOverflow: 'ellipsis', whiteSpace: c.maxWidth ? 'nowrap' : 'normal',
+                      }} title={c.maxWidth ? String(v ?? '') : undefined}>
+                        {ci === 0 && expandable && (
+                          <span style={{ color: '#f59e0b', marginRight: 6, fontSize: 10 }}>
+                            {isOpen ? '▾' : '▸'}
+                          </span>
+                        )}
+                        {formatted}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {isOpen && renderExpanded && (
+                  <tr style={{ background: '#0f172a' }}>
+                    <td colSpan={columns.length} style={{ padding: '10px 12px', borderTop: '1px solid #334155' }}>
+                      {renderExpanded(r)}
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
           {(!rows || rows.length === 0) && (
             <tr><td colSpan={columns.length} style={{ padding: '10px 8px', color: '#64748b' }}>
               {emptyMessage}
@@ -730,6 +766,136 @@ function CampaignTable({ rows }) {
   );
 }
 
+// Diagnostic panel rendered when the user expands the "(not set)" landing
+// page row. Pulls a live GA4 breakdown for the current date window —
+// source/medium/channel/device + event-name distribution. Cached per
+// (since,until) pair so re-expanding the same window is instant.
+function NotSetInvestigator({ since, until }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    setLoading(true);
+    setErr(null);
+    const params = new URLSearchParams();
+    if (since) params.set('since', since);
+    if (until) params.set('until', until);
+    const qs = params.toString();
+    fetch(`/api/ga4-not-set-investigate${qs ? `?${qs}` : ''}`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(j => { setData(j); setLoading(false); })
+      .catch(e => { setErr(e.message); setLoading(false); });
+  }, [since, until]);
+
+  if (loading) return <div style={{ color: '#94a3b8', fontSize: 11 }}>Querying GA4 live…</div>;
+  if (err) return <div style={{ color: '#ef4444', fontSize: 11 }}>Couldn’t pull (not set) breakdown: {err}</div>;
+  if (!data || (data.breakdown?.length ?? 0) === 0) {
+    return <div style={{ color: '#94a3b8', fontSize: 11 }}>No (not set) sessions in this window.</div>;
+  }
+
+  const totalSess = data.total_sessions || data.breakdown.reduce((s, r) => s + r.sessions, 0);
+  // Quick diagnostic: ratio of session_start vs page_view. If page_view
+  // is much lower than session_start, the page_view tag isn't firing on
+  // the landing hit — the most common (not set) cause.
+  const ev = (data.events || []);
+  const ss = ev.find(e => e.event_name === 'session_start')?.event_count || 0;
+  const pv = ev.find(e => e.event_name === 'page_view')?.event_count || 0;
+  const pvRatio = ss > 0 ? pv / ss : null;
+
+  return (
+    <div style={{ fontSize: 11, color: '#cbd5e1', lineHeight: 1.5 }}>
+      <div style={{ marginBottom: 8, color: '#94a3b8' }}>
+        <strong style={{ color: '#f59e0b' }}>{fmtNum(totalSess)} (not set) sessions</strong>
+        {' '}between <span style={{ color: '#cbd5e1' }}>{data.since}</span> and{' '}
+        <span style={{ color: '#cbd5e1' }}>{data.until}</span> — live from GA4.
+      </div>
+
+      {pvRatio !== null && (
+        <div style={{
+          padding: '6px 10px',
+          background: pvRatio < 0.5 ? '#3b1f1f' : '#1f3b2c',
+          border: `1px solid ${pvRatio < 0.5 ? '#7f1d1d' : '#14532d'}`,
+          borderRadius: 4,
+          marginBottom: 10,
+          color: pvRatio < 0.5 ? '#fecaca' : '#bbf7d0',
+        }}>
+          <strong>page_view / session_start ratio:</strong> {pvRatio.toFixed(2)}
+          {pvRatio < 0.5 && (
+            <> — likely a tagging issue. session_start is firing but page_view isn't, so GA4 can't capture the landing URL. Check that your gtag/GTM page_view tag fires <em>after</em> page_location is populated, especially on client-side routers and pre-render pages.</>
+          )}
+          {pvRatio >= 0.5 && pvRatio < 0.9 && (
+            <> — slightly low. Some entry hits aren't firing page_view; could be bot traffic or redirect chains. Investigate by device + source below.</>
+          )}
+          {pvRatio >= 0.9 && (
+            <> — healthy. (not set) is likely from server-side redirects, cross-domain entries, or app-style entries rather than tagging issues. Investigate by source below.</>
+          )}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 360px', minWidth: 0 }}>
+          <div style={{ color: '#94a3b8', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
+            Source / Medium · Channel · Device
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+            <thead>
+              <tr style={{ color: '#94a3b8', textAlign: 'left' }}>
+                <th style={{ padding: '4px 6px', fontWeight: 500 }}>Source / Medium</th>
+                <th style={{ padding: '4px 6px', fontWeight: 500 }}>Channel</th>
+                <th style={{ padding: '4px 6px', fontWeight: 500 }}>Device</th>
+                <th style={{ padding: '4px 6px', fontWeight: 500, textAlign: 'right' }}>Sessions</th>
+                <th style={{ padding: '4px 6px', fontWeight: 500, textAlign: 'right' }}>PV/sess</th>
+                <th style={{ padding: '4px 6px', fontWeight: 500, textAlign: 'right' }}>Conv.</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.breakdown.slice(0, 30).map((r, i) => (
+                <tr key={i} style={{ borderTop: i === 0 ? 'none' : '1px solid #334155' }}>
+                  <td style={{ padding: '4px 6px' }}>{r.source} / {r.medium}</td>
+                  <td style={{ padding: '4px 6px', color: '#94a3b8' }}>{r.channel_group}</td>
+                  <td style={{ padding: '4px 6px', color: '#94a3b8' }}>{r.device_category}</td>
+                  <td style={{ padding: '4px 6px', textAlign: 'right', fontFeatureSettings: '"tnum"' }}>{fmtNum(r.sessions)}</td>
+                  <td style={{ padding: '4px 6px', textAlign: 'right', fontFeatureSettings: '"tnum"', color: r.pv_per_session != null && r.pv_per_session < 0.5 ? '#fca5a5' : '#cbd5e1' }}>
+                    {r.pv_per_session != null ? r.pv_per_session.toFixed(2) : '—'}
+                  </td>
+                  <td style={{ padding: '4px 6px', textAlign: 'right', fontFeatureSettings: '"tnum"' }}>{fmtNum(r.conversions)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ flex: '1 1 240px', minWidth: 0 }}>
+          <div style={{ color: '#94a3b8', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
+            Events fired during (not set) sessions
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+            <thead>
+              <tr style={{ color: '#94a3b8', textAlign: 'left' }}>
+                <th style={{ padding: '4px 6px', fontWeight: 500 }}>Event</th>
+                <th style={{ padding: '4px 6px', fontWeight: 500, textAlign: 'right' }}>Count</th>
+                <th style={{ padding: '4px 6px', fontWeight: 500, textAlign: 'right' }}>Sessions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ev.slice(0, 15).map((e, i) => (
+                <tr key={i} style={{ borderTop: i === 0 ? 'none' : '1px solid #334155' }}>
+                  <td style={{ padding: '4px 6px', color: e.event_name === 'page_view' ? '#fcd34d' : e.event_name === 'session_start' ? '#22d3ee' : '#cbd5e1' }}>
+                    {e.event_name}
+                  </td>
+                  <td style={{ padding: '4px 6px', textAlign: 'right', fontFeatureSettings: '"tnum"' }}>{fmtNum(e.event_count)}</td>
+                  <td style={{ padding: '4px 6px', textAlign: 'right', fontFeatureSettings: '"tnum"' }}>{fmtNum(e.sessions)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function GA4InsightsPage() {
   // Share filter state with the other tabs via the same localStorage keys, so
   // switching tabs preserves the user's time selection.
@@ -748,6 +914,7 @@ export default function GA4InsightsPage() {
   const [queryMovers, setQueryMovers] = useState(null);
   const [trendQuery, setTrendQuery] = useState(null);
   const [trendData, setTrendData] = useState(null);
+  const [expandedLanding, setExpandedLanding] = useState(null);
   // Window-aggregated dim breakdowns; refetched on range change.
   const [landingPages, setLandingPages] = useState(null);
   const [sourceMedium, setSourceMedium] = useState(null);
@@ -1343,7 +1510,7 @@ export default function GA4InsightsPage() {
                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
                   <FunnelTable
                     title="Top landing pages by sessions in range"
-                    subtitle="The single most useful SEO read — which pages earn their keep, and which drop off."
+                    subtitle="The single most useful SEO read — which pages earn their keep, and which drop off. Click (not set) to investigate."
                     rows={landingPages.landing_pages}
                     columns={[
                       { key: 'landing_page', label: 'Landing page', maxWidth: 360 },
@@ -1355,6 +1522,15 @@ export default function GA4InsightsPage() {
                       { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
                       { key: 'active_days', label: 'Active days', align: 'right', dim: true, format: v => v ?? '—' },
                     ]}
+                    isExpandable={r => r.landing_page === '(not set)'}
+                    getRowKey={r => r.landing_page}
+                    expandedKey={expandedLanding}
+                    onRowToggle={r => setExpandedLanding(prev => prev === r.landing_page ? null : r.landing_page)}
+                    renderExpanded={() => {
+                      const rows = aggregate?.daily || [];
+                      const until = rows.length ? rows[rows.length - 1].date : null;
+                      return <NotSetInvestigator since={cutoff || null} until={until} />;
+                    }}
                   />
                 </div>
               </>

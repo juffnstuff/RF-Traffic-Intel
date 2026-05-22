@@ -412,6 +412,92 @@ export async function fetchGa4({ since = null } = {}) {
   };
 }
 
+/**
+ * On-demand diagnostic: GA4 sessions where landing_page resolved to "(not
+ * set)" — broken down by source/medium, channel group, device, and event
+ * name. Used by the dashboard's "Investigate (not set)" expander. Runs
+ * live against GA4 (not cached in Postgres) since it's a rare interactive
+ * query and we want it to reflect the user's current date selection.
+ *
+ * Returns { since, until, breakdown: [...], events: [...] }.
+ */
+export async function fetchGa4NotSetBreakdown({ since = null, until = null } = {}) {
+  const propertyId = requireEnv('GA4_PROPERTY_ID');
+  const client = buildClient();
+  const endDate = until || 'today';
+  const startDate = since || (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().slice(0, 10);
+  })();
+
+  const notSetFilter = {
+    filter: {
+      fieldName: 'landingPagePlusQueryString',
+      stringFilter: { matchType: 'EXACT', value: '(not set)' },
+    },
+  };
+
+  // 1) source/medium × channel × device — pinpoints whether "(not set)" is
+  //    concentrated in one acquisition channel or device type.
+  const [bResp] = await runReportWithRetry(client, {
+    property: `properties/${propertyId}`,
+    dateRanges: [{ startDate, endDate }],
+    dimensions: [SOURCE_DIM, MEDIUM_DIM, CHANNEL_DIM, DEVICE_DIM],
+    metrics: [
+      { name: 'sessions' },
+      { name: 'engagedSessions' },
+      { name: 'screenPageViews' },
+      { name: 'conversions' },
+      { name: 'eventCount' },
+    ],
+    dimensionFilter: notSetFilter,
+    orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+    limit: 200,
+  }, 'not-set-breakdown');
+
+  const breakdown = (bResp.rows || []).map(r => {
+    const d = r.dimensionValues || [];
+    const m = r.metricValues || [];
+    const sessions = num(m[0]?.value);
+    const pageviews = num(m[2]?.value);
+    return {
+      source: d[0]?.value || '(unknown)',
+      medium: d[1]?.value || '(unknown)',
+      channel_group: d[2]?.value || '(unknown)',
+      device_category: d[3]?.value || '(unknown)',
+      sessions,
+      engaged_sessions: num(m[1]?.value),
+      pageviews,
+      conversions: num(m[3]?.value),
+      event_count: num(m[4]?.value),
+      pv_per_session: sessions > 0 ? pageviews / sessions : null,
+    };
+  });
+
+  // 2) event-name distribution — if session_start >> page_view, the
+  //    page_view tag isn't firing on the entry hit (the most common
+  //    cause of "(not set)" landing pages on tag-managed sites).
+  const [eResp] = await runReportWithRetry(client, {
+    property: `properties/${propertyId}`,
+    dateRanges: [{ startDate, endDate }],
+    dimensions: [{ name: 'eventName' }],
+    metrics: [{ name: 'eventCount' }, { name: 'sessions' }],
+    dimensionFilter: notSetFilter,
+    orderBys: [{ metric: { metricName: 'eventCount' }, desc: true }],
+    limit: 30,
+  }, 'not-set-events');
+
+  const events = (eResp.rows || []).map(r => ({
+    event_name: r.dimensionValues?.[0]?.value || '(unknown)',
+    event_count: num(r.metricValues?.[0]?.value),
+    sessions: num(r.metricValues?.[1]?.value),
+  }));
+
+  const totalSessions = breakdown.reduce((s, r) => s + r.sessions, 0);
+  return { since: startDate, until: endDate, total_sessions: totalSessions, breakdown, events };
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
   const since = args.includes('--full') ? null : (() => {
