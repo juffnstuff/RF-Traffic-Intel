@@ -762,6 +762,9 @@ function PartGroupMappingsAdmin({ reloadKey = 0 } = {}) {
   const [error, setError] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState({ part_group: '', match_type: 'campaign', match_kind: 'contains', pattern: '', notes: '' });
+  // Autocomplete suggestion lists from the server. Each list is capped
+  // server-side; empty arrays are fine — datalists just suggest nothing.
+  const [options, setOptions] = useState({ part_groups: [], campaign_names: [], queries: [], urls: [] });
 
   const reload = () => {
     setLoading(true);
@@ -773,6 +776,22 @@ function PartGroupMappingsAdmin({ reloadKey = 0 } = {}) {
   };
 
   useEffect(reload, [reloadKey]);
+
+  // Options change rarely (only when fetchers run) — fetch once on mount.
+  // If a new campaign/query/URL shows up after a fetch, the operator can
+  // still type it in; the datalist is suggest-only, not strict.
+  useEffect(() => {
+    fetch('/api/mappings/options')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setOptions(d); })
+      .catch(() => { /* options are an enhancement — silent fail is fine */ });
+  }, []);
+
+  // Which suggestion list applies to the pattern field depends on match_type.
+  const patternSuggestions = form.match_type === 'campaign' ? options.campaign_names
+                           : form.match_type === 'query'    ? options.queries
+                           : form.match_type === 'url'      ? options.urls
+                           : [];
 
   const resetForm = () => {
     setForm({ part_group: '', match_type: 'campaign', match_kind: 'contains', pattern: '', notes: '' });
@@ -866,11 +885,16 @@ function PartGroupMappingsAdmin({ reloadKey = 0 } = {}) {
             <input
               required
               type="text"
+              list="pg-mapping-part-groups"
+              autoComplete="off"
               value={form.part_group}
               onChange={e => setForm({ ...form, part_group: e.target.value })}
               placeholder="Gaskets"
               style={{ ...inputStyle, width: '100%', marginTop: 4 }}
             />
+            <datalist id="pg-mapping-part-groups">
+              {options.part_groups.map(pg => <option key={pg} value={pg} />)}
+            </datalist>
           </label>
           <label style={{ fontSize: 10, color: 'var(--dso-text-dim)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
             Match Type
@@ -897,11 +921,21 @@ function PartGroupMappingsAdmin({ reloadKey = 0 } = {}) {
             <input
               required
               type="text"
+              list="pg-mapping-patterns"
+              autoComplete="off"
               value={form.pattern}
               onChange={e => setForm({ ...form, pattern: e.target.value })}
-              placeholder="gasket / /products/gaskets / Gaskets_Search"
+              placeholder={
+                form.match_type === 'campaign' ? 'gasket'
+                : form.match_type === 'query'  ? 'rubber gasket'
+                : form.match_type === 'url'    ? '/products/gaskets'
+                : ''
+              }
               style={{ ...inputStyle, width: '100%', marginTop: 4 }}
             />
+            <datalist id="pg-mapping-patterns">
+              {patternSuggestions.map(s => <option key={s} value={s} />)}
+            </datalist>
           </label>
           <label style={{ fontSize: 10, color: 'var(--dso-text-dim)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
             Notes (optional)

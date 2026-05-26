@@ -3158,6 +3158,78 @@ export async function getDistinctPartGroups() {
   return rows.map(r => r.part_group);
 }
 
+// Distinct campaign names across Google Ads and GA4. Used as autocomplete
+// hints in the part-group mapping admin when match_type='campaign'.
+// Sorted by recency-weighted volume so the most-used campaigns appear
+// first in the typeahead. Capped to keep the datalist responsive.
+export async function getDistinctCampaignNames({ limit = 500 } = {}) {
+  const p = getPool();
+  const { rows } = await p.query(`
+    WITH ads AS (
+      SELECT campaign_name, SUM(clicks)::bigint AS weight, MAX(date) AS last_seen
+      FROM google_ads_daily_by_campaign
+      WHERE COALESCE(campaign_name, '') <> ''
+      GROUP BY campaign_name
+    ),
+    ga4 AS (
+      SELECT campaign_name, SUM(sessions)::bigint AS weight, MAX(date) AS last_seen
+      FROM ga4_daily_by_campaign
+      WHERE COALESCE(campaign_name, '') <> ''
+      GROUP BY campaign_name
+    ),
+    combined AS (
+      SELECT campaign_name, weight, last_seen FROM ads
+      UNION ALL
+      SELECT campaign_name, weight, last_seen FROM ga4
+    )
+    SELECT campaign_name
+    FROM combined
+    GROUP BY campaign_name
+    ORDER BY MAX(last_seen) DESC NULLS LAST, SUM(weight) DESC
+    LIMIT $1
+  `, [limit]);
+  return rows.map(r => r.campaign_name);
+}
+
+// Distinct GSC search queries from the most recent snapshot window. Capped
+// because the queries table can have tens of thousands of rare long-tail
+// queries — only the top N by clicks are useful as autocomplete hints.
+export async function getDistinctGscQueries({ limit = 500 } = {}) {
+  const p = getPool();
+  const { rows } = await p.query(`
+    WITH latest AS (
+      SELECT MAX(window_end_date) AS d FROM gsc_top_queries
+    )
+    SELECT query
+    FROM gsc_top_queries, latest
+    WHERE gsc_top_queries.window_end_date = latest.d
+      AND COALESCE(query, '') <> ''
+    ORDER BY clicks DESC, impressions DESC
+    LIMIT $1
+  `, [limit]);
+  return rows.map(r => r.query);
+}
+
+// Distinct URL paths from GA4 landing pages, ranked by recent sessions.
+// Used for match_type='url' autocomplete. Path-only (strip host + query)
+// so the suggestions match what an operator would type.
+export async function getDistinctUrlPaths({ limit = 500 } = {}) {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT
+      -- Strip query string + fragment; leave the path as-is for matching.
+      regexp_replace(landing_page, '[\\?#].*$', '') AS path,
+      SUM(sessions)::bigint AS sessions
+    FROM ga4_daily_by_landing_page
+    WHERE COALESCE(landing_page, '') <> ''
+      AND date > (CURRENT_DATE - INTERVAL '180 days')
+    GROUP BY 1
+    ORDER BY sessions DESC
+    LIMIT $1
+  `, [limit]);
+  return rows.map(r => r.path);
+}
+
 export async function listPartGroupMappings() {
   const p = getPool();
   const { rows } = await p.query(`
