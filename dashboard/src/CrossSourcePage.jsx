@@ -1208,9 +1208,32 @@ function CampaignMappingSuggester({ version = 0, onChange }) {
                             </span>
                           </span>
                         ) : s.candidates.length === 0 ? (
-                          <span style={{ color: 'var(--dso-text-faint)', fontSize: 11, fontStyle: 'italic' }}>
-                            No keyword match — add manually below
-                          </span>
+                          <select
+                            disabled={isBusy}
+                            value=""
+                            onChange={e => {
+                              const pg = e.target.value;
+                              if (pg) accept(s.campaign_name, pg);
+                            }}
+                            style={{
+                              background: 'var(--dso-bg)',
+                              color: 'var(--dso-text-dim)',
+                              border: '1px dashed var(--dso-rule)',
+                              borderRadius: 3,
+                              padding: '4px 8px',
+                              fontSize: 11,
+                              fontFamily: 'inherit',
+                              cursor: isBusy ? 'wait' : 'pointer',
+                              maxWidth: 280,
+                              opacity: isBusy ? 0.5 : 1,
+                            }}
+                            title="Pick a part group to map this campaign to"
+                          >
+                            <option value="" disabled>No keyword match — pick a part group…</option>
+                            {(data?.part_groups || []).map(pg => (
+                              <option key={pg} value={pg}>{pg}</option>
+                            ))}
+                          </select>
                         ) : (
                           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                             {s.candidates.map((c, ci) => {
