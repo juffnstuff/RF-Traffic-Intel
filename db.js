@@ -427,9 +427,11 @@ export async function initDB() {
       hs_analytics_source TEXT NOT NULL DEFAULT '',
       hs_analytics_source_data_1 TEXT NOT NULL DEFAULT '',
       hs_analytics_source_data_2 TEXT NOT NULL DEFAULT '',
+      hs_analytics_first_timestamp TIMESTAMPTZ,
       hs_latest_source TEXT NOT NULL DEFAULT '',
       hs_latest_source_data_1 TEXT NOT NULL DEFAULT '',
       hs_latest_source_data_2 TEXT NOT NULL DEFAULT '',
+      hs_latest_source_timestamp TIMESTAMPTZ,
       lead_source TEXT NOT NULL DEFAULT '',
       source TEXT NOT NULL DEFAULT '',
       gclid TEXT NOT NULL DEFAULT '',
@@ -458,6 +460,44 @@ export async function initDB() {
   await p.query(`CREATE INDEX IF NOT EXISTS idx_hs_contact_source ON hubspot_contacts(hs_analytics_source)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_hs_contact_gclid ON hubspot_contacts(gclid) WHERE gclid <> ''`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_hs_contact_modified ON hubspot_contacts(modified_at)`);
+  // Idempotent migrations for columns added after the initial release.
+  // ADD COLUMN IF NOT EXISTS is safe to leave in forever — Postgres no-ops
+  // when the column already exists.
+  await p.query(`ALTER TABLE hubspot_contacts ADD COLUMN IF NOT EXISTS hs_analytics_first_timestamp TIMESTAMPTZ`);
+  await p.query(`ALTER TABLE hubspot_contacts ADD COLUMN IF NOT EXISTS hs_latest_source_timestamp   TIMESTAMPTZ`);
+
+  // Rubberform NetSuite Quotes custom object, mirrored from HubSpot.
+  // Each row is one quote; `parts_group` is the canonical part-group
+  // attribution on the revenue side (no campaign-mapping fuzz).
+  // raw JSONB stores the full property bag so we can pull new fields
+  // later without a migration round-trip.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS hubspot_netsuite_quotes (
+      quote_object_id TEXT PRIMARY KEY,
+      quote_no TEXT NOT NULL DEFAULT '',
+      email TEXT NOT NULL DEFAULT '',
+      email_normalized TEXT,
+      company TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT '',
+      parts_group TEXT NOT NULL DEFAULT '',
+      price_level TEXT NOT NULL DEFAULT '',
+      total NUMERIC(15,2),
+      fulfillment_date DATE,
+      include_in_forecast BOOLEAN DEFAULT FALSE,
+      owner_id TEXT NOT NULL DEFAULT '',
+      sales_rep TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ,
+      modified_at TIMESTAMPTZ,
+      raw JSONB,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_hsnsq_quote_no    ON hubspot_netsuite_quotes(quote_no) WHERE quote_no <> ''`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_hsnsq_email       ON hubspot_netsuite_quotes(email_normalized) WHERE email_normalized IS NOT NULL`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_hsnsq_status      ON hubspot_netsuite_quotes(status)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_hsnsq_parts_group ON hubspot_netsuite_quotes(parts_group)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_hsnsq_created     ON hubspot_netsuite_quotes(created_at)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_hsnsq_modified    ON hubspot_netsuite_quotes(modified_at)`);
 
   // HubSpot marketing campaigns. Populated only when the account has
   // Marketing Hub (the /marketing/v3/campaigns endpoint is tier-gated).
@@ -2194,8 +2234,8 @@ export async function upsertHubSpotContacts(rows) {
       await client.query(`
         INSERT INTO hubspot_contacts (
           contact_id, email, email_normalized, first_name, last_name,
-          hs_analytics_source, hs_analytics_source_data_1, hs_analytics_source_data_2,
-          hs_latest_source, hs_latest_source_data_1, hs_latest_source_data_2,
+          hs_analytics_source, hs_analytics_source_data_1, hs_analytics_source_data_2, hs_analytics_first_timestamp,
+          hs_latest_source, hs_latest_source_data_1, hs_latest_source_data_2, hs_latest_source_timestamp,
           lead_source, source, gclid,
           first_campaign_contacted, last_campaign_contacted, current_roi_campaign,
           netsuite_quote_number, netsuite_quote_date, netsuite_quote_status,
@@ -2206,50 +2246,52 @@ export async function upsertHubSpotContacts(rows) {
         )
         VALUES (
           $1, $2, $3, $4, $5,
-          $6, $7, $8,
-          $9, $10, $11,
-          $12, $13, $14,
-          $15, $16, $17,
-          $18, $19, $20,
-          $21, $22,
+          $6, $7, $8, $9,
+          $10, $11, $12, $13,
+          $14, $15, $16,
+          $17, $18, $19,
+          $20, $21, $22,
           $23, $24,
-          $25, $26, $27,
-          $28, $29, NOW()
+          $25, $26,
+          $27, $28, $29,
+          $30, $31, NOW()
         )
         ON CONFLICT (contact_id) DO UPDATE SET
-          email                      = EXCLUDED.email,
-          email_normalized           = EXCLUDED.email_normalized,
-          first_name                 = EXCLUDED.first_name,
-          last_name                  = EXCLUDED.last_name,
-          hs_analytics_source        = EXCLUDED.hs_analytics_source,
-          hs_analytics_source_data_1 = EXCLUDED.hs_analytics_source_data_1,
-          hs_analytics_source_data_2 = EXCLUDED.hs_analytics_source_data_2,
-          hs_latest_source           = EXCLUDED.hs_latest_source,
-          hs_latest_source_data_1    = EXCLUDED.hs_latest_source_data_1,
-          hs_latest_source_data_2    = EXCLUDED.hs_latest_source_data_2,
-          lead_source                = EXCLUDED.lead_source,
-          source                     = EXCLUDED.source,
-          gclid                      = EXCLUDED.gclid,
-          first_campaign_contacted   = EXCLUDED.first_campaign_contacted,
-          last_campaign_contacted    = EXCLUDED.last_campaign_contacted,
-          current_roi_campaign       = EXCLUDED.current_roi_campaign,
-          netsuite_quote_number      = EXCLUDED.netsuite_quote_number,
-          netsuite_quote_date        = EXCLUDED.netsuite_quote_date,
-          netsuite_quote_status      = EXCLUDED.netsuite_quote_status,
-          netsuite_contact_status    = EXCLUDED.netsuite_contact_status,
-          netsuite_lifecycle_stage   = EXCLUDED.netsuite_lifecycle_stage,
-          netsuite_sales_rep         = EXCLUDED.netsuite_sales_rep,
-          netsuite_subsidiary        = EXCLUDED.netsuite_subsidiary,
-          customer_type              = EXCLUDED.customer_type,
-          company_type               = EXCLUDED.company_type,
-          form_type                  = EXCLUDED.form_type,
-          created_at                 = EXCLUDED.created_at,
-          modified_at                = EXCLUDED.modified_at,
-          updated_at                 = NOW()
+          email                        = EXCLUDED.email,
+          email_normalized             = EXCLUDED.email_normalized,
+          first_name                   = EXCLUDED.first_name,
+          last_name                    = EXCLUDED.last_name,
+          hs_analytics_source          = EXCLUDED.hs_analytics_source,
+          hs_analytics_source_data_1   = EXCLUDED.hs_analytics_source_data_1,
+          hs_analytics_source_data_2   = EXCLUDED.hs_analytics_source_data_2,
+          hs_analytics_first_timestamp = EXCLUDED.hs_analytics_first_timestamp,
+          hs_latest_source             = EXCLUDED.hs_latest_source,
+          hs_latest_source_data_1      = EXCLUDED.hs_latest_source_data_1,
+          hs_latest_source_data_2      = EXCLUDED.hs_latest_source_data_2,
+          hs_latest_source_timestamp   = EXCLUDED.hs_latest_source_timestamp,
+          lead_source                  = EXCLUDED.lead_source,
+          source                       = EXCLUDED.source,
+          gclid                        = EXCLUDED.gclid,
+          first_campaign_contacted     = EXCLUDED.first_campaign_contacted,
+          last_campaign_contacted      = EXCLUDED.last_campaign_contacted,
+          current_roi_campaign         = EXCLUDED.current_roi_campaign,
+          netsuite_quote_number        = EXCLUDED.netsuite_quote_number,
+          netsuite_quote_date          = EXCLUDED.netsuite_quote_date,
+          netsuite_quote_status        = EXCLUDED.netsuite_quote_status,
+          netsuite_contact_status      = EXCLUDED.netsuite_contact_status,
+          netsuite_lifecycle_stage     = EXCLUDED.netsuite_lifecycle_stage,
+          netsuite_sales_rep           = EXCLUDED.netsuite_sales_rep,
+          netsuite_subsidiary          = EXCLUDED.netsuite_subsidiary,
+          customer_type                = EXCLUDED.customer_type,
+          company_type                 = EXCLUDED.company_type,
+          form_type                    = EXCLUDED.form_type,
+          created_at                   = EXCLUDED.created_at,
+          modified_at                  = EXCLUDED.modified_at,
+          updated_at                   = NOW()
       `, [
         r.contact_id, r.email ?? '', r.email_normalized, r.first_name ?? '', r.last_name ?? '',
-        r.hs_analytics_source ?? '', r.hs_analytics_source_data_1 ?? '', r.hs_analytics_source_data_2 ?? '',
-        r.hs_latest_source ?? '', r.hs_latest_source_data_1 ?? '', r.hs_latest_source_data_2 ?? '',
+        r.hs_analytics_source ?? '', r.hs_analytics_source_data_1 ?? '', r.hs_analytics_source_data_2 ?? '', r.hs_analytics_first_timestamp,
+        r.hs_latest_source ?? '', r.hs_latest_source_data_1 ?? '', r.hs_latest_source_data_2 ?? '', r.hs_latest_source_timestamp,
         r.lead_source ?? '', r.source ?? '', r.gclid ?? '',
         r.first_campaign_contacted ?? '', r.last_campaign_contacted ?? '', r.current_roi_campaign ?? '',
         r.netsuite_quote_number ?? '', r.netsuite_quote_date, r.netsuite_quote_status ?? '',
@@ -2276,91 +2318,186 @@ export async function getHubSpotContactCount() {
   return rows[0].cnt;
 }
 
+// ── HubSpot NetSuite Quotes (custom object) ─────────────────────────
+
+export async function upsertHubSpotNetsuiteQuotes(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    let upserted = 0;
+    for (const r of rows) {
+      await client.query(`
+        INSERT INTO hubspot_netsuite_quotes (
+          quote_object_id, quote_no, email, email_normalized, company,
+          status, parts_group, price_level, total, fulfillment_date,
+          include_in_forecast, owner_id, sales_rep,
+          created_at, modified_at, raw, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+        ON CONFLICT (quote_object_id) DO UPDATE SET
+          quote_no            = EXCLUDED.quote_no,
+          email               = EXCLUDED.email,
+          email_normalized    = EXCLUDED.email_normalized,
+          company             = EXCLUDED.company,
+          status              = EXCLUDED.status,
+          parts_group         = EXCLUDED.parts_group,
+          price_level         = EXCLUDED.price_level,
+          total               = EXCLUDED.total,
+          fulfillment_date    = EXCLUDED.fulfillment_date,
+          include_in_forecast = EXCLUDED.include_in_forecast,
+          owner_id            = EXCLUDED.owner_id,
+          sales_rep           = EXCLUDED.sales_rep,
+          created_at          = EXCLUDED.created_at,
+          modified_at         = EXCLUDED.modified_at,
+          raw                 = EXCLUDED.raw,
+          updated_at          = NOW()
+      `, [
+        r.quote_object_id, r.quote_no ?? '', r.email ?? '', r.email_normalized, r.company ?? '',
+        r.status ?? '', r.parts_group ?? '', r.price_level ?? '', r.total ?? null, r.fulfillment_date,
+        !!r.include_in_forecast, r.owner_id ?? '', r.sales_rep ?? '',
+        r.created_at, r.modified_at, r.raw ? JSON.stringify(r.raw) : null,
+      ]);
+      upserted++;
+    }
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getHubSpotNetsuiteQuotesCount() {
+  const p = getPool();
+  const { rows } = await p.query('SELECT COUNT(*)::int as cnt FROM hubspot_netsuite_quotes');
+  return rows[0].cnt;
+}
+
 // Lead-source bucket for a row. Mirrors HubSpot's analytics source taxonomy
 // but folds blanks to '(UNKNOWN)' so the rollup doesn't silently drop them.
-const HS_SOURCE_BUCKET_SQL = `
-  COALESCE(
-    NULLIF(hc.hs_analytics_source, ''),
-    '(UNKNOWN)'
-  )
-`;
+// Caller picks which column to bucket on: 'hs_analytics_source' (first-touch,
+// stable per contact) or 'hs_latest_source' (most recent session source).
+function hsSourceBucketSql(column) {
+  const allowed = new Set(['hs_analytics_source', 'hs_latest_source']);
+  if (!allowed.has(column)) throw new Error(`Invalid attribution column: ${column}`);
+  return `COALESCE(NULLIF(hc.${column}, ''), '(UNKNOWN)')`;
+}
 
-// Revenue attribution by HubSpot first-touch source.
-// Joins each contact's NetSuite quote (high-confidence lane: tran_id equality)
-// to its transaction row, then falls back to email-normalized lookup against
-// netsuite_customers for contacts the middleware hasn't bridged yet. The
-// fallback lane only counts a customer's *first* quote per contact to avoid
-// double-counting when one customer has multiple quotes.
+function hsCampaignDrilldownSql(column) {
+  const allowed = new Set(['hs_analytics_source', 'hs_latest_source']);
+  if (!allowed.has(column)) throw new Error(`Invalid attribution column: ${column}`);
+  return column === 'hs_analytics_source'
+    ? 'hc.hs_analytics_source_data_1'
+    : 'hc.hs_latest_source_data_1';
+}
+
+// Revenue attribution by HubSpot traffic source.
+// Source of truth shifted: revenue + parts_group come from
+// hubspot_netsuite_quotes (the custom-object mirror); attribution columns
+// come from the matched contact (joined via email_normalized).
 //
-// Returns one row per HubSpot first-touch source bucket with quote count,
-// revenue, win count, and a breakdown of which join lane found the revenue.
-export async function getCrossSourceLeadSourceRevenue({ since = null, until = null } = {}) {
+// `column` picks which contact column to bucket on:
+//   'hs_analytics_source'  = first-touch / original  (stable per contact)
+//   'hs_latest_source'     = latest session source   (overwrites on new sessions)
+//
+// Quotes with no email-matched contact still get counted under '(UNKNOWN)'
+// so totals match the NetSuite-side total; the operator can see how much
+// revenue is unattributed and drill in.
+export async function getCrossSourceLeadSourceRevenue({ since = null, until = null, column = 'hs_analytics_source' } = {}) {
   const p = getPool();
+  const sourceCol = hsSourceBucketSql(column);
   const params = [];
   const dateConds = [];
-  if (since) { params.push(since); dateConds.push(`t.tran_date >= $${params.length}::date`); }
-  if (until) { params.push(until); dateConds.push(`t.tran_date <= $${params.length}::date`); }
-  const dateWhere = dateConds.length ? `AND ${dateConds.join(' AND ')}` : '';
+  // Quote's own `created_at` is when the NetSuite quote was created
+  // (mirrored from HubSpot). Date-window on that, not on contact dates.
+  if (since) { params.push(since); dateConds.push(`q.created_at >= $${params.length}::date`); }
+  if (until) { params.push(until); dateConds.push(`q.created_at <  $${params.length}::date + INTERVAL '1 day'`); }
+  const dateWhere = dateConds.length ? `WHERE ${dateConds.join(' AND ')}` : '';
   const sql = `
-    WITH primary_lane AS (
-      -- HubSpot contact directly tied to a NetSuite transaction by quote number.
+    WITH joined AS (
       SELECT
+        q.quote_object_id,
+        q.quote_no,
+        q.total::float as total,
+        q.status,
+        q.parts_group,
+        q.created_at,
         hc.contact_id,
-        ${HS_SOURCE_BUCKET_SQL} as hs_source,
-        hc.hs_analytics_source_data_1 as hs_campaign,
-        t.transaction_id,
-        t.total::float as total,
-        t.tran_type,
-        t.status,
-        t.tran_date
-      FROM hubspot_contacts hc
-      JOIN netsuite_transactions t
-        ON t.tran_id = hc.netsuite_quote_number
-      WHERE hc.netsuite_quote_number <> '' ${dateWhere}
-    ),
-    fallback_lane AS (
-      -- Contacts the middleware hasn't bridged. Pick their first quote in NS
-      -- by email match. DISTINCT ON to one row per contact-customer pair.
-      SELECT DISTINCT ON (hc.contact_id, c.customer_id)
-        hc.contact_id,
-        ${HS_SOURCE_BUCKET_SQL} as hs_source,
-        hc.hs_analytics_source_data_1 as hs_campaign,
-        t.transaction_id,
-        t.total::float as total,
-        t.tran_type,
-        t.status,
-        t.tran_date
-      FROM hubspot_contacts hc
-      JOIN netsuite_customers c
-        ON c.email_normalized = hc.email_normalized
-       AND hc.email_normalized IS NOT NULL
-      JOIN netsuite_transactions t
-        ON t.customer_id = c.customer_id
-      WHERE COALESCE(NULLIF(hc.netsuite_quote_number, ''), '') = ''
-        ${dateWhere}
-      ORDER BY hc.contact_id, c.customer_id, t.tran_date ASC
-    ),
-    all_revenue AS (
-      SELECT 'primary'  as lane, * FROM primary_lane
-      UNION ALL
-      SELECT 'fallback' as lane, * FROM fallback_lane
+        ${sourceCol} as hs_source
+      FROM hubspot_netsuite_quotes q
+      LEFT JOIN hubspot_contacts hc
+        ON hc.email_normalized = q.email_normalized
+       AND q.email_normalized IS NOT NULL
+      ${dateWhere}
     )
     SELECT
       hs_source,
-      COUNT(*)::int                                                        as quotes,
-      COUNT(*) FILTER (WHERE lane = 'primary')::int                        as quotes_primary,
-      COUNT(*) FILTER (WHERE lane = 'fallback')::int                       as quotes_fallback,
-      SUM(total)::float                                                    as revenue,
-      SUM(total) FILTER (WHERE lane = 'primary')::float                    as revenue_primary,
-      SUM(total) FILTER (WHERE lane = 'fallback')::float                   as revenue_fallback,
-      COUNT(*) FILTER (WHERE status ILIKE 'closed%won' OR status ILIKE '%won')::int as wins,
-      SUM(total) FILTER (WHERE status ILIKE 'closed%won' OR status ILIKE '%won')::float as revenue_won,
-      COUNT(DISTINCT contact_id)::int                                      as contacts
-    FROM all_revenue
+      COUNT(*)::int                                                                       as quotes,
+      COUNT(DISTINCT contact_id) FILTER (WHERE contact_id IS NOT NULL)::int               as contacts,
+      SUM(total)::float                                                                    as revenue,
+      COUNT(*) FILTER (WHERE status ILIKE '%won%')::int                                    as wins,
+      SUM(total) FILTER (WHERE status ILIKE '%won%')::float                                as revenue_won,
+      COUNT(*) FILTER (WHERE contact_id IS NULL)::int                                     as quotes_unattributed,
+      SUM(total) FILTER (WHERE contact_id IS NULL)::float                                  as revenue_unattributed
+    FROM joined
     GROUP BY hs_source
     ORDER BY revenue DESC NULLS LAST
   `;
   const { rows } = await p.query(sql, params);
+  return rows;
+}
+
+// Per-quote attribution drill-down. One row per quote in the window with
+// both first-touch and latest-touch attribution + the latest-source
+// timestamp, so the operator can see when a "latest" source post-dates
+// the quote (stale) vs predates it (accurate at the time).
+export async function getCrossSourceQuoteAttribution({ since = null, until = null, limit = 1000 } = {}) {
+  const p = getPool();
+  const params = [];
+  const dateConds = [];
+  if (since) { params.push(since); dateConds.push(`q.created_at >= $${params.length}::date`); }
+  if (until) { params.push(until); dateConds.push(`q.created_at <  $${params.length}::date + INTERVAL '1 day'`); }
+  const dateWhere = dateConds.length ? `WHERE ${dateConds.join(' AND ')}` : '';
+  params.push(limit);
+  const { rows } = await p.query(`
+    SELECT
+      q.quote_object_id,
+      q.quote_no,
+      q.email,
+      q.company,
+      q.status,
+      q.parts_group,
+      q.total::float                       as total,
+      q.created_at,
+      q.fulfillment_date,
+      hc.contact_id,
+      NULLIF(hc.hs_analytics_source, '')   as original_source,
+      NULLIF(hc.hs_analytics_source_data_1, '') as original_campaign,
+      NULLIF(hc.hs_latest_source, '')      as latest_source,
+      NULLIF(hc.hs_latest_source_data_1,'') as latest_campaign,
+      hc.hs_latest_source_timestamp,
+      -- Is the contact's latest-source timestamp BEFORE this quote? If so,
+      -- the latest source is the more reliable lens for this quote.
+      -- If AFTER, the latest source was set on a later session and tells
+      -- you nothing about what drove the quote (first-touch is the truth).
+      CASE
+        WHEN hc.hs_latest_source_timestamp IS NULL THEN NULL
+        WHEN q.created_at IS NULL                  THEN NULL
+        WHEN hc.hs_latest_source_timestamp <= q.created_at THEN TRUE
+        ELSE FALSE
+      END                                  as latest_predates_quote
+    FROM hubspot_netsuite_quotes q
+    LEFT JOIN hubspot_contacts hc
+      ON hc.email_normalized = q.email_normalized
+     AND q.email_normalized IS NOT NULL
+    ${dateWhere}
+    ORDER BY q.created_at DESC NULLS LAST, q.quote_no DESC
+    LIMIT $${params.length}
+  `, params);
   return rows;
 }
 
@@ -2383,12 +2520,21 @@ export async function getCrossSourceLeadSourceReconciliation({ limit = 200 } = {
       c.customer_id,
       c.entity_id                                                  as ns_entity,
       c.lead_source_name                                           as ns_lead_source,
-      hc.netsuite_quote_number,
-      hc.netsuite_quote_status,
+      -- Latest HubSpot quote for this contact (if any) — useful context
+      -- when deciding which system to correct.
+      q.quote_no                                                   as latest_quote_no,
+      q.status                                                     as latest_quote_status,
       hc.modified_at
     FROM hubspot_contacts hc
     JOIN netsuite_customers c
       ON c.email_normalized = hc.email_normalized
+    LEFT JOIN LATERAL (
+      SELECT quote_no, status
+      FROM hubspot_netsuite_quotes q
+      WHERE q.email_normalized = hc.email_normalized
+      ORDER BY q.created_at DESC NULLS LAST
+      LIMIT 1
+    ) q ON TRUE
     WHERE hc.email_normalized IS NOT NULL
       AND COALESCE(NULLIF(hc.hs_analytics_source, ''), '(UNKNOWN)')
           <> COALESCE(NULLIF(c.lead_source_name,        ''), '(UNKNOWN)')
@@ -2398,35 +2544,36 @@ export async function getCrossSourceLeadSourceReconciliation({ limit = 200 } = {
   return rows;
 }
 
-// Part-group ROAS attributed via HubSpot first-touch campaign.
-// Bridge: HubSpot contact's hs_analytics_source_data_1 (the originating Google
-// Ads campaign name) → part_group_mappings (match_type='campaign') → part_group.
-// Cost: Google Ads spend for that campaign in the window.
-// Revenue: the contact's NetSuite quote totals (primary lane via tran_id, plus
-// the first quote per matched customer in the email-fallback lane).
+// Part-group ROAS — Ads cost vs revenue per part-group.
 //
-// This is the answer to "how much did campaign X actually drive in NetSuite
-// revenue per part-group?" — which the GA4-conversion-based ROAS on the
-// existing Campaign ROI table can't answer because GA4 doesn't see NS dollars.
+// Revenue side: the HubSpot NetSuite Quotes custom object carries
+// `parts_group` directly on each quote, so no campaign→part_group mapping
+// fuzz is needed on revenue. Quotes with no parts_group go to '(unmapped)'.
+//
+// Cost side: Google Ads has no concept of part-group, so we still need the
+// curated `part_group_mappings` table to attribute campaign spend to a
+// part-group. Spend that doesn't match any mapping rolls up under
+// '(unmapped)' so the operator can see how much spend isn't yet attributed.
+//
+// Won-only metric reported alongside total so the operator can compare
+// gross-quote ROAS to closed-won ROAS.
 export async function getPartGroupRoasFromHubSpot({ since = null, until = null } = {}) {
   const p = getPool();
   const params = [];
-  // Date filters apply independently to the spend CTE (date column) and the
-  // revenue CTE (tran_date column).
   const adsDateConds = [];
-  const nsDateConds = [];
+  const qDateConds = [];
   if (since) {
     params.push(since);
     adsDateConds.push(`a.date >= $${params.length}::date`);
-    nsDateConds.push(`t.tran_date >= $${params.length}::date`);
+    qDateConds.push(`q.created_at >= $${params.length}::date`);
   }
   if (until) {
     params.push(until);
     adsDateConds.push(`a.date <= $${params.length}::date`);
-    nsDateConds.push(`t.tran_date <= $${params.length}::date`);
+    qDateConds.push(`q.created_at <  $${params.length}::date + INTERVAL '1 day'`);
   }
   const adsWhere = adsDateConds.length ? `WHERE ${adsDateConds.join(' AND ')}` : '';
-  const nsWhere  = nsDateConds.length  ? `AND ${nsDateConds.join(' AND ')}`    : '';
+  const qWhere   = qDateConds.length   ? `WHERE ${qDateConds.join(' AND ')}`   : '';
   const sql = `
     WITH ads_by_campaign AS (
       SELECT campaign_name,
@@ -2437,14 +2584,11 @@ export async function getPartGroupRoasFromHubSpot({ since = null, until = null }
       ${adsWhere}
       GROUP BY campaign_name
     ),
-    -- Map each Ads campaign to a part_group via curated rules.
-    -- A campaign may map to multiple part_groups; we count cost once per
-    -- mapping (intentional — operator's choice in the mapping table).
     ads_by_partgroup AS (
       SELECT
         m.part_group,
-        SUM(a.cost) as cost,
-        SUM(a.ad_clicks) as ad_clicks,
+        SUM(a.cost)           as cost,
+        SUM(a.ad_clicks)      as ad_clicks,
         SUM(a.ad_impressions) as ad_impressions
       FROM ads_by_campaign a
       JOIN part_group_mappings m
@@ -2456,82 +2600,56 @@ export async function getPartGroupRoasFromHubSpot({ since = null, until = null }
        )
       GROUP BY m.part_group
     ),
-    -- HubSpot contacts → matched part_group (via their first-touch campaign).
-    -- Primary lane: NS quote tied directly via tran_id.
-    hs_primary AS (
-      SELECT
-        m.part_group,
-        hc.contact_id,
-        t.total::float as total
-      FROM hubspot_contacts hc
-      JOIN part_group_mappings m
-        ON m.match_type = 'campaign'
-       AND hc.hs_analytics_source_data_1 <> ''
-       AND (
-         (m.match_kind = 'exact'    AND hc.hs_analytics_source_data_1 = m.pattern) OR
-         (m.match_kind = 'contains' AND hc.hs_analytics_source_data_1 ILIKE '%' || m.pattern || '%') OR
-         (m.match_kind = 'prefix'   AND hc.hs_analytics_source_data_1 ILIKE m.pattern || '%')
-       )
-      JOIN netsuite_transactions t
-        ON t.tran_id = hc.netsuite_quote_number
-      WHERE hc.netsuite_quote_number <> '' ${nsWhere}
+    -- Spend that matched no campaign→part_group rule. Surfaces the gap
+    -- between Ads spend and the curated mapping coverage.
+    ads_unmapped AS (
+      SELECT '(unmapped)'::text   as part_group,
+             SUM(a.cost)          as cost,
+             SUM(a.ad_clicks)     as ad_clicks,
+             SUM(a.ad_impressions) as ad_impressions
+      FROM ads_by_campaign a
+      WHERE NOT EXISTS (
+        SELECT 1 FROM part_group_mappings m
+        WHERE m.match_type = 'campaign'
+          AND (
+            (m.match_kind = 'exact'    AND a.campaign_name = m.pattern) OR
+            (m.match_kind = 'contains' AND a.campaign_name ILIKE '%' || m.pattern || '%') OR
+            (m.match_kind = 'prefix'   AND a.campaign_name ILIKE m.pattern || '%')
+          )
+      )
     ),
-    -- Fallback lane: contact has no NS quote bridge but email matches a NS customer.
-    -- Sum first quote per (contact, customer) pair to avoid double-counting.
-    hs_fallback AS (
-      SELECT DISTINCT ON (hc.contact_id, c.customer_id)
-        m.part_group,
-        hc.contact_id,
-        t.total::float as total
-      FROM hubspot_contacts hc
-      JOIN part_group_mappings m
-        ON m.match_type = 'campaign'
-       AND hc.hs_analytics_source_data_1 <> ''
-       AND (
-         (m.match_kind = 'exact'    AND hc.hs_analytics_source_data_1 = m.pattern) OR
-         (m.match_kind = 'contains' AND hc.hs_analytics_source_data_1 ILIKE '%' || m.pattern || '%') OR
-         (m.match_kind = 'prefix'   AND hc.hs_analytics_source_data_1 ILIKE m.pattern || '%')
-       )
-      JOIN netsuite_customers c
-        ON c.email_normalized = hc.email_normalized
-       AND hc.email_normalized IS NOT NULL
-      JOIN netsuite_transactions t
-        ON t.customer_id = c.customer_id
-      WHERE COALESCE(NULLIF(hc.netsuite_quote_number, ''), '') = '' ${nsWhere}
-      ORDER BY hc.contact_id, c.customer_id, t.tran_date ASC
-    ),
-    revenue_by_partgroup AS (
-      SELECT part_group, SUM(total)::float as revenue_primary, 0::float as revenue_fallback, COUNT(*)::int as quotes_primary, 0 as quotes_fallback
-        FROM hs_primary  GROUP BY part_group
+    ads_full AS (
+      SELECT * FROM ads_by_partgroup
       UNION ALL
-      SELECT part_group, 0::float, SUM(total)::float, 0, COUNT(*)::int
-        FROM hs_fallback GROUP BY part_group
+      SELECT * FROM ads_unmapped WHERE cost IS NOT NULL
     ),
-    revenue_rolled AS (
+    -- Revenue per part_group straight off the quote object — no mapping.
+    revenue_by_partgroup AS (
       SELECT
-        part_group,
-        SUM(revenue_primary)::float  as revenue_primary,
-        SUM(revenue_fallback)::float as revenue_fallback,
-        SUM(quotes_primary)::int     as quotes_primary,
-        SUM(quotes_fallback)::int    as quotes_fallback
-      FROM revenue_by_partgroup
-      GROUP BY part_group
+        COALESCE(NULLIF(q.parts_group, ''), '(unmapped)') as part_group,
+        COUNT(*)::int                                     as quotes,
+        SUM(q.total)::float                               as revenue,
+        COUNT(*) FILTER (WHERE q.status ILIKE '%won%')::int as quotes_won,
+        SUM(q.total) FILTER (WHERE q.status ILIKE '%won%')::float as revenue_won
+      FROM hubspot_netsuite_quotes q
+      ${qWhere}
+      GROUP BY 1
     )
     SELECT
-      COALESCE(a.part_group, r.part_group) as part_group,
-      COALESCE(a.cost, 0)             as cost,
-      COALESCE(a.ad_clicks, 0)        as ad_clicks,
-      COALESCE(a.ad_impressions, 0)   as ad_impressions,
-      COALESCE(r.revenue_primary, 0)  as revenue_primary,
-      COALESCE(r.revenue_fallback, 0) as revenue_fallback,
-      (COALESCE(r.revenue_primary, 0) + COALESCE(r.revenue_fallback, 0)) as revenue,
-      COALESCE(r.quotes_primary, 0)   as quotes_primary,
-      COALESCE(r.quotes_fallback, 0)  as quotes_fallback,
+      COALESCE(a.part_group, r.part_group)   as part_group,
+      COALESCE(a.cost, 0)                    as cost,
+      COALESCE(a.ad_clicks, 0)               as ad_clicks,
+      COALESCE(a.ad_impressions, 0)          as ad_impressions,
+      COALESCE(r.quotes, 0)                  as quotes,
+      COALESCE(r.revenue, 0)                 as revenue,
+      COALESCE(r.quotes_won, 0)              as quotes_won,
+      COALESCE(r.revenue_won, 0)             as revenue_won,
       CASE WHEN COALESCE(a.cost, 0) > 0
-        THEN (COALESCE(r.revenue_primary, 0) + COALESCE(r.revenue_fallback, 0)) / a.cost
-        ELSE NULL END                 as roas
-    FROM ads_by_partgroup a
-    FULL OUTER JOIN revenue_rolled r ON r.part_group = a.part_group
+        THEN COALESCE(r.revenue, 0)     / a.cost ELSE NULL END as roas,
+      CASE WHEN COALESCE(a.cost, 0) > 0
+        THEN COALESCE(r.revenue_won, 0) / a.cost ELSE NULL END as roas_won
+    FROM ads_full a
+    FULL OUTER JOIN revenue_by_partgroup r ON r.part_group = a.part_group
     ORDER BY revenue DESC NULLS LAST, cost DESC
   `;
   const { rows } = await p.query(sql, params);

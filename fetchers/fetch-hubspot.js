@@ -15,6 +15,12 @@
  *       crm.schemas.deals.read
  *       crm.objects.contacts.read
  *       crm.schemas.contacts.read
+ *     For the Rubberform NetSuite Quotes custom object (recommended):
+ *       crm.schemas.custom.read       — lets us discover the objectTypeId
+ *       crm.objects.custom.read       — lets us read quote records
+ *     If those are absent the fetcher logs a friendly skip message and
+ *     leaves hubspot_netsuite_quotes empty — the rest of the sync still
+ *     runs.
  *     For campaigns (Marketing Hub only; safe to omit):
  *       crm.objects.marketing_events.read
  *
@@ -118,9 +124,16 @@ const DEAL_PROPS = [
 const CONTACT_PROPS = [
   // identity
   'email', 'firstname', 'lastname',
-  // HubSpot first-touch + recent-touch attribution
+  // HubSpot's first-touch + recent-touch timestamps. The latest-source
+  // timestamp matters for per-quote attribution: a quote dated AFTER the
+  // contact's hs_latest_source_timestamp is reliably attributable to the
+  // latest source; quotes BEFORE that timestamp can only be reliably
+  // attributed to hs_analytics_source (original / first-touch), because
+  // hs_latest_source overwrites itself each new session.
   'hs_analytics_source', 'hs_analytics_source_data_1', 'hs_analytics_source_data_2',
+  'hs_analytics_first_timestamp',
   'hs_latest_source', 'hs_latest_source_data_1', 'hs_latest_source_data_2',
+  'hs_latest_source_timestamp',
   'lead_source', 'source',
   'gclid',
   'first_campaign_contacted', 'last_campaign_contacted', 'current_roi_campaign',
@@ -168,64 +181,181 @@ async function fetchDeals({ sinceEpochMs = null } = {}) {
   return results;
 }
 
-// ── Contact search (paginated) ────────────────────────────────────────
-// We pull every contact that has an email (anonymous contacts can't be
-// joined to NetSuite anyway). Incremental mode filters by lastmodifieddate.
-async function fetchContacts({ sinceEpochMs = null } = {}) {
-  const results = [];
-  let after = undefined;
-  const filters = [
-    // Require an email so the email-fallback NS join has something to work
-    // with. Contacts without an email but with netsuite_quote_number set are
-    // rare — but if it happens, we still want them: OR'd in via a separate
-    // filterGroup (HubSpot treats filterGroups as OR'd together).
-    { propertyName: 'email', operator: 'HAS_PROPERTY' },
-  ];
-  if (sinceEpochMs) {
-    filters.push({
-      propertyName: 'lastmodifieddate',
-      operator: 'GTE',
-      value: String(sinceEpochMs),
-    });
-  }
-  const filterGroups = [
-    { filters },
-    // Always include contacts with a NetSuite quote number, even if no email.
-    {
-      filters: [
-        { propertyName: 'netsuite_quote_number', operator: 'HAS_PROPERTY' },
-        ...(sinceEpochMs ? [{
-          propertyName: 'lastmodifieddate',
-          operator: 'GTE',
-          value: String(sinceEpochMs),
-        }] : []),
-      ],
-    },
-  ];
+// HubSpot's search API caps at the 10,000th result for any single query.
+// To get all records past that, walk lastmodifieddate descending in
+// 10k-row chunks, then re-issue the search with `lastmodifieddate < oldest`
+// and repeat until the result set is shorter than 10k.
+//
+// Returns every object across the windows, de-duplicated by id (boundary
+// rows can repeat when the cursor rolls over).
+async function searchAllWithChunking({ endpoint, label, properties, sinceEpochMs = null, filterGroups = null, maxRecords = 500000 } = {}) {
+  const seen = new Set();
+  const out = [];
+  // Start window: no upper bound. Lower bound is sinceEpochMs if provided.
+  let upperBoundMs = null;
   while (true) {
-    const body = {
-      filterGroups,
-      properties: CONTACT_PROPS,
-      sorts: [{ propertyName: 'lastmodifieddate', direction: 'DESCENDING' }],
-      limit: 100,
-      after,
-    };
-    const res = await hsFetch(`${BASE}/crm/v3/objects/contacts/search`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }, 'contacts.search');
-    const j = await res.json();
-    for (const c of (j.results || [])) results.push(c);
-    after = j.paging?.next?.after;
-    if (!after) break;
-    // Same bail-out cap pattern as deals. HubSpot's search API caps at
-    // ~10k results per query anyway, so this is mainly belt-and-suspenders.
-    if (results.length > 200000) {
-      console.warn('    ⚠️  contact pagination exceeded 200k — stopping');
-      break;
+    const baseFilters = [];
+    if (sinceEpochMs) {
+      baseFilters.push({ propertyName: 'lastmodifieddate', operator: 'GTE', value: String(sinceEpochMs) });
     }
+    if (upperBoundMs != null) {
+      baseFilters.push({ propertyName: 'lastmodifieddate', operator: 'LT',  value: String(upperBoundMs) });
+    }
+    // Caller may pass filterGroups (OR'd groups) — merge baseFilters into each.
+    const groups = filterGroups
+      ? filterGroups.map(g => ({ filters: [...(g.filters || []), ...baseFilters] }))
+      : (baseFilters.length ? [{ filters: baseFilters }] : []);
+
+    let after = undefined;
+    let chunkCount = 0;
+    let chunkOldestMs = null;
+    while (true) {
+      const body = {
+        filterGroups: groups,
+        properties,
+        sorts: [{ propertyName: 'lastmodifieddate', direction: 'DESCENDING' }],
+        limit: 100,
+        after,
+      };
+      const res = await hsFetch(`${BASE}/${endpoint}/search`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }, label);
+      const j = await res.json();
+      for (const o of (j.results || [])) {
+        if (seen.has(o.id)) continue;
+        seen.add(o.id);
+        out.push(o);
+        const ms = Date.parse(o.properties?.lastmodifieddate || o.properties?.hs_lastmodifieddate || '');
+        if (Number.isFinite(ms) && (chunkOldestMs == null || ms < chunkOldestMs)) chunkOldestMs = ms;
+      }
+      chunkCount += (j.results || []).length;
+      after = j.paging?.next?.after;
+      if (!after) break;
+      if (out.length > maxRecords) {
+        console.warn(`    ⚠️  ${label} exceeded ${maxRecords} records — stopping`);
+        return out;
+      }
+    }
+    // If the chunk was under 100 it's the natural end of the data set
+    // (since HubSpot returns at most 100 per page, anything under that
+    // means we hit the tail). Also stop if we got 0 — defensive.
+    if (chunkCount === 0) break;
+    if (chunkCount < 100) break;
+    // Past the 10k window? Re-issue with the oldest seen as the new upper bound.
+    // The new query starts one ms earlier so the boundary row isn't lost; the
+    // seen-set dedupe handles any repeat.
+    if (chunkOldestMs == null) break; // can't advance without a timestamp; bail
+    if (upperBoundMs != null && chunkOldestMs >= upperBoundMs) break; // not making progress
+    upperBoundMs = chunkOldestMs + 1;
   }
-  return results;
+  return out;
+}
+
+// ── Contact search (chunked) ──────────────────────────────────────────
+// Pull every contact with an email OR a NetSuite quote number. ~74k+
+// contacts blow past HubSpot's 10k-search cap, so we date-window-chunk.
+async function fetchContacts({ sinceEpochMs = null } = {}) {
+  return searchAllWithChunking({
+    endpoint: 'crm/v3/objects/contacts',
+    label: 'contacts.search',
+    properties: CONTACT_PROPS,
+    sinceEpochMs,
+    filterGroups: [
+      // Two groups (OR'd by HubSpot): contacts with an email OR contacts
+      // with a NetSuite quote number on them. Either makes them joinable
+      // to NetSuite data.
+      { filters: [{ propertyName: 'email', operator: 'HAS_PROPERTY' }] },
+      { filters: [{ propertyName: 'netsuite_quote_number', operator: 'HAS_PROPERTY' }] },
+    ],
+  });
+}
+
+// ── Rubberform NetSuite Quotes custom object ──────────────────────────
+// The object is a true HubSpot custom object (not built-in `quotes`).
+// We discover its objectTypeId via /crm/v3/schemas at runtime so we don't
+// have to hard-code a `2-XXXXXXX` value that varies per HubSpot portal.
+// Returns null when the schema can't be read (missing scope or no match)
+// so the caller can skip the quote pull without failing the whole sync.
+async function discoverQuoteSchema() {
+  let res;
+  try {
+    res = await hsFetch(`${BASE}/crm/v3/schemas`, {}, 'schemas');
+  } catch (e) {
+    if (e.status === 403) {
+      console.log('    ℹ︎  Quote-object schema lookup forbidden (Private App missing crm.schemas.custom.read?) — skipping quote sync');
+      return null;
+    }
+    throw e;
+  }
+  const j = await res.json();
+  const want = 'rubberform netsuite quotes';
+  const match = (j.results || []).find(s => {
+    const labels = [
+      s.labels?.singular, s.labels?.plural, s.name, s.fullyQualifiedName,
+    ].filter(Boolean).map(l => l.toLowerCase());
+    return labels.some(l => l.includes(want));
+  });
+  if (!match) {
+    console.log('    ℹ︎  Quote schema not found among custom objects — skipping quote sync');
+    return null;
+  }
+  const props = (match.properties || []).map(p => p.name);
+  console.log(`    → discovered quote schema: ${match.objectTypeId} (${match.labels?.plural || match.name}) · ${props.length} properties`);
+  return {
+    objectTypeId: match.objectTypeId,
+    propertyNames: props,
+  };
+}
+
+// Pick which schema properties we want to persist. Done by string-match
+// against a wanted-name list because the exact property names vary per
+// portal (e.g. `parts_group` vs `part_group` vs `partgroup`). Anything
+// matched is included; missing properties are silently skipped.
+function pickQuotePropertyNames(allPropertyNames) {
+  const wanted = [
+    // identity / cross-system join keys
+    'quote_no', 'quote_number', 'hs_quote_number',
+    'email', 'company',
+    // financial / status
+    'status', 'hs_pipeline_stage',
+    'price_level',
+    'total', 'amount', 'tran_total', 'hs_quote_amount',
+    'fulfillment_date', 'closedate',
+    'include_in_forecast',
+    // part-group (multiple spellings)
+    'parts_group', 'part_group', 'partsgroup', 'partgroup',
+    // owner / sales rep
+    'hubspot_owner_id', 'sales_rep',
+    // lifecycle timestamps (always there for custom objects)
+    'hs_object_id', 'hs_createdate', 'hs_lastmodifieddate',
+  ];
+  const have = new Set(allPropertyNames);
+  // Always include hs_object_id / createdate / lastmodifieddate; the rest
+  // only if they exist on this portal's schema.
+  return wanted.filter(n => have.has(n));
+}
+
+async function fetchNetsuiteQuotes({ objectTypeId, propertyNames, sinceEpochMs = null } = {}) {
+  return searchAllWithChunking({
+    endpoint: `crm/v3/objects/${objectTypeId}`,
+    label: 'ns-quotes.search',
+    properties: propertyNames,
+    sinceEpochMs,
+    filterGroups: null, // no filter — we want every quote
+  });
+}
+
+// Pick the first available value across a list of candidate property names.
+// Custom-object schemas vary per portal, so the safest thing is to map a
+// canonical column (e.g. "quote_number") to whichever of [quote_no,
+// quote_number, hs_quote_number] is populated on the row.
+function pickFirst(props, candidates) {
+  for (const n of candidates) {
+    const v = props?.[n];
+    if (v != null && v !== '') return v;
+  }
+  return null;
 }
 
 // ── Marketing campaigns (tier-gated, optional) ────────────────────────
@@ -319,12 +449,14 @@ export async function fetchHubSpot({ since = null } = {}) {
       email_normalized:          normalizeEmail(p.email),
       first_name:                p.firstname || '',
       last_name:                 p.lastname || '',
-      hs_analytics_source:       p.hs_analytics_source || '',
-      hs_analytics_source_data_1:p.hs_analytics_source_data_1 || '',
-      hs_analytics_source_data_2:p.hs_analytics_source_data_2 || '',
-      hs_latest_source:          p.hs_latest_source || '',
-      hs_latest_source_data_1:   p.hs_latest_source_data_1 || '',
-      hs_latest_source_data_2:   p.hs_latest_source_data_2 || '',
+      hs_analytics_source:          p.hs_analytics_source || '',
+      hs_analytics_source_data_1:   p.hs_analytics_source_data_1 || '',
+      hs_analytics_source_data_2:   p.hs_analytics_source_data_2 || '',
+      hs_analytics_first_timestamp: parseDate(p.hs_analytics_first_timestamp),
+      hs_latest_source:             p.hs_latest_source || '',
+      hs_latest_source_data_1:      p.hs_latest_source_data_1 || '',
+      hs_latest_source_data_2:      p.hs_latest_source_data_2 || '',
+      hs_latest_source_timestamp:   parseDate(p.hs_latest_source_timestamp),
       lead_source:               p.lead_source || '',
       source:                    p.source || '',
       gclid:                     p.gclid || '',
@@ -347,6 +479,56 @@ export async function fetchHubSpot({ since = null } = {}) {
     };
   });
 
+  // ── Custom-object: Rubberform NetSuite Quotes ──────────────────────
+  // Schema-discovered at runtime; quote-side property names vary per
+  // portal so we resolve them dynamically and pick canonical values.
+  let quoteRows = [];
+  let quoteSchemaResolved = null;
+  try {
+    quoteSchemaResolved = await discoverQuoteSchema();
+    if (quoteSchemaResolved) {
+      const pickProps = pickQuotePropertyNames(quoteSchemaResolved.propertyNames);
+      console.log(`  → ns-quotes... (${pickProps.length} props selected)`);
+      const rawQuotes = await fetchNetsuiteQuotes({
+        objectTypeId: quoteSchemaResolved.objectTypeId,
+        propertyNames: pickProps,
+        sinceEpochMs,
+      });
+      console.log(`    ${rawQuotes.length} quotes fetched`);
+      quoteRows = rawQuotes.map(q => {
+        const p = q.properties || {};
+        const quoteNo = pickFirst(p, ['quote_no', 'quote_number', 'hs_quote_number']);
+        const total   = pickFirst(p, ['total', 'amount', 'tran_total', 'hs_quote_amount']);
+        const status  = pickFirst(p, ['status', 'hs_pipeline_stage']);
+        const partsGroup = pickFirst(p, ['parts_group', 'part_group', 'partsgroup', 'partgroup']);
+        const fulfillment = pickFirst(p, ['fulfillment_date', 'closedate']);
+        const includeInForecast = pickFirst(p, ['include_in_forecast']);
+        return {
+          quote_object_id:    q.id,
+          quote_no:           quoteNo || '',
+          email:              p.email || '',
+          email_normalized:   normalizeEmail(p.email),
+          company:            p.company || '',
+          status:             status || '',
+          parts_group:        partsGroup || '',
+          price_level:        p.price_level || '',
+          total:              total != null && total !== '' ? Number(total) : null,
+          fulfillment_date:   fulfillment ? String(fulfillment).slice(0, 10) : null,
+          include_in_forecast: typeof includeInForecast === 'string'
+            ? includeInForecast.toLowerCase() === 'yes' || includeInForecast.toLowerCase() === 'true'
+            : !!includeInForecast,
+          owner_id:           p.hubspot_owner_id || '',
+          sales_rep:          p.sales_rep || '',
+          created_at:         parseDate(p.hs_createdate),
+          modified_at:        parseDate(p.hs_lastmodifieddate),
+          raw:                p,
+        };
+      });
+    }
+  } catch (e) {
+    console.error(`    ⚠️  ns-quotes fetch failed: ${e.message} — continuing without quote sync`);
+  }
+
   console.log('  → marketing campaigns...');
   const { results: rawCampaigns, available: campaignsAvailable } = await fetchCampaigns();
   const campaignRows = rawCampaigns.map(c => ({
@@ -363,23 +545,31 @@ export async function fetchHubSpot({ since = null } = {}) {
     source: 'hubspot',
     since,
     campaignsAvailable,
+    quoteSchema: quoteSchemaResolved?.objectTypeId || null,
     deals: dealRows,
     contacts: contactRows,
+    quotes: quoteRows,
     campaigns: campaignRows,
   }, null, 2));
-  console.log(`✅  Wrote HubSpot cache: ${dealRows.length} deals + ${contactRows.length} contacts + ${campaignRows.length} campaigns`);
+  console.log(`✅  Wrote HubSpot cache: ${dealRows.length} deals + ${contactRows.length} contacts + ${quoteRows.length} quotes + ${campaignRows.length} campaigns`);
 
   if (process.env.DATABASE_URL) {
-    const { upsertHubSpotDeals, upsertHubSpotContacts, upsertHubSpotCampaigns } = await import('../db.js');
+    const {
+      upsertHubSpotDeals, upsertHubSpotContacts,
+      upsertHubSpotNetsuiteQuotes, upsertHubSpotCampaigns,
+    } = await import('../db.js');
     const dealsInserted = await upsertHubSpotDeals(dealRows);
     const contactsInserted = await upsertHubSpotContacts(contactRows);
+    const quotesInserted = quoteRows.length > 0
+      ? await upsertHubSpotNetsuiteQuotes(quoteRows)
+      : 0;
     const campaignsInserted = campaignRows.length > 0
       ? await upsertHubSpotCampaigns(campaignRows)
       : 0;
-    console.log(`✅  Upserted ${dealsInserted} deals + ${contactsInserted} contacts + ${campaignsInserted} campaigns into PostgreSQL`);
-    return { deals: dealsInserted, contacts: contactsInserted, campaigns: campaignsInserted, campaignsAvailable };
+    console.log(`✅  Upserted ${dealsInserted} deals + ${contactsInserted} contacts + ${quotesInserted} quotes + ${campaignsInserted} campaigns into PostgreSQL`);
+    return { deals: dealsInserted, contacts: contactsInserted, quotes: quotesInserted, campaigns: campaignsInserted, campaignsAvailable };
   }
-  return { deals: dealRows.length, contacts: contactRows.length, campaigns: campaignRows.length, campaignsAvailable };
+  return { deals: dealRows.length, contacts: contactRows.length, quotes: quoteRows.length, campaigns: campaignRows.length, campaignsAvailable };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

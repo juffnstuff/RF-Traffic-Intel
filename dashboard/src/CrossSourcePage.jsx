@@ -149,27 +149,55 @@ function CampaignRoiTable({ rows }) {
 // = email-normalized customer match for contacts the middleware hasn't tagged
 // yet. Each row shows both lanes so the operator can see how much of the
 // attribution is high- vs lower-confidence.
-function HubSpotAttributionTable({ rows }) {
+// First-touch vs latest-touch attribution toggle. Persists to localStorage
+// via the parent's useLocalStorageState so the choice carries across reloads.
+function AttrLensToggle({ value, onChange }) {
+  const opt = (k, label, hint) => (
+    <button
+      type="button"
+      onClick={() => onChange(k)}
+      title={hint}
+      style={{
+        background: value === k ? 'var(--dso-accent-hot)' : 'transparent',
+        color: value === k ? 'white' : 'var(--dso-text-dim)',
+        border: `1px solid ${value === k ? 'var(--dso-accent-hot)' : 'var(--dso-rule)'}`,
+        padding: '4px 10px',
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: '0.12em',
+        textTransform: 'uppercase',
+        cursor: 'pointer',
+        borderRadius: 3,
+      }}
+    >{label}</button>
+  );
+  return (
+    <div style={{ display: 'flex', gap: 6 }}>
+      {opt('first',  'First-touch', 'hs_analytics_source — original / first-touch (stable per contact)')}
+      {opt('latest', 'Latest',      'hs_latest_source — most recent session source (overwrites on each new session)')}
+    </div>
+  );
+}
+
+function HubSpotAttributionTable({ rows, lens }) {
   if (!rows) return null;
   if (rows.length === 0) {
     return <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, padding: '20px 0' }}>
-      No HubSpot↔NetSuite attribution joined yet. Confirm `hubspot_contacts` has rows and
-      either `netsuite_quote_number` or `email_normalized` matches a NetSuite record.
+      No HubSpot↔NetSuite attribution joined yet. Confirm `hubspot_netsuite_quotes`
+      has rows (run a full HubSpot refresh) and that quote emails match contact emails.
     </div>;
   }
   const totals = rows.reduce((acc, r) => {
-    acc.contacts        += r.contacts || 0;
-    acc.quotes          += r.quotes   || 0;
-    acc.quotes_primary  += r.quotes_primary  || 0;
-    acc.quotes_fallback += r.quotes_fallback || 0;
-    acc.revenue         += r.revenue  || 0;
-    acc.revenue_primary += r.revenue_primary  || 0;
-    acc.revenue_fallback+= r.revenue_fallback || 0;
-    acc.wins            += r.wins     || 0;
-    acc.revenue_won     += r.revenue_won || 0;
+    acc.contacts             += r.contacts || 0;
+    acc.quotes               += r.quotes   || 0;
+    acc.quotes_unattributed  += r.quotes_unattributed || 0;
+    acc.revenue              += r.revenue  || 0;
+    acc.revenue_unattributed += r.revenue_unattributed || 0;
+    acc.wins                 += r.wins     || 0;
+    acc.revenue_won          += r.revenue_won || 0;
     return acc;
-  }, { contacts: 0, quotes: 0, quotes_primary: 0, quotes_fallback: 0, revenue: 0,
-       revenue_primary: 0, revenue_fallback: 0, wins: 0, revenue_won: 0 });
+  }, { contacts: 0, quotes: 0, quotes_unattributed: 0, revenue: 0,
+       revenue_unattributed: 0, wins: 0, revenue_won: 0 });
   return (
     <div style={{
       background: 'var(--dso-surface)',
@@ -179,8 +207,9 @@ function HubSpotAttributionTable({ rows }) {
       overflowX: 'auto',
     }}>
       <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 8 }}>
-        NetSuite quote totals attributed to HubSpot's `hs_analytics_source` first-touch bucket.
-        Primary lane joins on quote_number; fallback uses email-normalized customer match.
+        Revenue from `hubspot_netsuite_quotes` (NetSuite quote totals mirrored into HubSpot),
+        bucketed by the matched contact's <strong>{lens === 'latest' ? 'hs_latest_source' : 'hs_analytics_source'}</strong>.
+        Quotes whose email doesn't match any contact land in the (UNKNOWN) bucket — see Unattributed columns.
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
@@ -188,7 +217,7 @@ function HubSpotAttributionTable({ rows }) {
             <th style={{ padding: '8px 10px', fontWeight: 600 }}>HubSpot Source</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Contacts</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Quotes</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Primary / Fallback</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Unattributed</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Wins</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Win Revenue</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Total Revenue</th>
@@ -201,7 +230,7 @@ function HubSpotAttributionTable({ rows }) {
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.contacts)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.quotes)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--dso-text-dim)', fontSize: 11 }}>
-                {fmtNum(r.quotes_primary)} / {fmtNum(r.quotes_fallback)}
+                {fmtNum(r.quotes_unattributed)} ({fmtMoney(r.revenue_unattributed)})
               </td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.wins)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue_won)}</td>
@@ -215,13 +244,89 @@ function HubSpotAttributionTable({ rows }) {
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.contacts)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.quotes)}</td>
             <td style={{ padding: '10px', textAlign: 'right', color: 'var(--dso-text-dim)', fontSize: 11 }}>
-              {fmtNum(totals.quotes_primary)} / {fmtNum(totals.quotes_fallback)}
+              {fmtNum(totals.quotes_unattributed)} ({fmtMoney(totals.revenue_unattributed)})
             </td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.wins)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.revenue_won)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.revenue)}</td>
           </tr>
         </tfoot>
+      </table>
+    </div>
+  );
+}
+
+// Per-quote drill-down — one row per quote, both attributions side-by-side.
+// `latest_predates_quote` is TRUE when the contact's hs_latest_source_timestamp
+// is on or before the quote date (latest is reliable for that quote); FALSE
+// means the latest source was set in a session AFTER the quote was created,
+// so first-touch is the more trustworthy lens for that row.
+function QuoteAttributionTable({ rows }) {
+  if (!rows) return null;
+  if (rows.length === 0) {
+    return <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, padding: '20px 0' }}>
+      No quotes in window. Either `hubspot_netsuite_quotes` is empty or no quotes fall in the selected dates.
+    </div>;
+  }
+  return (
+    <div style={{
+      background: 'var(--dso-surface)',
+      borderRadius: 4,
+      padding: '14px 16px',
+      border: '1px solid var(--dso-rule)',
+      overflowX: 'auto',
+    }}>
+      <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 8 }}>
+        Every quote with both original and latest attribution side-by-side. <strong>Latest pre-dates quote</strong> ✓
+        means the contact's latest-source timestamp is older than the quote date — the latest source is the source-of-truth
+        for that quote. ✗ means latest was overwritten by a later session, so use first-touch for that row.
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
+        <thead>
+          <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Quote</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Date</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Contact</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Status</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Total</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Part Group</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Original (first-touch)</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Latest</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'center' }}>Latest&nbsp;pre-dates&nbsp;quote</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.quote_object_id} style={{ borderTop: '1px solid var(--dso-rule)' }}>
+              <td style={{ padding: '8px 10px', fontFamily: 'var(--dso-font-mono, monospace)' }}>
+                {r.quote_no || <span style={{ color: 'var(--dso-text-faint)' }}>—</span>}
+              </td>
+              <td style={{ padding: '8px 10px', color: 'var(--dso-text-dim)' }}>
+                {r.created_at ? String(r.created_at).slice(0, 10) : '—'}
+              </td>
+              <td style={{ padding: '8px 10px', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.email}>
+                <div>{r.company || <span style={{ color: 'var(--dso-text-faint)' }}>(no company)</span>}</div>
+                <div style={{ color: 'var(--dso-text-dim)', fontSize: 11 }}>{r.email}</div>
+              </td>
+              <td style={{ padding: '8px 10px' }}>{r.status || '—'}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{fmtMoney(r.total)}</td>
+              <td style={{ padding: '8px 10px' }}>{r.parts_group || <span style={{ color: 'var(--dso-text-faint)' }}>(unmapped)</span>}</td>
+              <td style={{ padding: '8px 10px' }}>
+                <div>{r.original_source || <span style={{ color: 'var(--dso-text-faint)' }}>—</span>}</div>
+                {r.original_campaign && <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.original_campaign}>{r.original_campaign}</div>}
+              </td>
+              <td style={{ padding: '8px 10px' }}>
+                <div>{r.latest_source || <span style={{ color: 'var(--dso-text-faint)' }}>—</span>}</div>
+                {r.latest_campaign && <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.latest_campaign}>{r.latest_campaign}</div>}
+              </td>
+              <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                {r.latest_predates_quote === true  ? <span style={{ color: '#34d399' }}>✓</span>
+                : r.latest_predates_quote === false ? <span style={{ color: '#f87171' }}>✗</span>
+                : <span style={{ color: 'var(--dso-text-faint)' }}>—</span>}
+              </td>
+            </tr>
+          ))}
+        </tbody>
       </table>
     </div>
   );
@@ -276,7 +381,7 @@ function LeadSourceReconciliationTable({ rows }) {
               <td style={{ padding: '8px 10px', color: '#f59e0b' }}>{r.ns_lead_source || <span style={{ color: 'var(--dso-text-faint)' }}>—</span>}</td>
               <td style={{ padding: '8px 10px' }}>{r.ns_entity || '—'}</td>
               <td style={{ padding: '8px 10px' }}>
-                {r.netsuite_quote_number ? <span>{r.netsuite_quote_number} <span style={{ color: 'var(--dso-text-dim)', fontSize: 11 }}>({r.netsuite_quote_status})</span></span> : <span style={{ color: 'var(--dso-text-faint)' }}>—</span>}
+                {r.latest_quote_no ? <span>{r.latest_quote_no} <span style={{ color: 'var(--dso-text-dim)', fontSize: 11 }}>({r.latest_quote_status})</span></span> : <span style={{ color: 'var(--dso-text-faint)' }}>—</span>}
               </td>
             </tr>
           ))}
@@ -299,15 +404,15 @@ function PartGroupRoasTable({ rows }) {
     </div>;
   }
   const totals = rows.reduce((acc, r) => {
-    acc.cost              += r.cost || 0;
-    acc.revenue           += r.revenue || 0;
-    acc.revenue_primary   += r.revenue_primary || 0;
-    acc.revenue_fallback  += r.revenue_fallback || 0;
-    acc.quotes_primary    += r.quotes_primary || 0;
-    acc.quotes_fallback   += r.quotes_fallback || 0;
+    acc.cost        += r.cost || 0;
+    acc.quotes      += r.quotes || 0;
+    acc.quotes_won  += r.quotes_won || 0;
+    acc.revenue     += r.revenue || 0;
+    acc.revenue_won += r.revenue_won || 0;
     return acc;
-  }, { cost: 0, revenue: 0, revenue_primary: 0, revenue_fallback: 0, quotes_primary: 0, quotes_fallback: 0 });
-  const totalRoas = totals.cost > 0 ? totals.revenue / totals.cost : null;
+  }, { cost: 0, quotes: 0, quotes_won: 0, revenue: 0, revenue_won: 0 });
+  const totalRoas    = totals.cost > 0 ? totals.revenue     / totals.cost : null;
+  const totalRoasWon = totals.cost > 0 ? totals.revenue_won / totals.cost : null;
   return (
     <div style={{
       background: 'var(--dso-surface)',
@@ -317,17 +422,20 @@ function PartGroupRoasTable({ rows }) {
       overflowX: 'auto',
     }}>
       <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 8 }}>
-        Cost from Google Ads. Revenue is the contact's NetSuite quote totals, joined via
-        HubSpot's first-touch campaign → curated `part_group_mappings`. ROAS is unitless ratio.
+        Revenue from `hubspot_netsuite_quotes.parts_group` (direct, no campaign-mapping fuzz).
+        Cost from Google Ads attributed to part-groups via curated `part_group_mappings`. Ads spend with no mapping rolls up under <strong>(unmapped)</strong> — close the gap by adding mappings below. ROAS shown for all quotes and for closed-won only.
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
           <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
             <th style={{ padding: '8px 10px', fontWeight: 600 }}>Part Group</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Ad Cost</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Quotes (P / F)</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Revenue</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Quotes</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Wins</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Revenue (all)</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Revenue (won)</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>ROAS</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>ROAS (won)</th>
           </tr>
         </thead>
         <tbody>
@@ -335,12 +443,15 @@ function PartGroupRoasTable({ rows }) {
             <tr key={r.part_group} style={{ borderTop: '1px solid var(--dso-rule)' }}>
               <td style={{ padding: '8px 10px' }}>{r.part_group || <span style={{ color: 'var(--dso-text-faint)' }}>(unmapped)</span>}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.cost)}</td>
-              <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--dso-text-dim)', fontSize: 11 }}>
-                {fmtNum(r.quotes_primary)} / {fmtNum(r.quotes_fallback)}
-              </td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.quotes)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.quotes_won)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue_won)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>
                 {r.roas != null ? fmtRatio(r.roas) : '—'}
+              </td>
+              <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>
+                {r.roas_won != null ? fmtRatio(r.roas_won) : '—'}
               </td>
             </tr>
           ))}
@@ -349,11 +460,12 @@ function PartGroupRoasTable({ rows }) {
           <tr style={{ borderTop: '2px solid var(--dso-rule)', fontWeight: 700 }}>
             <td style={{ padding: '10px', color: 'var(--dso-text-dim)', fontSize: 11, letterSpacing: '0.12em', textTransform: 'uppercase' }}>Total</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.cost)}</td>
-            <td style={{ padding: '10px', textAlign: 'right', color: 'var(--dso-text-dim)', fontSize: 11 }}>
-              {fmtNum(totals.quotes_primary)} / {fmtNum(totals.quotes_fallback)}
-            </td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.quotes)}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.quotes_won)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.revenue)}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.revenue_won)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{totalRoas != null ? fmtRatio(totalRoas) : '—'}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{totalRoasWon != null ? fmtRatio(totalRoasWon) : '—'}</td>
           </tr>
         </tfoot>
       </table>
@@ -426,6 +538,10 @@ export default function CrossSourcePage() {
   const [hsAttribution, setHsAttribution] = useState(null);
   const [leadReconciliation, setLeadReconciliation] = useState(null);
   const [partGroupRoas, setPartGroupRoas] = useState(null);
+  const [quoteAttribution, setQuoteAttribution] = useState(null);
+  // 'first' = hs_analytics_source (original / first-touch).
+  // 'latest' = hs_latest_source (most recent session source, may post-date quote).
+  const [attrLens, setAttrLens] = useLocalStorageState('attrLens', 'first');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   // Bumped after any mapping mutation so both the suggester and the
@@ -448,6 +564,11 @@ export default function CrossSourcePage() {
       params.set('since', cutoff);
     }
     const qs = params.toString();
+    // Build the attribution endpoint with the chosen lens. Quote drill-down
+    // doesn't take a lens because each row carries both sources.
+    const hsParams = new URLSearchParams(params);
+    hsParams.set('lens', attrLens === 'latest' ? 'latest' : 'first');
+    const hsQs = hsParams.toString();
     Promise.all([
       fetch(`/api/insights/campaign-roi${qs ? '?' + qs : ''}`).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/insights/page-performance?limit=100').then(r => r.ok ? r.json() : null).catch(() => null),
@@ -457,11 +578,12 @@ export default function CrossSourcePage() {
       fetch('/api/callrail-trackers').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/callrail-text-messages?limit=50').then(r => r.ok ? r.json() : null).catch(() => null),
       // HubSpot → NetSuite attribution lanes — date-windowed alongside Ads/GA4.
-      fetch(`/api/insights/hubspot-netsuite-attribution${qs ? '?' + qs : ''}`).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/insights/hubspot-netsuite-attribution?${hsQs}`).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/insights/lead-source-reconciliation?limit=100').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch(`/api/insights/part-group-roas${qs ? '?' + qs : ''}`).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/insights/quote-attribution${qs ? '?' + qs : ''}&limit=500`).then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([c, p, t, m, hs, rec, pg]) => {
+      .then(([c, p, t, m, hs, rec, pg, qa]) => {
         setCampaigns(c?.campaigns || []);
         setPages(p?.pages || []);
         setPageWindowEnd(p?.pages?.[0]?.window_end_date || null);
@@ -470,12 +592,13 @@ export default function CrossSourcePage() {
         setHsAttribution(hs?.sources || []);
         setLeadReconciliation(rec?.mismatches || []);
         setPartGroupRoas(pg?.part_groups || []);
+        setQuoteAttribution(qa?.quotes || []);
         if (!c && !p) setError('Cross-source endpoints returned no data. Are GA4 and Ads/GSC backfilled?');
         else setError(null);
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }, [cutoff, selectedYears]);
+  }, [cutoff, selectedYears, attrLens]);
 
   // Probe years from the campaign rows once we have any.
   useEffect(() => {
@@ -534,16 +657,19 @@ export default function CrossSourcePage() {
       )}
 
       <section style={{ marginBottom: 28 }}>
-        <h3 style={{
-          fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
-          fontSize: 14,
-          fontWeight: 600,
-          letterSpacing: '0.14em',
-          textTransform: 'uppercase',
-          color: 'var(--dso-text-dim)',
-          marginBottom: 10,
-        }}>NetSuite Revenue by HubSpot Lead Source</h3>
-        <HubSpotAttributionTable rows={hsAttribution} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
+          <h3 style={{
+            fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+            fontSize: 14,
+            fontWeight: 600,
+            letterSpacing: '0.14em',
+            textTransform: 'uppercase',
+            color: 'var(--dso-text-dim)',
+            margin: 0,
+          }}>NetSuite Revenue by HubSpot Traffic Source</h3>
+          <AttrLensToggle value={attrLens} onChange={setAttrLens} />
+        </div>
+        <HubSpotAttributionTable rows={hsAttribution} lens={attrLens} />
       </section>
 
       <section style={{ marginBottom: 28 }}>
@@ -557,6 +683,19 @@ export default function CrossSourcePage() {
           marginBottom: 10,
         }}>Part-Group ROAS — Ads Cost ÷ NetSuite Revenue (via HubSpot)</h3>
         <PartGroupRoasTable rows={partGroupRoas} />
+      </section>
+
+      <section style={{ marginBottom: 28 }}>
+        <h3 style={{
+          fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+          fontSize: 14,
+          fontWeight: 600,
+          letterSpacing: '0.14em',
+          textTransform: 'uppercase',
+          color: 'var(--dso-text-dim)',
+          marginBottom: 10,
+        }}>Per-Quote Attribution Drill-Down</h3>
+        <QuoteAttributionTable rows={quoteAttribution} />
       </section>
 
       <section style={{ marginBottom: 28 }}>
