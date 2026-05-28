@@ -566,6 +566,14 @@ export default function DashboardView({
   // switching tabs or refreshing the browser doesn't clear the user's view.
   const [range, setRange] = useLocalStorageState('range', '6m');
   const [selectedYears, setSelectedYears] = useLocalStorageState('years', []);
+  // Collapse state for the lead-lag block, keyed by tab so each tab
+  // (overview / filtered / ga4 / seo) remembers its own collapsed state.
+  const [leadLagCollapsed, setLeadLagCollapsed] = useLocalStorageState(
+    `leadLagCollapsed:${aiContext?.page || 'default'}`,
+    false,
+  );
+
+
   const [weekdayOnly, setWeekdayOnly] = useLocalStorageState('weekdayOnly', false);
   const [showDaily, setShowDaily] = useLocalStorageState('showDaily', false);
   const [aiText, setAiText] = useState(null);
@@ -1117,10 +1125,27 @@ export default function DashboardView({
 
         {(leadLagResults.quotesToOrdersCount || leadLagResults.ordersToShippedCount) && (
           <div style={{ marginBottom: 20 }}>
-            <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, fontWeight: 600 }}>
-              Lead-Lag Correlation
-            </h2>
-            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
+            <button
+              type="button"
+              onClick={() => setLeadLagCollapsed(!leadLagCollapsed)}
+              aria-expanded={!leadLagCollapsed}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
+                color: '#94a3b8', marginBottom: 4,
+              }}
+            >
+              <span style={{
+                fontSize: 11, color: '#64748b', width: 12, display: 'inline-block',
+                transition: 'transform 0.15s', transform: leadLagCollapsed ? 'rotate(0deg)' : 'rotate(90deg)',
+              }}>▶</span>
+              <h2 style={{ fontSize: 13, color: '#94a3b8', margin: 0, fontWeight: 600 }}>
+                Lead-Lag Correlation
+              </h2>
+            </button>
+            {!leadLagCollapsed && (
+            <>
+            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10, marginTop: 4 }}>
               How many days of delay give the tightest predictive link between the two series.
               Computed on <em>detrended</em> momentum (30 DMA minus 90 DMA) so opposing long-term trends don't
               produce fake inverse correlations. Count r forecasts transaction volume; $ r forecasts revenue.
@@ -1207,6 +1232,8 @@ export default function DashboardView({
                 result={leadLagResults.ordersToShippedDollars}
               />
             </div>
+            </>
+            )}
           </div>
         )}
 

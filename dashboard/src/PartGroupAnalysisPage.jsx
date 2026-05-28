@@ -68,6 +68,7 @@ export default function PartGroupAnalysisPage() {
   const [selectedYears, setSelectedYears] = useLocalStorageState('years', []);
   const [weekdayOnly, setWeekdayOnly]     = useLocalStorageState('weekdayOnly', false);
   const [sort, setSort]                   = useLocalStorageState('pgR.sort', { key: 'total_dollars', dir: 'desc' });
+  const [leadLagCollapsed, setLeadLagCollapsed] = useLocalStorageState('leadLagCollapsed:partgroup', false);
 
   const loadData = useCallback(() => {
     setLoading(true);
@@ -285,21 +286,39 @@ export default function PartGroupAnalysisPage() {
         </div>
 
         <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, marginBottom: 14 }}>
-          <div style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
-            Per-part-group lead-lag r
-            {sizeBucket && <span style={{ color: '#f59e0b', marginLeft: 6 }}>· {sizeBucket}</span>}
-          </div>
-          <div style={{ color: '#94a3b8', fontSize: 11, lineHeight: 1.5 }}>
-            Each row is one part group, computed independently on its own <em>detrended</em> momentum series
-            (30 DMA minus 90 DMA) to avoid trend-alignment artifacts. "Lag" is the day-offset where the
-            correlation peaks; "r" is the correlation strength at that lag.
-            <span style={{ color: '#22c55e' }}> ●</span> = strong (≥0.7),
-            <span style={{ color: '#fbbf24' }}> ●</span> = moderate (0.4–0.7),
-            <span style={{ color: '#94a3b8' }}> ●</span> = weak/noisy (&lt;0.4).
-            Rows with fewer than {MIN_DAYS_FOR_R} days of activity show "—" because r isn't reliable on small samples.
-          </div>
+          <button
+            type="button"
+            onClick={() => setLeadLagCollapsed(!leadLagCollapsed)}
+            aria-expanded={!leadLagCollapsed}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+              background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
+              color: '#cbd5e1', textAlign: 'left',
+            }}
+          >
+            <span style={{
+              fontSize: 11, color: '#64748b', width: 12, display: 'inline-block',
+              transition: 'transform 0.15s', transform: leadLagCollapsed ? 'rotate(0deg)' : 'rotate(90deg)',
+            }}>▶</span>
+            <span style={{ fontSize: 12, fontWeight: 600 }}>
+              Per-part-group lead-lag r
+              {sizeBucket && <span style={{ color: '#f59e0b', marginLeft: 6 }}>· {sizeBucket}</span>}
+            </span>
+          </button>
+          {!leadLagCollapsed && (
+            <div style={{ color: '#94a3b8', fontSize: 11, lineHeight: 1.5, marginTop: 6 }}>
+              Each row is one part group, computed independently on its own <em>detrended</em> momentum series
+              (30 DMA minus 90 DMA) to avoid trend-alignment artifacts. "Lag" is the day-offset where the
+              correlation peaks; "r" is the correlation strength at that lag.
+              <span style={{ color: '#22c55e' }}> ●</span> = strong (≥0.7),
+              <span style={{ color: '#fbbf24' }}> ●</span> = moderate (0.4–0.7),
+              <span style={{ color: '#94a3b8' }}> ●</span> = weak/noisy (&lt;0.4).
+              Rows with fewer than {MIN_DAYS_FOR_R} days of activity show "—" because r isn't reliable on small samples.
+            </div>
+          )}
         </div>
 
+        {!leadLagCollapsed && (
         <div style={{ overflowX: 'auto', background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8 }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 760 }}>
             <thead>
@@ -337,6 +356,7 @@ export default function PartGroupAnalysisPage() {
             </tbody>
           </table>
         </div>
+        )}
       </main>
     </>
   );
