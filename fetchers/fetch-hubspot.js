@@ -289,21 +289,46 @@ async function discoverQuoteSchema() {
     throw e;
   }
   const j = await res.json();
-  const want = 'rubberform netsuite quotes';
-  const match = (j.results || []).find(s => {
-    const labels = [
-      s.labels?.singular, s.labels?.plural, s.name, s.fullyQualifiedName,
-    ].filter(Boolean).map(l => l.toLowerCase());
-    return labels.some(l => l.includes(want));
-  });
-  if (!match) {
+  const all = j.results || [];
+  const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  // Score each schema against several candidate phrases — most specific first.
+  // Any partial match earns inclusion in the candidate list; we then pick the
+  // one with the best score.
+  const candidates = [
+    'rubberform netsuite quotes',
+    'rubberform netsuite quote',
+    'netsuite quotes',
+    'netsuite quote',
+    'ns quotes',
+    'rubberform quotes',
+    'quotes',
+    'quote',
+  ];
+  let best = null;
+  let bestScore = -1;
+  for (const s of all) {
+    const labels = [s.labels?.singular, s.labels?.plural, s.name, s.fullyQualifiedName]
+      .filter(Boolean).map(norm);
+    let score = -1;
+    for (let i = 0; i < candidates.length; i++) {
+      const c = norm(candidates[i]);
+      if (labels.some(l => l === c)) { score = Math.max(score, 1000 - i); }
+      else if (labels.some(l => l.includes(c))) { score = Math.max(score, 500 - i); }
+    }
+    if (score > bestScore) { bestScore = score; best = s; }
+  }
+  if (!best || bestScore < 0) {
     console.log('    ℹ︎  Quote schema not found among custom objects — skipping quote sync');
+    if (all.length > 0) {
+      const names = all.map(s => `${s.labels?.plural || s.name || '?'} (${s.objectTypeId})`).join(', ');
+      console.log(`       Custom objects available: ${names}`);
+    }
     return null;
   }
-  const props = (match.properties || []).map(p => p.name);
-  console.log(`    → discovered quote schema: ${match.objectTypeId} (${match.labels?.plural || match.name}) · ${props.length} properties`);
+  const props = (best.properties || []).map(p => p.name);
+  console.log(`    → discovered quote schema: ${best.objectTypeId} (${best.labels?.plural || best.name}) · ${props.length} properties · match-score=${bestScore}`);
   return {
-    objectTypeId: match.objectTypeId,
+    objectTypeId: best.objectTypeId,
     propertyNames: props,
   };
 }
