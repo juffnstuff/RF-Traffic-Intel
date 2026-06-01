@@ -252,22 +252,41 @@ async function searchAllWithChunking({ endpoint, label, properties, sinceEpochMs
   return out;
 }
 
+// ── Contact property discovery ────────────────────────────────────────
+// HubSpot's search API returns HTTP 400 if any property in the request
+// (either in `properties` or referenced by a filter) doesn't exist on the
+// portal. CONTACT_PROPS contains custom fields (netsuite_*, lead_source,
+// form_type, *_campaign_contacted, …) that may not be defined in every
+// portal, so we introspect the schema and intersect before each search.
+async function discoverContactPropertyNames() {
+  const res = await hsFetch(`${BASE}/crm/v3/properties/contacts`, {}, 'contact-properties');
+  const j = await res.json();
+  return new Set((j.results || []).map(p => p.name));
+}
+
 // ── Contact search (chunked) ──────────────────────────────────────────
 // Pull every contact with an email OR a NetSuite quote number. ~74k+
 // contacts blow past HubSpot's 10k-search cap, so we date-window-chunk.
-async function fetchContacts({ sinceEpochMs = null } = {}) {
+async function fetchContacts({ sinceEpochMs = null, availableProps } = {}) {
+  const properties = CONTACT_PROPS.filter(n => availableProps.has(n));
+  const dropped = CONTACT_PROPS.filter(n => !availableProps.has(n));
+  if (dropped.length) {
+    console.log(`    ℹ︎  Skipping ${dropped.length} contact properties not in portal: ${dropped.join(', ')}`);
+  }
+  // The NetSuite-quote-number filter group only makes sense if that property
+  // exists; otherwise HubSpot returns 400 for the whole search.
+  const filterGroups = [
+    { filters: [{ propertyName: 'email', operator: 'HAS_PROPERTY' }] },
+  ];
+  if (availableProps.has('netsuite_quote_number')) {
+    filterGroups.push({ filters: [{ propertyName: 'netsuite_quote_number', operator: 'HAS_PROPERTY' }] });
+  }
   return searchAllWithChunking({
     endpoint: 'crm/v3/objects/contacts',
     label: 'contacts.search',
-    properties: CONTACT_PROPS,
+    properties,
     sinceEpochMs,
-    filterGroups: [
-      // Two groups (OR'd by HubSpot): contacts with an email OR contacts
-      // with a NetSuite quote number on them. Either makes them joinable
-      // to NetSuite data.
-      { filters: [{ propertyName: 'email', operator: 'HAS_PROPERTY' }] },
-      { filters: [{ propertyName: 'netsuite_quote_number', operator: 'HAS_PROPERTY' }] },
-    ],
+    filterGroups,
   });
 }
 
@@ -463,7 +482,8 @@ export async function fetchHubSpot({ since = null } = {}) {
   });
 
   console.log('  → contacts...');
-  const rawContacts = await fetchContacts({ sinceEpochMs });
+  const availableContactProps = await discoverContactPropertyNames();
+  const rawContacts = await fetchContacts({ sinceEpochMs, availableProps: availableContactProps });
   console.log(`    ${rawContacts.length} contacts fetched`);
 
   const contactRows = rawContacts.map(c => {
