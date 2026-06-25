@@ -8,6 +8,8 @@
  *
  * created_from_id links a SalesOrd back to its originating Estimate when
  * the SO was created from a quote (lets us trace quote → SO → shipped).
+ * The link lives in the `nexttransactionlink` system table — there is no
+ * `createdfrom` column on the `transaction` record itself in this account.
  *
  * Modes:
  *   - Full: no filter — full backfill (~30K rows for a 4-year history).
@@ -26,11 +28,14 @@ const QUERY = (sinceFilter) => `
     t.total, t.actualShipDate,
     t.employee AS sales_rep_id,
     BUILTIN.DF(t.employee) AS sales_rep_name,
-    t.createdfrom AS created_from_id,
+    ntl.previousDoc AS created_from_id,
     t.custbody_rf_firstquote AS first_quote,
     t.custbody_rf_firstorder AS first_order,
     t.custbody_rf_lost_reason AS lost_reason_id
   FROM transaction t
+  LEFT JOIN nexttransactionlink ntl
+    ON ntl.nextDoc = t.id
+    AND BUILTIN.DF(ntl.linkType) = 'Estimate Invoicing'
   WHERE t.recordType IN ('estimate', 'salesorder')
   ${sinceFilter}
   ORDER BY t.id
