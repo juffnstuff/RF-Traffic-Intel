@@ -76,20 +76,34 @@ If you already have NetSuite MCP running, you can skip this — the MCP fetcher 
    - User: your account
    - Save → copy Token ID and Token Secret to `.env`
 
-### Step 5 — Fetch all data
+### Step 5 — Fetch data
+
+There is no single `fetch-all` script. Data is loaded one source at a time,
+and the server **auto-backfills any empty table on startup**, so the simplest
+path is just to start the server (Step 6) and let it populate. To fetch a
+single source on demand, use the per-source npm scripts or the refresh
+endpoints:
 
 ```bash
-# Full fetch (Google + NetSuite):
-node fetchers/fetch-all.js
+# Per-source scripts (each writes to PostgreSQL when DATABASE_URL is set):
+npm run fetch:gsc
+npm run fetch:ga4
+npm run fetch:netsuite          # aggregate quotes/orders timeline
+npm run fetch:netsuite-dim      # NetSuite dimension tables
+npm run fetch:crux
 
-# NetSuite only (fast, no Google setup needed):
-node fetchers/fetch-all.js --netsuite-only
-
-# Use cached Google data, refresh NetSuite only:
-node fetchers/fetch-all.js --skip-google
+# Sources without a dedicated npm script run via their module directly:
+node fetchers/fetch-google-ads.js --full
+node fetchers/fetch-hubspot.js --full
+node fetchers/fetch-netsuite-customers.js --full
+node fetchers/fetch-netsuite-transactions.js --full
+node fetchers/fetch-callrail.js
 ```
 
-First run takes 1–2 minutes. Subsequent runs with `--skip-google` take ~10 seconds.
+Or, with the server running, POST to the refresh endpoints (see the API
+table below): `POST /api/refresh/hubspot?mode=full`, etc. The first full
+HubSpot/NetSuite backfill takes 1–2 minutes; incremental refreshes take
+seconds.
 
 ### Step 6 — Run the dashboard
 
@@ -115,7 +129,7 @@ NetSuite data should be refreshed daily. Set up a cron job:
 
 ```bash
 # Refresh NetSuite every weekday at 8am
-0 8 * * 1-5 cd /path/to/rf-traffic-intel && node fetchers/fetch-all.js --skip-google
+0 8 * * 1-5 cd /path/to/rf-traffic-intel && npm run fetch:netsuite && node fetchers/fetch-hubspot.js
 ```
 
 Google data is cached and only needs refresh weekly (Search Console has a 3-day data lag anyway).
@@ -131,10 +145,17 @@ rf-traffic-intel/
 │   ├── credentials.json    ← ADD THIS (download from Google Cloud)
 │   └── token.json          ← auto-generated after first auth
 ├── fetchers/
-│   ├── fetch-gsc.js        ← Google Search Console daily data
-│   ├── fetch-ga4.js        ← GA4 sessions by source
-│   ├── fetch-netsuite.js   ← NetSuite SuiteQL quotes + orders
-│   └── fetch-all.js        ← Master script, merges all sources
+│   ├── fetch-gsc.js                  ← Google Search Console daily data
+│   ├── fetch-ga4.js                  ← GA4 sessions by source
+│   ├── fetch-google-ads.js           ← Google Ads cost/clicks/impressions
+│   ├── fetch-hubspot.js              ← Deals, contacts, NetSuite-quote mirror
+│   ├── fetch-callrail.js             ← CallRail calls/texts/forms
+│   ├── fetch-crux.js                 ← Chrome UX Report (Core Web Vitals)
+│   ├── fetch-netsuite.js             ← NetSuite SuiteQL quotes + orders (aggregate)
+│   ├── fetch-netsuite-dim.js         ← NetSuite dimension tables
+│   ├── fetch-netsuite-customers.js   ← Per-customer rows (attribution bridge)
+│   └── fetch-netsuite-transactions.js← Per-transaction rows (attribution bridge)
+│   (no fetch-all.js — the server auto-backfills empty tables on startup)
 ├── data/
 │   └── cache/
 │       ├── gsc-daily.json      ← GSC cache

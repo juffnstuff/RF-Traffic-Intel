@@ -96,10 +96,13 @@ async function fetchPipelines() {
     for (const stage of (pipe.stages || [])) {
       byStageId.set(stage.id, { label: stage.label, pipeline: pipe.label });
       // HubSpot marks closed-won via stage metadata `probability: "1.0"` and
-      // `isClosed: true`. Both keys live under stage.metadata.
+      // `isClosed: true`. Both keys live under stage.metadata. The v3 API
+      // returns isClosed as a string ("true"), but accept a boolean too so a
+      // future API shape change doesn't silently mark every deal non-won.
       const meta = stage.metadata || {};
       const prob = Number(meta.probability);
-      if (meta.isClosed === 'true' && prob === 1) {
+      const isClosed = meta.isClosed === 'true' || meta.isClosed === true;
+      if (isClosed && prob === 1) {
         closedWonStageIds.add(stage.id);
       }
     }
@@ -182,13 +185,21 @@ async function fetchDeals({ sinceEpochMs = null } = {}) {
 }
 
 // HubSpot's search API caps at the 10,000th result for any single query.
-// To get all records past that, walk lastmodifieddate descending in
-// 10k-row chunks, then re-issue the search with `lastmodifieddate < oldest`
+// To get all records past that, walk the last-modified timestamp descending
+// in 10k-row chunks, then re-issue the search with `<timestampProp> < oldest`
 // and repeat until the result set is shorter than 10k.
+//
+// `timestampProp` is the portal's last-modified property and MUST exist on
+// the object being searched, since it drives both the filter and the sort.
+// Built-in objects with a contact-style schema expose `lastmodifieddate`
+// (the default), but custom objects (e.g. the NetSuite Quotes object) expose
+// only `hs_lastmodifieddate` — passing the wrong one makes HubSpot return a
+// 400 for the whole search, silently emptying the result set. Callers must
+// pass the property that exists on their object.
 //
 // Returns every object across the windows, de-duplicated by id (boundary
 // rows can repeat when the cursor rolls over).
-async function searchAllWithChunking({ endpoint, label, properties, sinceEpochMs = null, filterGroups = null, maxRecords = 500000 } = {}) {
+async function searchAllWithChunking({ endpoint, label, properties, sinceEpochMs = null, filterGroups = null, maxRecords = 500000, timestampProp = 'lastmodifieddate' } = {}) {
   const seen = new Set();
   const out = [];
   // Start window: no upper bound. Lower bound is sinceEpochMs if provided.
@@ -196,10 +207,10 @@ async function searchAllWithChunking({ endpoint, label, properties, sinceEpochMs
   while (true) {
     const baseFilters = [];
     if (sinceEpochMs) {
-      baseFilters.push({ propertyName: 'lastmodifieddate', operator: 'GTE', value: String(sinceEpochMs) });
+      baseFilters.push({ propertyName: timestampProp, operator: 'GTE', value: String(sinceEpochMs) });
     }
     if (upperBoundMs != null) {
-      baseFilters.push({ propertyName: 'lastmodifieddate', operator: 'LT',  value: String(upperBoundMs) });
+      baseFilters.push({ propertyName: timestampProp, operator: 'LT',  value: String(upperBoundMs) });
     }
     // Caller may pass filterGroups (OR'd groups) — merge baseFilters into each.
     const groups = filterGroups
@@ -213,7 +224,7 @@ async function searchAllWithChunking({ endpoint, label, properties, sinceEpochMs
       const body = {
         filterGroups: groups,
         properties,
-        sorts: [{ propertyName: 'lastmodifieddate', direction: 'DESCENDING' }],
+        sorts: [{ propertyName: timestampProp, direction: 'DESCENDING' }],
         limit: 100,
         after,
       };
@@ -226,7 +237,7 @@ async function searchAllWithChunking({ endpoint, label, properties, sinceEpochMs
         if (seen.has(o.id)) continue;
         seen.add(o.id);
         out.push(o);
-        const ms = Date.parse(o.properties?.lastmodifieddate || o.properties?.hs_lastmodifieddate || '');
+        const ms = Date.parse(o.properties?.[timestampProp] || o.properties?.lastmodifieddate || o.properties?.hs_lastmodifieddate || '');
         if (Number.isFinite(ms) && (chunkOldestMs == null || ms < chunkOldestMs)) chunkOldestMs = ms;
       }
       chunkCount += (j.results || []).length;
@@ -387,6 +398,10 @@ async function fetchNetsuiteQuotes({ objectTypeId, propertyNames, sinceEpochMs =
     properties: propertyNames,
     sinceEpochMs,
     filterGroups: null, // no filter — we want every quote
+    // Custom objects expose hs_lastmodifieddate, not the contact-style
+    // `lastmodifieddate`. Using the latter 400s the whole search and leaves
+    // hubspot_netsuite_quotes empty — which zeroes out all downstream ROAS.
+    timestampProp: 'hs_lastmodifieddate',
   });
 }
 

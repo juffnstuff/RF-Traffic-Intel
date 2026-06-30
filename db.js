@@ -412,11 +412,14 @@ export async function initDB() {
   await p.query(`CREATE INDEX IF NOT EXISTS idx_hs_won ON hubspot_deals(is_closed_won)`);
 
   // HubSpot contacts. The NetSuite↔HubSpot middleware writes the originating
-  // NetSuite quote number into `netsuite_quote_number`; that gives us a
-  // direct primary-key join to netsuite_transactions.tran_id, so we can
-  // attribute NS revenue to HubSpot's first-touch source/campaign without
-  // any email-normalization fuzz on the primary lane. Email is the
-  // fallback join (contacts the middleware hasn't tagged yet).
+  // NetSuite quote number into `netsuite_quote_number`. That COULD give a
+  // direct primary-key join to a quote/transaction, but the current revenue
+  // attribution (getCrossSourceLeadSourceRevenue / getPartGroupRoasFromHubSpot)
+  // joins quotes → contacts on `email_normalized` only. The quote-number
+  // bridge is captured here but not yet used as a high-confidence lane —
+  // wiring it in (quote_no = netsuite_quote_number, email as fallback) is a
+  // future improvement that would tighten attribution for contacts whose
+  // email doesn't match the quote's email.
   await p.query(`
     CREATE TABLE IF NOT EXISTS hubspot_contacts (
       contact_id TEXT PRIMARY KEY,
