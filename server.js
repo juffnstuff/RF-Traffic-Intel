@@ -1235,6 +1235,13 @@ app.get('/api/diag/hubspot-quotes', async (req, res) => {
           name: s.name,
           labels: s.labels,
           property_count: (s.properties || []).length,
+          // Full property list (name/label/type) so we can map the quote
+          // object's real field names (total, email, parts_group, status, …)
+          // into the fetcher instead of guessing. Custom-object schemas vary
+          // per portal, so this is the source of truth for the mapping.
+          properties: (s.properties || [])
+            .map(p => ({ name: p.name, label: p.label, type: p.type }))
+            .sort((a, b) => a.name.localeCompare(b.name)),
         }));
       } else {
         out.hubspot_schemas_error = `HTTP ${r.status} — likely missing crm.schemas.custom.read scope or token not refreshed`;
