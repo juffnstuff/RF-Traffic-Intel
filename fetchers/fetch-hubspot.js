@@ -86,36 +86,11 @@ async function hsFetch(url, init = {}, label = 'hubspot') {
   }
 }
 
-// ── Pipelines (stage GUID → human label + which stage is closed-won) ──
-async function fetchPipelines() {
-  const res = await hsFetch(`${BASE}/crm/v3/pipelines/deals`, {}, 'pipelines');
-  const j = await res.json();
-  const byStageId = new Map();
-  const closedWonStageIds = new Set();
-  for (const pipe of (j.results || [])) {
-    for (const stage of (pipe.stages || [])) {
-      byStageId.set(stage.id, { label: stage.label, pipeline: pipe.label });
-      // HubSpot marks closed-won via stage metadata `probability: "1.0"` and
-      // `isClosed: true`. Both keys live under stage.metadata. The v3 API
-      // returns isClosed as a string ("true"), but accept a boolean too so a
-      // future API shape change doesn't silently mark every deal non-won.
-      const meta = stage.metadata || {};
-      const prob = Number(meta.probability);
-      const isClosed = meta.isClosed === 'true' || meta.isClosed === true;
-      if (isClosed && prob === 1) {
-        closedWonStageIds.add(stage.id);
-      }
-    }
-  }
-  return { byStageId, closedWonStageIds };
-}
-
-const DEAL_PROPS = [
-  'dealname', 'amount', 'closedate', 'dealstage', 'pipeline',
-  'hubspot_owner_id', 'hs_analytics_source', 'hs_analytics_source_data_1',
-  'hs_analytics_source_data_2', 'hs_campaign',
-  'createdate', 'hs_lastmodifieddate',
-];
+// NOTE: HubSpot deals/opportunities are intentionally not synced. Revenue is
+// sourced from the NetSuite quote custom object (hubspot_netsuite_quotes) and
+// attributed via the matched contact's lead source. The former fetchPipelines
+// / fetchDeals / DEAL_PROPS deal-sync code was removed in the deal-cleanup
+// pass; see getQuotesWonDailyBySource / getQuotesWonWindow in db.js.
 
 // Contact properties we care about. Two clusters:
 //   1. HubSpot's first-touch attribution (hs_analytics_*, lead_source, gclid)
@@ -151,38 +126,6 @@ const CONTACT_PROPS = [
   'createdate', 'lastmodifieddate',
 ];
 
-// ── Deal search (paginated) ───────────────────────────────────────────
-async function fetchDeals({ sinceEpochMs = null } = {}) {
-  const results = [];
-  let after = undefined;
-  const filters = sinceEpochMs
-    ? [{ propertyName: 'hs_lastmodifieddate', operator: 'GTE', value: String(sinceEpochMs) }]
-    : [];
-  while (true) {
-    const body = {
-      filterGroups: filters.length ? [{ filters }] : [],
-      properties: DEAL_PROPS,
-      sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'DESCENDING' }],
-      limit: 100,
-      after,
-    };
-    const res = await hsFetch(`${BASE}/crm/v3/objects/deals/search`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }, 'deals.search');
-    const j = await res.json();
-    for (const d of (j.results || [])) results.push(d);
-    after = j.paging?.next?.after;
-    if (!after) break;
-    // Bail-out cap to prevent a malformed response from looping forever.
-    // 50k deals is well beyond any realistic private-app-tier account.
-    if (results.length > 50000) {
-      console.warn('    ⚠️  deal pagination exceeded 50k — stopping');
-      break;
-    }
-  }
-  return results;
-}
 
 // HubSpot's search API caps at the 10,000th result for any single query.
 // To get all records past that, walk the last-modified timestamp descending
@@ -495,36 +438,9 @@ export async function fetchHubSpot({ since = null } = {}) {
   const mode = since ? `incremental (since ${since})` : `full history`;
   console.log(`🔎  HubSpot fetch — ${mode}`);
 
-  const { byStageId, closedWonStageIds } = await fetchPipelines();
-  console.log(`    ${byStageId.size} deal stages loaded, ${closedWonStageIds.size} closed-won`);
-
+  // Deals/opportunities are intentionally NOT synced — revenue truth is the
+  // NetSuite quote object, and the HubSpot contact carries the lead source.
   const sinceEpochMs = since ? new Date(since + 'T00:00:00Z').getTime() : null;
-  console.log('  → deals...');
-  const rawDeals = await fetchDeals({ sinceEpochMs });
-  console.log(`    ${rawDeals.length} deals fetched`);
-
-  const dealRows = rawDeals.map(d => {
-    const p = d.properties || {};
-    const stageId = p.dealstage || '';
-    const stageInfo = byStageId.get(stageId) || {};
-    return {
-      deal_id:       d.id,
-      deal_name:     p.dealname || '',
-      amount:        Number(p.amount) || 0,
-      close_date:    parseDateOnly(p.closedate),
-      stage:         stageId,
-      stage_label:   stageInfo.label || '',
-      pipeline:      p.pipeline || '',
-      owner_id:      p.hubspot_owner_id || '',
-      source:        p.hs_analytics_source || '',
-      source_data_1: p.hs_analytics_source_data_1 || '',
-      source_data_2: p.hs_analytics_source_data_2 || '',
-      campaign_guid: p.hs_campaign || '',
-      is_closed_won: closedWonStageIds.has(stageId),
-      created_at:    parseDate(p.createdate),
-      modified_at:   parseDate(p.hs_lastmodifieddate),
-    };
-  });
 
   console.log('  → contacts...');
   const availableContactProps = await discoverContactPropertyNames();
@@ -601,6 +517,12 @@ export async function fetchHubSpot({ since = null } = {}) {
         const partsGroup = pickFirst(p, ['ns_parts_group', 'parts_group', 'part_group', 'partsgroup', 'partgroup']);
         const fulfillment = pickFirst(p, ['ns_fulfillment_date', 'ns_expected_close_date', 'fulfillment_date', 'closedate']);
         const includeInForecast = pickFirst(p, ['ns_include_in_forecast', 'include_in_forecast']);
+        // Time axis = the real NetSuite quote date (ns_date), NOT hs_createdate
+        // (which is when the migration synced the object into HubSpot, ~June
+        // 2026 for the whole backfill). Fall back to hs_createdate only if
+        // ns_date is missing, so period-filtered revenue/ROAS aligns to when
+        // the quote actually happened.
+        const quoteDate = pickFirst(p, ['ns_date', 'ns_date_converted']);
         return {
           quote_object_id:    q.id,
           quote_no:           quoteNo || '',
@@ -617,7 +539,7 @@ export async function fetchHubSpot({ since = null } = {}) {
             : !!includeInForecast,
           owner_id:           p.hubspot_owner_id || '',
           sales_rep:          salesRep || '',
-          created_at:         parseDate(p.hs_createdate),
+          created_at:         parseDate(quoteDate) || parseDate(p.hs_createdate),
           modified_at:        parseDate(p.hs_lastmodifieddate),
           raw:                p,
         };
@@ -644,19 +566,17 @@ export async function fetchHubSpot({ since = null } = {}) {
     since,
     campaignsAvailable,
     quoteSchema: quoteSchemaResolved?.objectTypeId || null,
-    deals: dealRows,
     contacts: contactRows,
     quotes: quoteRows,
     campaigns: campaignRows,
   }, null, 2));
-  console.log(`✅  Wrote HubSpot cache: ${dealRows.length} deals + ${contactRows.length} contacts + ${quoteRows.length} quotes + ${campaignRows.length} campaigns`);
+  console.log(`✅  Wrote HubSpot cache: ${contactRows.length} contacts + ${quoteRows.length} quotes + ${campaignRows.length} campaigns`);
 
   if (process.env.DATABASE_URL) {
     const {
-      upsertHubSpotDeals, upsertHubSpotContacts,
+      upsertHubSpotContacts,
       upsertHubSpotNetsuiteQuotes, upsertHubSpotCampaigns,
     } = await import('../db.js');
-    const dealsInserted = await upsertHubSpotDeals(dealRows);
     const contactsInserted = await upsertHubSpotContacts(contactRows);
     const quotesInserted = quoteRows.length > 0
       ? await upsertHubSpotNetsuiteQuotes(quoteRows)
@@ -664,10 +584,10 @@ export async function fetchHubSpot({ since = null } = {}) {
     const campaignsInserted = campaignRows.length > 0
       ? await upsertHubSpotCampaigns(campaignRows)
       : 0;
-    console.log(`✅  Upserted ${dealsInserted} deals + ${contactsInserted} contacts + ${quotesInserted} quotes + ${campaignsInserted} campaigns into PostgreSQL`);
-    return { deals: dealsInserted, contacts: contactsInserted, quotes: quotesInserted, campaigns: campaignsInserted, campaignsAvailable };
+    console.log(`✅  Upserted ${contactsInserted} contacts + ${quotesInserted} quotes + ${campaignsInserted} campaigns into PostgreSQL`);
+    return { contacts: contactsInserted, quotes: quotesInserted, campaigns: campaignsInserted, campaignsAvailable };
   }
-  return { deals: dealRows.length, contacts: contactRows.length, quotes: quoteRows.length, campaigns: campaignRows.length, campaignsAvailable };
+  return { contacts: contactRows.length, quotes: quoteRows.length, campaigns: campaignRows.length, campaignsAvailable };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

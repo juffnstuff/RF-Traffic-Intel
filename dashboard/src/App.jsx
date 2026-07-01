@@ -6,7 +6,6 @@ import GA4InsightsPage from './GA4InsightsPage';
 import PaidKPIsPage from './PaidKPIsPage';
 import SEOKPIsPage from './SEOKPIsPage';
 import CrossSourcePage from './CrossSourcePage';
-import DSOATDLogo from './components/DSOATDLogo';
 import RFTILogo from './components/RFTILogo';
 import { PinProvider, PinPanel } from './utils/pins';
 

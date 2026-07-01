@@ -50,8 +50,8 @@ function CampaignTable({ rows, dealsByCampaign }) {
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>CTR</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Avg CPC</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>GAds conv.</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>HS deals</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>HS revenue</th>
+            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Won quotes</th>
+            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Won revenue</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>CPA</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>ROAS</th>
           </tr>
@@ -112,7 +112,7 @@ export default function PaidKPIsPage() {
     setLoading(true);
     Promise.all([
       fetch('/api/google-ads').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/hubspot-deals-daily').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/quotes-won-daily').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/ga4-channels-daily').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/ga4').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/callrail-daily').then(r => r.ok ? r.json() : null).catch(() => null),
@@ -156,7 +156,7 @@ export default function PaidKPIsPage() {
     const qs = params.toString();
     Promise.all([
       fetch(`/api/google-ads-campaigns?${qs}`).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`/api/hubspot-deals?${qs}`).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/quotes-won?${qs}`).then(r => r.ok ? r.json() : null).catch(() => null),
     ])
       .then(([cmp, deals]) => {
         setGadsCampaigns(cmp);
@@ -184,7 +184,7 @@ export default function PaidKPIsPage() {
     const paidRevByDate = new Map();
     for (const r of (hsDealsDaily?.daily || [])) {
       if (!PAID_HS_SOURCES.has(r.source)) continue;
-      paidDealsByDate.set(r.date, (paidDealsByDate.get(r.date) || 0) + (r.deals || 0));
+      paidDealsByDate.set(r.date, (paidDealsByDate.get(r.date) || 0) + (r.quotes || 0));
       paidRevByDate.set(r.date, (paidRevByDate.get(r.date) || 0) + (r.revenue || 0));
     }
 
@@ -300,11 +300,12 @@ export default function PaidKPIsPage() {
   // works when HubSpot Marketing Hub populates hs_campaign.
   const dealsByCampaign = useMemo(() => {
     const map = new Map();
-    for (const d of (hsDealsWindow?.deals || [])) {
+    for (const d of (hsDealsWindow?.quotes || [])) {
       if (!PAID_HS_SOURCES.has(d.source)) continue;
-      // source_data_1 is often the ad network / campaign name in HubSpot.
-      // campaign_guid matches when Marketing Hub is present.
-      const keys = [d.campaign_guid, d.source_data_1, d.source_data_2].filter(Boolean);
+      // The contact's first-touch source_data_1/2 carries the campaign/keyword
+      // that drove the quote; key won-quote revenue onto it to line up with
+      // Google Ads campaigns.
+      const keys = [d.source_data_1, d.source_data_2].filter(Boolean);
       for (const k of keys) {
         const cur = map.get(k) || { deals: 0, revenue: 0 };
         cur.deals += 1;
@@ -380,9 +381,9 @@ export default function PaidKPIsPage() {
             <StatCard label="Avg CPC" value={kpi.avgCpc != null ? '$' + kpi.avgCpc.toFixed(2) : '—'} sub="cost / clicks" />
             <StatCard label="Paid sessions" value={fmtNum(kpi.paidSessions)} sub="GA4, paid channels" />
             <StatCard label="Cost / session" value={kpi.costPerSession != null ? '$' + kpi.costPerSession.toFixed(2) : '—'} sub="cost / paid sessions" />
-            <StatCard label="Deals (paid)" value={fmtNum(kpi.hsDeals)} sub="HubSpot closed-won" />
-            <StatCard label="Revenue (paid)" value={fmtMoney(kpi.hsRevenue)} sub="HubSpot" />
-            <StatCard label="CPA" value={kpi.cpa != null ? fmtMoney(kpi.cpa) : '—'} sub="cost / HubSpot deals" />
+            <StatCard label="Won quotes (paid)" value={fmtNum(kpi.hsDeals)} sub="NetSuite, paid-sourced" />
+            <StatCard label="Won revenue (paid)" value={fmtMoney(kpi.hsRevenue)} sub="NetSuite" />
+            <StatCard label="CPA" value={kpi.cpa != null ? fmtMoney(kpi.cpa) : '—'} sub="cost / won quotes" />
             <StatCard label="ROAS" value={kpi.roas != null ? fmtRatio(kpi.roas) : '—'} sub="revenue / cost" />
             <StatCard label="CPA (GAds conv.)" value={kpi.cpaGa4 != null ? fmtMoney(kpi.cpaGa4) : '—'} sub="cost / GAds conversions" />
             {kpi.calls > 0 && (
@@ -421,7 +422,7 @@ export default function PaidKPIsPage() {
               Acquisition quality
             </h2>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
-              <DMALineChart title="CPA DMA (cost / HubSpot deals)" data={chartData}
+              <DMALineChart title="CPA DMA (cost / won quotes)" data={chartData}
                 fieldRaw="cpa" field30="cpa30" field90="cpa90"
                 formatter={(v) => v == null || v === 0 ? '—' : fmtMoney(v)} showDaily={showDaily} />
               <DMALineChart title="ROAS DMA (revenue / cost)" data={chartData}

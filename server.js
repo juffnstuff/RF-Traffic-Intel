@@ -869,35 +869,38 @@ app.post('/api/refresh/gsc', async (req, res) => {
 
 // ── HubSpot ─────────────────────────────────────────────────────────
 
-app.get('/api/hubspot-deals', async (req, res) => {
+// Won NetSuite quotes attributed to a Google Ads campaign window (replaces
+// the old /api/hubspot-deals — deals aren't our revenue source). Returns won
+// quotes with the matched contact's source + campaign fields.
+app.get('/api/quotes-won', async (req, res) => {
   if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
   const iso = /^\d{4}-\d{2}-\d{2}$/;
   const since = iso.test(req.query.since) ? req.query.since : null;
   const until = iso.test(req.query.until) ? req.query.until : null;
   const source = sanitizeScalar(req.query.source);
   try {
-    const { getHubSpotDealsWindow } = await import('./db.js');
-    const deals = await getHubSpotDealsWindow({ since, until, source });
-    res.json({ generated: new Date().toISOString(), since, until, source, deals });
+    const { getQuotesWonWindow } = await import('./db.js');
+    const quotes = await getQuotesWonWindow({ since, until, source });
+    res.json({ generated: new Date().toISOString(), since, until, source, quotes });
   } catch (e) {
-    console.error('hubspot-deals error:', e);
+    console.error('quotes-won error:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
-app.get('/api/hubspot-deals-daily', async (req, res) => {
+// Daily won-quote counts + revenue by lead source (replaces
+// /api/hubspot-deals-daily). Same row shape { date, source, quotes, revenue }
+// so the Paid/SEO tiles consume it with a field rename only.
+app.get('/api/quotes-won-daily', async (req, res) => {
   if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
   const iso = /^\d{4}-\d{2}-\d{2}$/;
   const since = iso.test(req.query.since) ? req.query.since : null;
   try {
-    const { getHubSpotDealsDailyBySource, getHubSpotSources } = await import('./db.js');
-    const [daily, sources] = await Promise.all([
-      getHubSpotDealsDailyBySource({ since }),
-      getHubSpotSources(),
-    ]);
-    res.json({ generated: new Date().toISOString(), since, daily, sources });
+    const { getQuotesWonDailyBySource } = await import('./db.js');
+    const daily = await getQuotesWonDailyBySource({ since });
+    res.json({ generated: new Date().toISOString(), since, daily });
   } catch (e) {
-    console.error('hubspot-deals-daily error:', e);
+    console.error('quotes-won-daily error:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1872,21 +1875,19 @@ app.listen(PORT, async () => {
             }
           }
 
-          // HubSpot backfill — deals + contacts + quotes + (optional) marketing campaigns.
-          // Trigger if any of the three persisted tables is empty so a redeploy
-          // that introduces a new table still self-heals when the others were
-          // populated by a previous release.
+          // HubSpot backfill — contacts + NetSuite quotes (deals are not part
+          // of our model). Trigger if either persisted table is empty so a
+          // redeploy self-heals when a previous release left one unpopulated.
           if (hasHubSpot) {
             try {
               const {
-                getHubSpotDealCount, getHubSpotContactCount, getHubSpotNetsuiteQuotesCount,
+                getHubSpotContactCount, getHubSpotNetsuiteQuotesCount,
               } = await import('./db.js');
-              const [hsDeals, hsContacts, hsQuotes] = await Promise.all([
-                getHubSpotDealCount(),
+              const [hsContacts, hsQuotes] = await Promise.all([
                 getHubSpotContactCount().catch(() => 0),
                 getHubSpotNetsuiteQuotesCount().catch(() => 0),
               ]);
-              console.log(`    DB hubspot deals: ${hsDeals}, contacts: ${hsContacts}, ns-quotes: ${hsQuotes}`);
+              console.log(`    DB hubspot contacts: ${hsContacts}, ns-quotes: ${hsQuotes}`);
               // Also re-fetch when quotes exist but are unpopulated — e.g. an
               // earlier release stored quote shells before the ns_-field
               // mapping was fixed. Cheap probe: are ALL quote totals NULL?
@@ -1899,12 +1900,12 @@ app.listen(PORT, async () => {
                   console.log('📦  HubSpot quotes present but every total is NULL — re-fetching to apply the ns_-field mapping...');
                 }
               }
-              if (hsDeals === 0 || hsContacts === 0 || hsQuotes === 0 || hsQuotesUnpopulated) {
+              if (hsContacts === 0 || hsQuotes === 0 || hsQuotesUnpopulated) {
                 await withFetchLock('hubspot', async () => {
                   console.log('📦  HubSpot backfill — starting full backfill...');
                   const { fetchHubSpot } = await import('./fetchers/fetch-hubspot.js');
                   const r = await fetchHubSpot({ since: null });
-                  console.log(`✅  HubSpot backfill complete: ${r.deals} deals + ${r.contacts || 0} contacts + ${r.quotes || 0} quotes + ${r.campaigns} campaigns`);
+                  console.log(`✅  HubSpot backfill complete: ${r.contacts || 0} contacts + ${r.quotes || 0} quotes`);
                 });
               }
             } catch (e) {

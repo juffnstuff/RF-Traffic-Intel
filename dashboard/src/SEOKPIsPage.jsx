@@ -88,7 +88,7 @@ export default function SEOKPIsPage() {
       fetch('/api/gsc-top?kind=query&limit=50').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/gsc-top?kind=page&limit=50').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/ga4-channels-daily').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/hubspot-deals-daily').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/quotes-won-daily').then(r => r.ok ? r.json() : null).catch(() => null),
     ])
       .then(([g, q, p, c, h]) => {
         setGsc(g); setTopQueries(q); setTopPages(p); setGa4Channels(c); setHsDealsDaily(h);
@@ -128,7 +128,7 @@ export default function SEOKPIsPage() {
     const revByDate = new Map();
     for (const r of (hsDealsDaily?.daily || [])) {
       if (r.source !== ORGANIC_HS_SOURCE) continue;
-      dealsByDate.set(r.date, (dealsByDate.get(r.date) || 0) + (r.deals || 0));
+      dealsByDate.set(r.date, (dealsByDate.get(r.date) || 0) + (r.quotes || 0));
       revByDate.set(r.date, (revByDate.get(r.date) || 0) + (r.revenue || 0));
     }
 
@@ -254,8 +254,8 @@ export default function SEOKPIsPage() {
             <StatCard label="Avg position" value={kpi.avgPosition != null ? kpi.avgPosition.toFixed(1) : '—'} sub="lower is better" />
             <StatCard label="Organic sessions" value={fmtNum(kpi.organicSessions)} sub="GA4 channel" />
             <StatCard label="Organic conversions" value={fmtNum(kpi.organicConv)} sub="GA4 key events" />
-            <StatCard label="Deals (organic)" value={fmtNum(kpi.organicDeals)} sub="HubSpot closed-won" />
-            <StatCard label="Revenue (organic)" value={fmtMoney(kpi.organicRevenue)} sub="HubSpot" />
+            <StatCard label="Won quotes (organic)" value={fmtNum(kpi.organicDeals)} sub="NetSuite, organic-sourced" />
+            <StatCard label="Won revenue (organic)" value={fmtMoney(kpi.organicRevenue)} sub="NetSuite" />
           </div>
         )}
 

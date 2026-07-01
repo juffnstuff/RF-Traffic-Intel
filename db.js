@@ -2172,66 +2172,60 @@ export async function upsertHubSpotCampaigns(rows) {
   return upserted;
 }
 
-export async function getHubSpotDealCount() {
-  const p = getPool();
-  const { rows } = await p.query('SELECT COUNT(*) as cnt FROM hubspot_deals');
-  return parseInt(rows[0].cnt, 10);
-}
-
-// Closed-won deals in [since, until], optionally narrowed to one attribution
-// source. Returns raw deal rows for the Paid/SEO campaign tables, plus
-// pre-aggregated source totals for the KPI tiles.
-export async function getHubSpotDealsWindow({ since = null, until = null, source = null } = {}) {
-  const p = getPool();
-  const where = [`is_closed_won = TRUE`, `close_date IS NOT NULL`];
-  const params = [];
-  if (since)  { params.push(since);  where.push(`close_date >= $${params.length}::date`); }
-  if (until)  { params.push(until);  where.push(`close_date <= $${params.length}::date`); }
-  if (source) { params.push(source); where.push(`source = $${params.length}`); }
-  const whereSQL = 'WHERE ' + where.join(' AND ');
-  const { rows } = await p.query(`
-    SELECT deal_id, deal_name, amount::float as amount, close_date::text,
-           source, source_data_1, source_data_2, campaign_guid
-    FROM hubspot_deals
-    ${whereSQL}
-    ORDER BY close_date DESC, amount DESC
-  `, params);
-  return rows;
-}
-
-// Daily won-deal counts + revenue by source — feeds DMA charts on both tabs.
-// Returns one row per (date, source) so the frontend can filter to the
-// attribution source it cares about.
-export async function getHubSpotDealsDailyBySource({ since = null } = {}) {
+// ── Won NetSuite quotes by lead source (replaces the HubSpot-deal tiles) ──
+// The team's revenue truth is the NetSuite quote object, not HubSpot deals.
+// Attribution comes from the matched contact's first-touch hs_analytics_source
+// (joined by email). "Won" = quote status ILIKE '%won%'. The quote's own date
+// (created_at, sourced from ns_date) is the time axis, mirroring how deals
+// used close_date. Returned shape matches the old deal-daily rows —
+// { date, source, quotes, revenue } — so the Paid/SEO tiles map 1:1.
+export async function getQuotesWonDailyBySource({ since = null } = {}) {
   const p = getPool();
   const params = [];
-  const where = [`is_closed_won = TRUE`, `close_date IS NOT NULL`];
-  if (since) { params.push(since); where.push(`close_date >= $${params.length}::date`); }
+  const where = [`q.status ILIKE '%won%'`, `q.created_at IS NOT NULL`];
+  if (since) { params.push(since); where.push(`q.created_at >= $${params.length}::date`); }
   const { rows } = await p.query(`
     SELECT
-      close_date::text as date,
-      COALESCE(NULLIF(source, ''), 'UNKNOWN') as source,
-      COUNT(*)::int     as deals,
-      SUM(amount)::float as revenue
-    FROM hubspot_deals
+      q.created_at::date::text                                   as date,
+      COALESCE(NULLIF(hc.hs_analytics_source, ''), 'UNKNOWN')    as source,
+      COUNT(*)::int                                              as quotes,
+      SUM(q.total)::float                                        as revenue
+    FROM hubspot_netsuite_quotes q
+    LEFT JOIN hubspot_contacts hc
+      ON hc.email_normalized = q.email_normalized
+     AND q.email_normalized IS NOT NULL
     WHERE ${where.join(' AND ')}
-    GROUP BY close_date, source
-    ORDER BY close_date ASC
+    GROUP BY 1, 2
+    ORDER BY 1 ASC
   `, params);
   return rows;
 }
 
-// Distinct source labels HubSpot has used. Used by the frontend to populate
-// a source filter dropdown; the bare strings come from HubSpot unchanged.
-export async function getHubSpotSources() {
+// Won quotes in [since, until] with the matched contact's source + campaign
+// fields, so the Paid campaign table can attribute won-quote revenue to a
+// Google Ads campaign the same way it did with deals (keyed by source_data_*).
+// Returns { amount, source, source_data_1, source_data_2 } per won quote.
+export async function getQuotesWonWindow({ since = null, until = null, source = null } = {}) {
   const p = getPool();
+  const where = [`q.status ILIKE '%won%'`, `q.created_at IS NOT NULL`];
+  const params = [];
+  if (since)  { params.push(since);  where.push(`q.created_at >= $${params.length}::date`); }
+  if (until)  { params.push(until);  where.push(`q.created_at <  $${params.length}::date + INTERVAL '1 day'`); }
+  if (source) { params.push(source); where.push(`hc.hs_analytics_source = $${params.length}`); }
   const { rows } = await p.query(`
-    SELECT COALESCE(NULLIF(source, ''), 'UNKNOWN') as source, COUNT(*)::int as deals
-    FROM hubspot_deals
-    WHERE is_closed_won = TRUE
-    GROUP BY source
-    ORDER BY deals DESC
-  `);
+    SELECT
+      q.quote_no,
+      q.total::float                                as amount,
+      COALESCE(NULLIF(hc.hs_analytics_source, ''), 'UNKNOWN') as source,
+      hc.hs_analytics_source_data_1                 as source_data_1,
+      hc.hs_analytics_source_data_2                 as source_data_2
+    FROM hubspot_netsuite_quotes q
+    LEFT JOIN hubspot_contacts hc
+      ON hc.email_normalized = q.email_normalized
+     AND q.email_normalized IS NOT NULL
+    WHERE ${where.join(' AND ')}
+    ORDER BY q.total DESC NULLS LAST
+  `, params);
   return rows;
 }
 
@@ -2936,6 +2930,26 @@ export async function getCruxDailyAllFormFactors() {
       cls_p75::float as cls_p75
     FROM crux_daily
     ORDER BY date ASC, form_factor ASC
+  `);
+  return rows;
+}
+
+// Latest per-page CrUX snapshot — one row per (page, form_factor) at its most
+// recent fetch date. Feeds the "slowest pages" CWV table on GA4 Insights,
+// which pivots (page, form_factor) into PHONE/DESKTOP columns. This function
+// was referenced by /api/crux-by-page but never defined, so that endpoint
+// 500'd on every call until now.
+export async function getCruxLatestByPage() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT DISTINCT ON (page, form_factor)
+      page, form_factor,
+      lcp_p75::float as lcp_p75,
+      inp_p75::float as inp_p75,
+      cls_p75::float as cls_p75,
+      date::text
+    FROM crux_daily_by_page
+    ORDER BY page, form_factor, date DESC
   `);
   return rows;
 }
