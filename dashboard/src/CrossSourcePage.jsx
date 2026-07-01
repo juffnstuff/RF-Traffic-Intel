@@ -497,6 +497,7 @@ function CampaignRoasTable({ rows }) {
         Google Ads spend per campaign vs the <strong>whole-order</strong> NetSuite revenue of the contacts that campaign acquired
         (paid-search contact's <code>hs_analytics_source_data_1</code> = campaign, contact → quotes by email). Orders aren't split across part-groups,
         so brand / catalog campaigns get credited for all the revenue their leads drove. Paid-search only, first-touch.
+        The grey line under each campaign shows the record-level part groups (custbody4) those orders fell under, by revenue share — the campaign→part-group link, no order splitting.
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
@@ -512,10 +513,27 @@ function CampaignRoasTable({ rows }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
+          {rows.map((r) => {
+            // Top record-level part groups this campaign's leads' orders fell
+            // under (custbody4 / quote.parts_group) — the campaign→part-group
+            // link, by revenue share. Shown as a compact caption, no order splitting.
+            const pgTotal = (r.part_groups || []).reduce((s, g) => s + (g.revenue || 0), 0);
+            const pgCaption = (r.part_groups || [])
+              .slice(0, 4)
+              .filter(g => g.revenue > 0)
+              .map(g => `${g.part_group} ${pgTotal > 0 ? Math.round((g.revenue / pgTotal) * 100) : 0}%`)
+              .join('  ·  ');
+            return (
             <tr key={r.campaign} style={{ borderTop: '1px solid var(--dso-rule)' }}>
-              <td style={{ padding: '8px 10px', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.campaign}>
-                {r.campaign}{r.no_ad_spend ? <span style={{ color: 'var(--dso-text-faint)' }}> (no ad spend)</span> : ''}
+              <td style={{ padding: '8px 10px', maxWidth: 360 }} title={r.campaign}>
+                <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {r.campaign}{r.no_ad_spend ? <span style={{ color: 'var(--dso-text-faint)' }}> (no ad spend)</span> : ''}
+                </div>
+                {pgCaption && (
+                  <div style={{ color: 'var(--dso-text-faint)', fontSize: 10.5, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={pgCaption}>
+                    {pgCaption}
+                  </div>
+                )}
               </td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.cost)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.leads)}</td>
@@ -525,7 +543,8 @@ function CampaignRoasTable({ rows }) {
               <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{r.roas != null ? fmtRatio(r.roas) : '—'}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{r.roas_won != null ? fmtRatio(r.roas_won) : '—'}</td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
         <tfoot>
           <tr style={{ borderTop: '2px solid var(--dso-rule)', fontWeight: 700 }}>

@@ -2754,18 +2754,44 @@ export async function getCampaignRoasViaContacts({ since = null, until = null } 
         AND NULLIF(hs_analytics_source_data_1, '') IS NOT NULL
         AND email_normalized IS NOT NULL
     ),
-    rev AS (
+    quotes_j AS (
       SELECT pc.camp_key,
-             COUNT(DISTINCT pc.contact_id)::int                                    as leads,
-             COUNT(q.quote_object_id)::int                                         as quotes,
-             SUM(q.total)::float                                                   as revenue,
-             COUNT(q.quote_object_id) FILTER (WHERE q.status ILIKE '%won%')::int   as quotes_won,
-             SUM(q.total) FILTER (WHERE q.status ILIKE '%won%')::float             as revenue_won
+             q.quote_object_id, q.total::float as total, q.status,
+             COALESCE(NULLIF(q.parts_group, ''), '(none)') as parts_group,
+             pc.contact_id
       FROM paid_contacts pc
       JOIN hubspot_netsuite_quotes q
         ON q.email_normalized = pc.email_normalized
         ${qWhere}
-      GROUP BY pc.camp_key
+    ),
+    rev AS (
+      SELECT camp_key,
+             COUNT(DISTINCT contact_id)::int                          as leads,
+             COUNT(*)::int                                            as quotes,
+             SUM(total)::float                                        as revenue,
+             COUNT(*) FILTER (WHERE status ILIKE '%won%')::int        as quotes_won,
+             SUM(total) FILTER (WHERE status ILIKE '%won%')::float    as revenue_won
+      FROM quotes_j
+      GROUP BY camp_key
+    ),
+    -- Per-campaign breakdown across the record-level part group (custbody4,
+    -- mirrored as quote.parts_group). This is what links a brand/catalog
+    -- campaign to the part groups its leads' orders actually fall under —
+    -- no order splitting, straight off the record-level field.
+    pg AS (
+      SELECT camp_key, parts_group,
+             COUNT(*)::int         as quotes,
+             SUM(total)::float      as revenue,
+             SUM(total) FILTER (WHERE status ILIKE '%won%')::float as revenue_won
+      FROM quotes_j GROUP BY camp_key, parts_group
+    ),
+    pg_agg AS (
+      SELECT camp_key,
+             json_agg(json_build_object(
+               'part_group', parts_group, 'quotes', quotes,
+               'revenue', revenue, 'revenue_won', revenue_won
+             ) ORDER BY revenue DESC NULLS LAST) as part_groups
+      FROM pg GROUP BY camp_key
     )
     SELECT
       COALESCE(a.campaign_name, r.camp_key)  as campaign,
@@ -2781,9 +2807,11 @@ export async function getCampaignRoasViaContacts({ since = null, until = null } 
         THEN COALESCE(r.revenue, 0)     / a.cost ELSE NULL END as roas,
       CASE WHEN COALESCE(a.cost, 0) > 0
         THEN COALESCE(r.revenue_won, 0) / a.cost ELSE NULL END as roas_won,
-      (a.camp_key IS NULL)                   as no_ad_spend
+      (a.camp_key IS NULL)                   as no_ad_spend,
+      COALESCE(pa.part_groups, '[]'::json)   as part_groups
     FROM ads a
     FULL OUTER JOIN rev r ON r.camp_key = a.camp_key
+    LEFT JOIN pg_agg pa ON pa.camp_key = COALESCE(a.camp_key, r.camp_key)
     ORDER BY cost DESC NULLS LAST, revenue DESC NULLS LAST
   `;
   const { rows } = await p.query(sql, params);
