@@ -120,7 +120,7 @@ export default function App() {
             <button style={tabStyle(tab === 'ga4')} onClick={() => setTab('ga4')}>GA4 Insights</button>
             <button style={tabStyle(tab === 'paid')} onClick={() => setTab('paid')}>Paid KPIs</button>
             <button style={tabStyle(tab === 'seo')} onClick={() => setTab('seo')}>SEO KPIs</button>
-            <button style={tabStyle(tab === 'cross')} onClick={() => setTab('cross')}>Cross-Source</button>
+            <button style={tabStyle(tab === 'cross')} onClick={() => setTab('cross')}>ROAS</button>
           </nav>
         </header>
 

@@ -621,13 +621,13 @@ export default function CrossSourcePage() {
             fontWeight: 600,
             letterSpacing: '0.18em',
             textTransform: 'uppercase',
-          }}>Cross-Source Insights</div>
+          }}>Attribution &amp; ROAS</div>
           <div style={{
             fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
             fontSize: 22,
             fontWeight: 700,
             letterSpacing: '-0.01em',
-          }}>Where the data lines up</div>
+          }}>NetSuite revenue by lead source + part-group ROAS</div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <RangeDropdown range={range} onChange={setRange} disabled={selectedYears.length > 0} />
