@@ -1869,7 +1869,19 @@ app.listen(PORT, async () => {
                 getHubSpotNetsuiteQuotesCount().catch(() => 0),
               ]);
               console.log(`    DB hubspot deals: ${hsDeals}, contacts: ${hsContacts}, ns-quotes: ${hsQuotes}`);
-              if (hsDeals === 0 || hsContacts === 0 || hsQuotes === 0) {
+              // Also re-fetch when quotes exist but are unpopulated — e.g. an
+              // earlier release stored quote shells before the ns_-field
+              // mapping was fixed. Cheap probe: are ALL quote totals NULL?
+              let hsQuotesUnpopulated = false;
+              if (hsQuotes > 0) {
+                const { rows } = await (await import('./db.js')).getPool()
+                  .query(`SELECT COUNT(*)::int AS n FROM hubspot_netsuite_quotes WHERE total IS NOT NULL`);
+                hsQuotesUnpopulated = rows[0].n === 0;
+                if (hsQuotesUnpopulated) {
+                  console.log('📦  HubSpot quotes present but every total is NULL — re-fetching to apply the ns_-field mapping...');
+                }
+              }
+              if (hsDeals === 0 || hsContacts === 0 || hsQuotes === 0 || hsQuotesUnpopulated) {
                 await withFetchLock('hubspot', async () => {
                   console.log('📦  HubSpot backfill — starting full backfill...');
                   const { fetchHubSpot } = await import('./fetchers/fetch-hubspot.js');
