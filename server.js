@@ -1218,6 +1218,24 @@ app.get('/api/diag/hubspot-quotes', async (req, res) => {
       FROM hubspot_netsuite_quotes
       GROUP BY 1 ORDER BY 2 DESC LIMIT 30
     `);
+    // Revenue-weighted part-group distribution (revenue side of ROAS). Shows
+    // which ns_parts_group values carry the dollars so we can reconcile them
+    // against the cost-side mapping names below.
+    out.revenue_by_parts_group = await q(`
+      SELECT COALESCE(NULLIF(parts_group, ''), '(empty)') as parts_group,
+             COUNT(*)::int                                as quotes,
+             COALESCE(SUM(total), 0)::float               as revenue
+      FROM hubspot_netsuite_quotes
+      GROUP BY 1 ORDER BY revenue DESC NULLS LAST LIMIT 50
+    `);
+    // Cost side: the curated campaign→part_group mappings. ROAS only lines up
+    // where a mapping's `part_group` target string equals a quote's
+    // ns_parts_group value, so listing both lets us spot the name gaps.
+    out.part_group_mappings = await q(`
+      SELECT part_group, match_type, match_kind, pattern
+      FROM part_group_mappings
+      ORDER BY part_group, match_type, pattern
+    `);
   } catch (e) {
     out.db_error = e.message;
   }
