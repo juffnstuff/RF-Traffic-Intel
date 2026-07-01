@@ -1507,6 +1507,26 @@ app.get('/api/insights/part-group-roas', async (req, res) => {
   }
 });
 
+// Campaign ROAS via the contact bridge — Google Ads spend per campaign vs the
+// whole-order NetSuite revenue of the contacts that campaign acquired
+// (contact.hs_analytics_source_data_1 = campaign name; contact→quotes by
+// email). Credits brand/catalog campaigns for all the revenue their leads
+// drove, without splitting orders across part-groups.
+app.get('/api/insights/campaign-roas', async (req, res) => {
+  if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  const since = iso.test(req.query.since) ? req.query.since : null;
+  const until = iso.test(req.query.until) ? req.query.until : null;
+  try {
+    const { getCampaignRoasViaContacts } = await import('./db.js');
+    const campaigns = await getCampaignRoasViaContacts({ since, until });
+    res.json({ generated: new Date().toISOString(), since, until, campaigns });
+  } catch (e) {
+    console.error('insights/campaign-roas error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Part-group mappings (admin CRUD) ────────────────────────────────
 
 app.get('/api/mappings', async (req, res) => {

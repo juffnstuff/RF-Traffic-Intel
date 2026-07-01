@@ -2703,6 +2703,93 @@ export async function getPartGroupRoasFromHubSpot({ since = null, until = null }
   return rows;
 }
 
+// Campaign ROAS via the contact bridge (no part-group division).
+// A paid-search contact's hs_analytics_source_data_1 is the Google Ads
+// campaign name verbatim (verified against live data), so we join
+//   google_ads campaign  ── name ──  contact (first-touch PAID_SEARCH)
+//   contact              ── email ──  hubspot_netsuite_quotes
+// and credit each campaign with the WHOLE revenue of the orders its leads
+// produced — across every part group. This is the right model for brand /
+// catalog-wide campaigns that shouldn't be forced into one part-group.
+//
+// Notes:
+// - First-touch PAID_SEARCH means the campaign acquired the contact, so their
+//   subsequent quotes are attributable to it. Only paid-search contacts carry
+//   a campaign in source_data_1, so this is a paid-only view (by design).
+// - A campaign with spend but no converting leads shows revenue 0 (real ROAS
+//   signal). Match is case-insensitive on trimmed campaign name.
+export async function getCampaignRoasViaContacts({ since = null, until = null } = {}) {
+  const p = getPool();
+  const params = [];
+  const adsConds = [];
+  const qConds = [];
+  if (since) {
+    params.push(since);
+    adsConds.push(`date >= $${params.length}::date`);
+    qConds.push(`q.created_at >= $${params.length}::date`);
+  }
+  if (until) {
+    params.push(until);
+    adsConds.push(`date <= $${params.length}::date`);
+    qConds.push(`q.created_at <  $${params.length}::date + INTERVAL '1 day'`);
+  }
+  const adsWhere = adsConds.length ? `WHERE ${adsConds.join(' AND ')}` : '';
+  const qWhere   = qConds.length   ? `AND ${qConds.join(' AND ')}`     : '';
+  const sql = `
+    WITH ads AS (
+      SELECT lower(btrim(campaign_name))  as camp_key,
+             MAX(campaign_name)           as campaign_name,
+             SUM(cost)::float             as cost,
+             SUM(clicks)::int             as clicks,
+             SUM(impressions)::int        as impressions
+      FROM google_ads_daily_by_campaign
+      ${adsWhere}
+      GROUP BY 1
+    ),
+    paid_contacts AS (
+      SELECT contact_id, email_normalized,
+             lower(btrim(hs_analytics_source_data_1)) as camp_key
+      FROM hubspot_contacts
+      WHERE hs_analytics_source = 'PAID_SEARCH'
+        AND NULLIF(hs_analytics_source_data_1, '') IS NOT NULL
+        AND email_normalized IS NOT NULL
+    ),
+    rev AS (
+      SELECT pc.camp_key,
+             COUNT(DISTINCT pc.contact_id)::int                                    as leads,
+             COUNT(q.quote_object_id)::int                                         as quotes,
+             SUM(q.total)::float                                                   as revenue,
+             COUNT(q.quote_object_id) FILTER (WHERE q.status ILIKE '%won%')::int   as quotes_won,
+             SUM(q.total) FILTER (WHERE q.status ILIKE '%won%')::float             as revenue_won
+      FROM paid_contacts pc
+      JOIN hubspot_netsuite_quotes q
+        ON q.email_normalized = pc.email_normalized
+        ${qWhere}
+      GROUP BY pc.camp_key
+    )
+    SELECT
+      COALESCE(a.campaign_name, r.camp_key)  as campaign,
+      COALESCE(a.cost, 0)                    as cost,
+      COALESCE(a.clicks, 0)                  as clicks,
+      COALESCE(a.impressions, 0)             as impressions,
+      COALESCE(r.leads, 0)                   as leads,
+      COALESCE(r.quotes, 0)                  as quotes,
+      COALESCE(r.revenue, 0)                 as revenue,
+      COALESCE(r.quotes_won, 0)              as quotes_won,
+      COALESCE(r.revenue_won, 0)             as revenue_won,
+      CASE WHEN COALESCE(a.cost, 0) > 0
+        THEN COALESCE(r.revenue, 0)     / a.cost ELSE NULL END as roas,
+      CASE WHEN COALESCE(a.cost, 0) > 0
+        THEN COALESCE(r.revenue_won, 0) / a.cost ELSE NULL END as roas_won,
+      (a.camp_key IS NULL)                   as no_ad_spend
+    FROM ads a
+    FULL OUTER JOIN rev r ON r.camp_key = a.camp_key
+    ORDER BY cost DESC NULLS LAST, revenue DESC NULLS LAST
+  `;
+  const { rows } = await p.query(sql, params);
+  return rows;
+}
+
 // ── Google Search Console helpers ────────────────────────────────────
 
 export async function upsertGscDaily(rows, { replaceSince = null } = {}) {

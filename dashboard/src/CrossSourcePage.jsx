@@ -474,6 +474,76 @@ function PartGroupRoasTable({ rows }) {
   );
 }
 
+// Campaign ROAS via the contact bridge: Google Ads spend per campaign vs the
+// whole-order NetSuite revenue of the contacts that campaign acquired. Credits
+// brand/catalog campaigns without splitting orders across part-groups.
+function CampaignRoasTable({ rows }) {
+  if (!rows) return null;
+  if (rows.length === 0) {
+    return <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, padding: '20px 0' }}>
+      No campaign ROAS yet. Needs Google Ads spend + paid-search contacts with quotes.
+    </div>;
+  }
+  const totals = rows.reduce((acc, r) => {
+    acc.cost += r.cost || 0; acc.leads += r.leads || 0; acc.quotes += r.quotes || 0;
+    acc.revenue += r.revenue || 0; acc.revenue_won += r.revenue_won || 0;
+    return acc;
+  }, { cost: 0, leads: 0, quotes: 0, revenue: 0, revenue_won: 0 });
+  const totalRoas    = totals.cost > 0 ? totals.revenue     / totals.cost : null;
+  const totalRoasWon = totals.cost > 0 ? totals.revenue_won / totals.cost : null;
+  return (
+    <div style={{ background: 'var(--dso-surface)', borderRadius: 4, padding: '14px 16px', border: '1px solid var(--dso-rule)', overflowX: 'auto' }}>
+      <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 8 }}>
+        Google Ads spend per campaign vs the <strong>whole-order</strong> NetSuite revenue of the contacts that campaign acquired
+        (paid-search contact's <code>hs_analytics_source_data_1</code> = campaign, contact → quotes by email). Orders aren't split across part-groups,
+        so brand / catalog campaigns get credited for all the revenue their leads drove. Paid-search only, first-touch.
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
+        <thead>
+          <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Campaign</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Ad Cost</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Leads</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Quotes</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Revenue (all)</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Revenue (won)</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>ROAS</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>ROAS (won)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.campaign} style={{ borderTop: '1px solid var(--dso-rule)' }}>
+              <td style={{ padding: '8px 10px', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.campaign}>
+                {r.campaign}{r.no_ad_spend ? <span style={{ color: 'var(--dso-text-faint)' }}> (no ad spend)</span> : ''}
+              </td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.cost)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.leads)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.quotes)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue_won)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{r.roas != null ? fmtRatio(r.roas) : '—'}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{r.roas_won != null ? fmtRatio(r.roas_won) : '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr style={{ borderTop: '2px solid var(--dso-rule)', fontWeight: 700 }}>
+            <td style={{ padding: '10px', color: 'var(--dso-text-dim)', fontSize: 11, letterSpacing: '0.12em', textTransform: 'uppercase' }}>Total</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.cost)}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.leads)}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.quotes)}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.revenue)}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.revenue_won)}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{totalRoas != null ? fmtRatio(totalRoas) : '—'}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{totalRoasWon != null ? fmtRatio(totalRoasWon) : '—'}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  );
+}
+
 function PagePerformanceTable({ rows, windowEnd }) {
   if (!rows || rows.length === 0) {
     return <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, padding: '20px 0' }}>
@@ -539,6 +609,7 @@ export default function CrossSourcePage() {
   const [hsAttribution, setHsAttribution] = useState(null);
   const [leadReconciliation, setLeadReconciliation] = useState(null);
   const [partGroupRoas, setPartGroupRoas] = useState(null);
+  const [campaignRoas, setCampaignRoas] = useState(null);
   const [quoteAttribution, setQuoteAttribution] = useState(null);
   // 'first' = hs_analytics_source (original / first-touch).
   // 'latest' = hs_latest_source (most recent session source, may post-date quote).
@@ -583,8 +654,9 @@ export default function CrossSourcePage() {
       fetch('/api/insights/lead-source-reconciliation?limit=100').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch(`/api/insights/part-group-roas${qs ? '?' + qs : ''}`).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch(`/api/insights/quote-attribution${qs ? '?' + qs : ''}&limit=500`).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/insights/campaign-roas${qs ? '?' + qs : ''}`).then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([c, p, t, m, hs, rec, pg, qa]) => {
+      .then(([c, p, t, m, hs, rec, pg, qa, cr]) => {
         setCampaigns(c?.campaigns || []);
         setPages(p?.pages || []);
         setPageWindowEnd(p?.pages?.[0]?.window_end_date || null);
@@ -594,6 +666,7 @@ export default function CrossSourcePage() {
         setLeadReconciliation(rec?.mismatches || []);
         setPartGroupRoas(pg?.part_groups || []);
         setQuoteAttribution(qa?.quotes || []);
+        setCampaignRoas(cr?.campaigns || []);
         if (!c && !p) setError('Cross-source endpoints returned no data. Are GA4 and Ads/GSC backfilled?');
         else setError(null);
       })
@@ -684,6 +757,19 @@ export default function CrossSourcePage() {
           marginBottom: 10,
         }}>Part-Group ROAS — Ads Cost ÷ NetSuite Revenue (via HubSpot)</h3>
         <PartGroupRoasTable rows={partGroupRoas} />
+      </section>
+
+      <section style={{ marginBottom: 28 }}>
+        <h3 style={{
+          fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+          fontSize: 14,
+          fontWeight: 600,
+          letterSpacing: '0.14em',
+          textTransform: 'uppercase',
+          color: 'var(--dso-text-dim)',
+          marginBottom: 10,
+        }}>Campaign ROAS — Ads Cost ÷ Revenue of the Campaign's Leads</h3>
+        <CampaignRoasTable rows={campaignRoas} />
       </section>
 
       <section style={{ marginBottom: 28 }}>
