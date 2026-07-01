@@ -376,19 +376,30 @@ async function discoverQuoteSchema() {
 // matched is included; missing properties are silently skipped.
 function pickQuotePropertyNames(allPropertyNames) {
   const wanted = [
+    // This portal's "Rubberform Netsuite Quotes" object uses ns_-prefixed
+    // names (confirmed via /api/diag/hubspot-quotes). Those are listed first
+    // so pickFirst() resolves them; the generic aliases stay as fallbacks
+    // for portability to other portals.
     // identity / cross-system join keys
+    'ns_qoute_no',                                 // NB: the schema misspells "quote"
     'quote_no', 'quote_number', 'hs_quote_number',
+    'ns_email', 'ns_company', 'ns_contact',
     'email', 'company',
     // financial / status
-    'status', 'hs_pipeline_stage',
-    'price_level',
+    'ns_status', 'ns_price_level',
+    'status', 'hs_pipeline_stage', 'price_level',
+    'ns_total',
     'total', 'amount', 'tran_total', 'hs_quote_amount',
+    'ns_fulfillment_date', 'ns_expected_close_date', 'ns_date', 'ns_date_converted',
     'fulfillment_date', 'closedate',
-    'include_in_forecast',
-    // part-group (multiple spellings)
+    'ns_include_in_forecast', 'include_in_forecast',
+    // lead source / customer context (useful for attribution cross-checks)
+    'ns_customer_lead_source', 'ns_customer_type',
+    // part-group (ns_ + generic spellings)
+    'ns_parts_group',
     'parts_group', 'part_group', 'partsgroup', 'partgroup',
     // owner / sales rep
-    'hubspot_owner_id', 'sales_rep',
+    'hubspot_owner_id', 'ns_sales_rep', 'sales_rep',
     // lifecycle timestamps (always there for custom objects)
     'hs_object_id', 'hs_createdate', 'hs_lastmodifieddate',
   ];
@@ -576,28 +587,36 @@ export async function fetchHubSpot({ since = null } = {}) {
       console.log(`    ${rawQuotes.length} quotes fetched`);
       quoteRows = rawQuotes.map(q => {
         const p = q.properties || {};
-        const quoteNo = pickFirst(p, ['quote_no', 'quote_number', 'hs_quote_number']);
-        const total   = pickFirst(p, ['total', 'amount', 'tran_total', 'hs_quote_amount']);
-        const status  = pickFirst(p, ['status', 'hs_pipeline_stage']);
-        const partsGroup = pickFirst(p, ['parts_group', 'part_group', 'partsgroup', 'partgroup']);
-        const fulfillment = pickFirst(p, ['fulfillment_date', 'closedate']);
-        const includeInForecast = pickFirst(p, ['include_in_forecast']);
+        // This portal prefixes NetSuite fields with ns_ (ns_total, ns_email,
+        // ns_parts_group, ns_status, ns_qoute_no [sic], …); generic aliases
+        // remain as fallbacks for other portals. Confirmed via the schema
+        // dump in /api/diag/hubspot-quotes.
+        const quoteNo = pickFirst(p, ['ns_qoute_no', 'quote_no', 'quote_number', 'hs_quote_number']);
+        const email   = pickFirst(p, ['ns_email', 'email']);
+        const company = pickFirst(p, ['ns_company', 'company']);
+        const total   = pickFirst(p, ['ns_total', 'total', 'amount', 'tran_total', 'hs_quote_amount']);
+        const status  = pickFirst(p, ['ns_status', 'status', 'hs_pipeline_stage']);
+        const priceLevel = pickFirst(p, ['ns_price_level', 'price_level']);
+        const salesRep = pickFirst(p, ['ns_sales_rep', 'sales_rep']);
+        const partsGroup = pickFirst(p, ['ns_parts_group', 'parts_group', 'part_group', 'partsgroup', 'partgroup']);
+        const fulfillment = pickFirst(p, ['ns_fulfillment_date', 'ns_expected_close_date', 'fulfillment_date', 'closedate']);
+        const includeInForecast = pickFirst(p, ['ns_include_in_forecast', 'include_in_forecast']);
         return {
           quote_object_id:    q.id,
           quote_no:           quoteNo || '',
-          email:              p.email || '',
-          email_normalized:   normalizeEmail(p.email),
-          company:            p.company || '',
+          email:              email || '',
+          email_normalized:   normalizeEmail(email),
+          company:            company || '',
           status:             status || '',
           parts_group:        partsGroup || '',
-          price_level:        p.price_level || '',
+          price_level:        priceLevel || '',
           total:              total != null && total !== '' ? Number(total) : null,
           fulfillment_date:   parseDateOnly(fulfillment),
           include_in_forecast: typeof includeInForecast === 'string'
             ? includeInForecast.toLowerCase() === 'yes' || includeInForecast.toLowerCase() === 'true'
             : !!includeInForecast,
           owner_id:           p.hubspot_owner_id || '',
-          sales_rep:          p.sales_rep || '',
+          sales_rep:          salesRep || '',
           created_at:         parseDate(p.hs_createdate),
           modified_at:        parseDate(p.hs_lastmodifieddate),
           raw:                p,
