@@ -452,11 +452,23 @@ function normalizeEmail(e) {
 }
 
 function parseDate(s) {
-  if (!s) return null;
-  // HubSpot returns ISO strings or epoch-ms strings depending on the
-  // property type. Both round-trip through Date cleanly.
-  const d = new Date(s);
+  if (s == null || s === '') return null;
+  // HubSpot returns datetime props as ISO strings but `date`-type props as
+  // epoch-millisecond strings (e.g. "1719792000000"). `new Date(<numeric
+  // string>)` yields Invalid Date, so coerce all-digit values through Number
+  // first. Returns null (not a throw) for anything unparseable.
+  const str = String(s).trim();
+  const d = /^-?\d+$/.test(str) ? new Date(Number(str)) : new Date(str);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+// Same coercion as parseDate but returns a YYYY-MM-DD string for DATE columns.
+// The prior code used `String(v).slice(0, 10)`, which turned an epoch-ms
+// value like "1719792000000" into "1719792000" — a value Postgres rejects,
+// throwing mid-transaction and rolling back the entire batch.
+function parseDateOnly(v) {
+  const iso = parseDate(v);
+  return iso ? iso.slice(0, 10) : null;
 }
 
 export async function fetchHubSpot({ since = null } = {}) {
@@ -481,7 +493,7 @@ export async function fetchHubSpot({ since = null } = {}) {
       deal_id:       d.id,
       deal_name:     p.dealname || '',
       amount:        Number(p.amount) || 0,
-      close_date:    p.closedate ? p.closedate.slice(0, 10) : null,
+      close_date:    parseDateOnly(p.closedate),
       stage:         stageId,
       stage_label:   stageInfo.label || '',
       pipeline:      p.pipeline || '',
@@ -525,7 +537,7 @@ export async function fetchHubSpot({ since = null } = {}) {
       current_roi_campaign:      p.current_roi_campaign || '',
       // NetSuite bridge — the high-confidence join key to netsuite_transactions.tran_id
       netsuite_quote_number:     p.netsuite_quote_number || '',
-      netsuite_quote_date:       p.netsuite_quote_date ? p.netsuite_quote_date.slice(0, 10) : null,
+      netsuite_quote_date:       parseDateOnly(p.netsuite_quote_date),
       netsuite_quote_status:     p.netsuite_quote_status || '',
       netsuite_contact_status:   p.netsuite_contact_status || '',
       netsuite_lifecycle_stage:  p.netsuite_lifecycle_stage || '',
@@ -573,7 +585,7 @@ export async function fetchHubSpot({ since = null } = {}) {
           parts_group:        partsGroup || '',
           price_level:        p.price_level || '',
           total:              total != null && total !== '' ? Number(total) : null,
-          fulfillment_date:   fulfillment ? String(fulfillment).slice(0, 10) : null,
+          fulfillment_date:   parseDateOnly(fulfillment),
           include_in_forecast: typeof includeInForecast === 'string'
             ? includeInForecast.toLowerCase() === 'yes' || includeInForecast.toLowerCase() === 'true'
             : !!includeInForecast,

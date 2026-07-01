@@ -2099,9 +2099,11 @@ export async function upsertHubSpotDeals(rows) {
   const client = await p.connect();
   try {
     await client.query('BEGIN');
-    let upserted = 0;
+    let upserted = 0, skipped = 0;
     for (const r of rows) {
-      await client.query(`
+      await client.query('SAVEPOINT hs_row');
+      try {
+        await client.query(`
         INSERT INTO hubspot_deals
           (deal_id, deal_name, amount, close_date, stage, stage_label, pipeline,
            owner_id, source, source_data_1, source_data_2, campaign_guid,
@@ -2124,15 +2126,24 @@ export async function upsertHubSpotDeals(rows) {
           modified_at   = EXCLUDED.modified_at,
           updated_at    = NOW()
       `, [
-        r.deal_id, r.deal_name ?? '', r.amount ?? 0, r.close_date,
-        r.stage ?? '', r.stage_label ?? '', r.pipeline ?? '',
-        r.owner_id ?? '', r.source ?? '',
-        r.source_data_1 ?? '', r.source_data_2 ?? '', r.campaign_guid ?? '',
-        !!r.is_closed_won, r.created_at, r.modified_at,
-      ]);
-      upserted++;
+          r.deal_id, r.deal_name ?? '', r.amount ?? 0, r.close_date,
+          r.stage ?? '', r.stage_label ?? '', r.pipeline ?? '',
+          r.owner_id ?? '', r.source ?? '',
+          r.source_data_1 ?? '', r.source_data_2 ?? '', r.campaign_guid ?? '',
+          !!r.is_closed_won, r.created_at, r.modified_at,
+        ]);
+        await client.query('RELEASE SAVEPOINT hs_row');
+        upserted++;
+      } catch (rowErr) {
+        // One malformed row must not roll back the whole batch. Skip it,
+        // keep the good rows, and surface a sample of what failed.
+        await client.query('ROLLBACK TO SAVEPOINT hs_row');
+        skipped++;
+        if (skipped <= 5) console.warn(`    ⚠️  skipped deal ${r.deal_id}: ${rowErr.message}`);
+      }
     }
     await client.query('COMMIT');
+    if (skipped) console.warn(`    ⚠️  upsertHubSpotDeals skipped ${skipped}/${rows.length} bad rows`);
     return upserted;
   } catch (e) {
     await client.query('ROLLBACK');
@@ -2232,8 +2243,10 @@ export async function upsertHubSpotContacts(rows) {
   const client = await p.connect();
   try {
     await client.query('BEGIN');
-    let upserted = 0;
+    let upserted = 0, skipped = 0;
     for (const r of rows) {
+      await client.query('SAVEPOINT hs_row');
+      try {
       await client.query(`
         INSERT INTO hubspot_contacts (
           contact_id, email, email_normalized, first_name, last_name,
@@ -2303,9 +2316,16 @@ export async function upsertHubSpotContacts(rows) {
         r.customer_type ?? '', r.company_type ?? '', r.form_type ?? '',
         r.created_at, r.modified_at,
       ]);
-      upserted++;
+        await client.query('RELEASE SAVEPOINT hs_row');
+        upserted++;
+      } catch (rowErr) {
+        await client.query('ROLLBACK TO SAVEPOINT hs_row');
+        skipped++;
+        if (skipped <= 5) console.warn(`    ⚠️  skipped contact ${r.contact_id}: ${rowErr.message}`);
+      }
     }
     await client.query('COMMIT');
+    if (skipped) console.warn(`    ⚠️  upsertHubSpotContacts skipped ${skipped}/${rows.length} bad rows`);
     return upserted;
   } catch (e) {
     await client.query('ROLLBACK');
@@ -2329,8 +2349,10 @@ export async function upsertHubSpotNetsuiteQuotes(rows) {
   const client = await p.connect();
   try {
     await client.query('BEGIN');
-    let upserted = 0;
+    let upserted = 0, skipped = 0;
     for (const r of rows) {
+      await client.query('SAVEPOINT hs_row');
+      try {
       await client.query(`
         INSERT INTO hubspot_netsuite_quotes (
           quote_object_id, quote_no, email, email_normalized, company,
@@ -2362,9 +2384,16 @@ export async function upsertHubSpotNetsuiteQuotes(rows) {
         !!r.include_in_forecast, r.owner_id ?? '', r.sales_rep ?? '',
         r.created_at, r.modified_at, r.raw ? JSON.stringify(r.raw) : null,
       ]);
-      upserted++;
+        await client.query('RELEASE SAVEPOINT hs_row');
+        upserted++;
+      } catch (rowErr) {
+        await client.query('ROLLBACK TO SAVEPOINT hs_row');
+        skipped++;
+        if (skipped <= 5) console.warn(`    ⚠️  skipped quote ${r.quote_object_id}: ${rowErr.message}`);
+      }
     }
     await client.query('COMMIT');
+    if (skipped) console.warn(`    ⚠️  upsertHubSpotNetsuiteQuotes skipped ${skipped}/${rows.length} bad rows`);
     return upserted;
   } catch (e) {
     await client.query('ROLLBACK');
