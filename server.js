@@ -1308,6 +1308,84 @@ app.get('/api/diag/hubspot-quotes', async (req, res) => {
   res.json(out);
 });
 
+// CallRail coverage probe — quantifies how much attribution CallRail could add
+// before we build a CallRail-based lead-source lane. Answers: how many calls
+// carry a source/gclid, how well caller phones match NetSuite customers, and
+// (the decision metric) what share of quote revenue belongs to a customer who
+// has a matching CallRail call. Join path: quote.email → netsuite_customers
+// (email_normalized) → phone_digits → callrail_calls (last-10 of caller phone).
+app.get('/api/diag/callrail-coverage', async (req, res) => {
+  if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
+  const out = { generated: new Date().toISOString() };
+  try {
+    const { getPool } = await import('./db.js');
+    const p = getPool();
+    const q = (sql, args = []) => p.query(sql, args).then(r => r.rows).catch(e => ({ _error: e.message }));
+
+    out.calls = (await q(`
+      SELECT
+        COUNT(*)::int                                                            as total,
+        COUNT(*) FILTER (WHERE COALESCE(NULLIF(source_name,''), NULLIF(source,'')) IS NOT NULL)::int as with_source,
+        COUNT(*) FILTER (WHERE NULLIF(gclid,'') IS NOT NULL)::int                as with_gclid,
+        COUNT(*) FILTER (WHERE customer_phone_number IS NOT NULL
+                           AND length(regexp_replace(customer_phone_number,'[^0-9]','','g')) >= 10)::int as with_phone
+      FROM callrail_calls
+    `))[0];
+
+    out.top_sources = await q(`
+      SELECT COALESCE(NULLIF(source_name,''), NULLIF(source,''), '(none)') as source, COUNT(*)::int as calls
+      FROM callrail_calls GROUP BY 1 ORDER BY 2 DESC LIMIT 20
+    `);
+
+    // Phone bridge: distinct caller phones (last-10) that match a NS customer.
+    out.phone_match = (await q(`
+      WITH cr AS (
+        SELECT DISTINCT right(regexp_replace(customer_phone_number,'[^0-9]','','g'),10) as phone10
+        FROM callrail_calls
+        WHERE customer_phone_number IS NOT NULL
+          AND length(regexp_replace(customer_phone_number,'[^0-9]','','g')) >= 10
+      )
+      SELECT
+        (SELECT COUNT(*)::int FROM cr)                                                as distinct_call_phones,
+        (SELECT COUNT(*)::int FROM cr WHERE phone10 IN
+           (SELECT phone_digits FROM netsuite_customers WHERE phone_digits IS NOT NULL)) as matched_to_customers
+    `))[0];
+
+    // The decision metric: quote revenue that could receive a CallRail source.
+    // Two hops shown so we can see where coverage is lost (quote→customer, then
+    // customer→call).
+    out.quote_revenue_coverage = (await q(`
+      WITH cr_phones AS (
+        SELECT DISTINCT right(regexp_replace(customer_phone_number,'[^0-9]','','g'),10) as phone10
+        FROM callrail_calls
+        WHERE customer_phone_number IS NOT NULL
+          AND length(regexp_replace(customer_phone_number,'[^0-9]','','g')) >= 10
+      ),
+      j AS (
+        SELECT q.total::float as total, q.status,
+               (c.customer_id IS NOT NULL)                        as has_customer,
+               (c.phone_digits IS NOT NULL
+                 AND c.phone_digits IN (SELECT phone10 FROM cr_phones)) as has_call
+        FROM hubspot_netsuite_quotes q
+        LEFT JOIN netsuite_customers c
+          ON c.email_normalized = q.email_normalized AND q.email_normalized IS NOT NULL
+      )
+      SELECT
+        COUNT(*)::int                                                          as quotes,
+        COUNT(*) FILTER (WHERE has_customer)::int                              as quotes_matched_customer,
+        COUNT(*) FILTER (WHERE has_call)::int                                  as quotes_with_call,
+        SUM(total)::float                                                      as revenue,
+        SUM(total) FILTER (WHERE has_call)::float                              as revenue_with_call,
+        SUM(total) FILTER (WHERE status ILIKE '%won%')::float                  as revenue_won,
+        SUM(total) FILTER (WHERE has_call AND status ILIKE '%won%')::float     as revenue_won_with_call
+      FROM j
+    `))[0];
+  } catch (e) {
+    out.db_error = e.message;
+  }
+  res.json(out);
+});
+
 // comes from the matched contact's hs_analytics_source (first-touch) or
 // hs_latest_source (latest), selected via `?lens=first|latest`.
 app.get('/api/insights/hubspot-netsuite-attribution', async (req, res) => {
