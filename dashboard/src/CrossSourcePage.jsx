@@ -478,19 +478,34 @@ function PartGroupRoasTable({ rows }) {
 // whole-order NetSuite revenue of the contacts that campaign acquired. Credits
 // brand/catalog campaigns without splitting orders across part-groups.
 function CampaignRoasTable({ rows }) {
+  const [q, setQ] = useState('');
+  const [hideNoSpend, setHideNoSpend] = useState(false);
+  const [hideNoRev, setHideNoRev] = useState(false);
   if (!rows) return null;
   if (rows.length === 0) {
     return <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, padding: '20px 0' }}>
       No campaign ROAS yet. Needs Google Ads spend + paid-search contacts with quotes.
     </div>;
   }
-  const totals = rows.reduce((acc, r) => {
+  const needle = q.trim().toLowerCase();
+  const filtered = rows.filter(r =>
+    (!needle || (r.campaign || '').toLowerCase().includes(needle)) &&
+    (!hideNoSpend || (r.cost || 0) > 0) &&
+    (!hideNoRev || (r.revenue || 0) > 0)
+  );
+  const totals = filtered.reduce((acc, r) => {
     acc.cost += r.cost || 0; acc.leads += r.leads || 0; acc.quotes += r.quotes || 0;
     acc.revenue += r.revenue || 0; acc.revenue_won += r.revenue_won || 0;
     return acc;
   }, { cost: 0, leads: 0, quotes: 0, revenue: 0, revenue_won: 0 });
   const totalRoas    = totals.cost > 0 ? totals.revenue     / totals.cost : null;
   const totalRoasWon = totals.cost > 0 ? totals.revenue_won / totals.cost : null;
+  const inputStyle = { background: 'var(--dso-bg, #0f172a)', border: '1px solid var(--dso-rule)', borderRadius: 3, color: 'var(--dso-text)', fontSize: 12, padding: '4px 8px' };
+  const chk = (checked, onChange, label) => (
+    <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: 'var(--dso-text-dim)', fontSize: 11, cursor: 'pointer' }}>
+      <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} /> {label}
+    </label>
+  );
   return (
     <div style={{ background: 'var(--dso-surface)', borderRadius: 4, padding: '14px 16px', border: '1px solid var(--dso-rule)', overflowX: 'auto' }}>
       <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 8 }}>
@@ -498,6 +513,12 @@ function CampaignRoasTable({ rows }) {
         (paid-search contact's <code>hs_analytics_source_data_1</code> = campaign, contact → quotes by email). Orders aren't split across part-groups,
         so brand / catalog campaigns get credited for all the revenue their leads drove. Paid-search only, first-touch.
         The grey line under each campaign shows the record-level part groups (custbody4) those orders fell under, by revenue share — the campaign→part-group link, no order splitting.
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 10, flexWrap: 'wrap' }}>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="Filter campaigns…" style={{ ...inputStyle, minWidth: 200 }} />
+        {chk(hideNoSpend, setHideNoSpend, 'Hide $0 ad spend')}
+        {chk(hideNoRev, setHideNoRev, 'Hide $0 revenue')}
+        <span style={{ color: 'var(--dso-text-faint)', fontSize: 11 }}>{filtered.length} of {rows.length}</span>
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
@@ -513,7 +534,7 @@ function CampaignRoasTable({ rows }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => {
+          {filtered.map((r) => {
             // Top record-level part groups this campaign's leads' orders fell
             // under (custbody4 / quote.parts_group) — the campaign→part-group
             // link, by revenue share. Shown as a compact caption, no order splitting.
@@ -617,6 +638,44 @@ function PagePerformanceTable({ rows, windowEnd }) {
   );
 }
 
+// Default open/closed per section. Primary ROAS views open; secondary
+// drill-downs collapsed so the (long) tab lands compact.
+const SECTION_DEFAULTS = {
+  'rev-source':     true,
+  'partgroup-roas': true,
+  'campaign-roas':  true,
+  'quote-attr':     false,
+  'lead-recon':     false,
+  'campaign-roi':   false,
+  'page-perf':      false,
+  'cr-trackers':    false,
+  'cr-texts':       false,
+};
+
+// A section with a clickable header that collapses its body. `open`/`onToggle`
+// are lifted to the parent so Expand-all / Collapse-all can drive every one.
+function CollapsibleSection({ title, open, onToggle, headerExtra = null, children }) {
+  return (
+    <section style={{ marginBottom: open ? 28 : 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: open ? 10 : 0, flexWrap: 'wrap' }}>
+        <button
+          onClick={onToggle}
+          style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'none', border: 'none', cursor: 'pointer', padding: 0, textAlign: 'left' }}
+        >
+          <span style={{ fontSize: 10, color: 'var(--dso-text-faint)', width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
+          <h3 style={{
+            fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
+            fontSize: 14, fontWeight: 600, letterSpacing: '0.14em',
+            textTransform: 'uppercase', color: 'var(--dso-text-dim)', margin: 0,
+          }}>{title}</h3>
+        </button>
+        {open && headerExtra}
+      </div>
+      {open && children}
+    </section>
+  );
+}
+
 export default function CrossSourcePage() {
   const [range, setRange] = useLocalStorageState('range', '6m');
   const [selectedYears, setSelectedYears] = useLocalStorageState('years', []);
@@ -633,6 +692,12 @@ export default function CrossSourcePage() {
   // 'first' = hs_analytics_source (original / first-touch).
   // 'latest' = hs_latest_source (most recent session source, may post-date quote).
   const [attrLens, setAttrLens] = useLocalStorageState('attrLens', 'first');
+  // Per-section collapse state (persisted). Only user overrides are stored;
+  // anything absent falls back to SECTION_DEFAULTS.
+  const [secOpen, setSecOpen] = useLocalStorageState('roasSections', {});
+  const isOpen = (id) => secOpen[id] ?? SECTION_DEFAULTS[id] ?? true;
+  const toggleSec = (id) => setSecOpen({ ...secOpen, [id]: !isOpen(id) });
+  const setAllSections = (v) => setSecOpen(Object.fromEntries(Object.keys(SECTION_DEFAULTS).map(k => [k, v])));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   // Bumped after any mapping mutation so both the suggester and the
@@ -749,128 +814,50 @@ export default function CrossSourcePage() {
         <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, marginBottom: 16 }}>Loading…</div>
       )}
 
-      <section style={{ marginBottom: 28 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
-          <h3 style={{
-            fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
-            fontSize: 14,
-            fontWeight: 600,
-            letterSpacing: '0.14em',
-            textTransform: 'uppercase',
-            color: 'var(--dso-text-dim)',
-            margin: 0,
-          }}>NetSuite Revenue by HubSpot Traffic Source</h3>
-          <AttrLensToggle value={attrLens} onChange={setAttrLens} />
-        </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 14, marginBottom: 12 }}>
+        <button onClick={() => setAllSections(true)} style={{ background: 'none', border: 'none', color: 'var(--dso-text-dim)', fontSize: 11, cursor: 'pointer', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Expand all</button>
+        <button onClick={() => setAllSections(false)} style={{ background: 'none', border: 'none', color: 'var(--dso-text-dim)', fontSize: 11, cursor: 'pointer', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Collapse all</button>
+      </div>
+
+      <CollapsibleSection title="NetSuite Revenue by HubSpot Traffic Source" open={isOpen('rev-source')} onToggle={() => toggleSec('rev-source')}
+        headerExtra={<AttrLensToggle value={attrLens} onChange={setAttrLens} />}>
         <HubSpotAttributionTable rows={hsAttribution} lens={attrLens} />
-      </section>
+      </CollapsibleSection>
 
-      <section style={{ marginBottom: 28 }}>
-        <h3 style={{
-          fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
-          fontSize: 14,
-          fontWeight: 600,
-          letterSpacing: '0.14em',
-          textTransform: 'uppercase',
-          color: 'var(--dso-text-dim)',
-          marginBottom: 10,
-        }}>Part-Group ROAS — Ads Cost ÷ NetSuite Revenue (via HubSpot)</h3>
+      <CollapsibleSection title="Part-Group ROAS — Ads Cost ÷ NetSuite Revenue (via HubSpot)" open={isOpen('partgroup-roas')} onToggle={() => toggleSec('partgroup-roas')}>
         <PartGroupRoasTable rows={partGroupRoas} />
-      </section>
+      </CollapsibleSection>
 
-      <section style={{ marginBottom: 28 }}>
-        <h3 style={{
-          fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
-          fontSize: 14,
-          fontWeight: 600,
-          letterSpacing: '0.14em',
-          textTransform: 'uppercase',
-          color: 'var(--dso-text-dim)',
-          marginBottom: 10,
-        }}>Campaign ROAS — Ads Cost ÷ Revenue of the Campaign's Leads</h3>
+      <CollapsibleSection title="Campaign ROAS — Ads Cost ÷ Revenue of the Campaign's Leads" open={isOpen('campaign-roas')} onToggle={() => toggleSec('campaign-roas')}>
         <CampaignRoasTable rows={campaignRoas} />
-      </section>
+      </CollapsibleSection>
 
-      <section style={{ marginBottom: 28 }}>
-        <h3 style={{
-          fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
-          fontSize: 14,
-          fontWeight: 600,
-          letterSpacing: '0.14em',
-          textTransform: 'uppercase',
-          color: 'var(--dso-text-dim)',
-          marginBottom: 10,
-        }}>Per-Quote Attribution Drill-Down</h3>
+      <CollapsibleSection title="Per-Quote Attribution Drill-Down" open={isOpen('quote-attr')} onToggle={() => toggleSec('quote-attr')}>
         <QuoteAttributionTable rows={quoteAttribution} />
-      </section>
+      </CollapsibleSection>
 
-      <section style={{ marginBottom: 28 }}>
-        <h3 style={{
-          fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
-          fontSize: 14,
-          fontWeight: 600,
-          letterSpacing: '0.14em',
-          textTransform: 'uppercase',
-          color: 'var(--dso-text-dim)',
-          marginBottom: 10,
-        }}>Lead-Source Reconciliation — HubSpot vs NetSuite</h3>
+      <CollapsibleSection title="Lead-Source Reconciliation — HubSpot vs NetSuite" open={isOpen('lead-recon')} onToggle={() => toggleSec('lead-recon')}>
         <LeadSourceReconciliationTable rows={leadReconciliation} />
-      </section>
+      </CollapsibleSection>
 
-      <section style={{ marginBottom: 28 }}>
-        <h3 style={{
-          fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
-          fontSize: 14,
-          fontWeight: 600,
-          letterSpacing: '0.14em',
-          textTransform: 'uppercase',
-          color: 'var(--dso-text-dim)',
-          marginBottom: 10,
-        }}>Campaign ROI — Google Ads × GA4</h3>
+      <CollapsibleSection title="Campaign ROI — Google Ads × GA4" open={isOpen('campaign-roi')} onToggle={() => toggleSec('campaign-roi')}>
         <CampaignRoiTable rows={campaigns} />
-      </section>
+      </CollapsibleSection>
 
-      <section style={{ marginBottom: 28 }}>
-        <h3 style={{
-          fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
-          fontSize: 14,
-          fontWeight: 600,
-          letterSpacing: '0.14em',
-          textTransform: 'uppercase',
-          color: 'var(--dso-text-dim)',
-          marginBottom: 10,
-        }}>Page Performance — GSC × GA4</h3>
+      <CollapsibleSection title="Page Performance — GSC × GA4" open={isOpen('page-perf')} onToggle={() => toggleSec('page-perf')}>
         <PagePerformanceTable rows={pages} windowEnd={pageWindowEnd} />
-      </section>
+      </CollapsibleSection>
 
       {trackers && trackers.length > 0 && (
-        <section style={{ marginBottom: 28 }}>
-          <h3 style={{
-            fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
-            fontSize: 14,
-            fontWeight: 600,
-            letterSpacing: '0.14em',
-            textTransform: 'uppercase',
-            color: 'var(--dso-text-dim)',
-            marginBottom: 10,
-          }}>CallRail Trackers</h3>
+        <CollapsibleSection title="CallRail Trackers" open={isOpen('cr-trackers')} onToggle={() => toggleSec('cr-trackers')}>
           <TrackersTable rows={trackers} />
-        </section>
+        </CollapsibleSection>
       )}
 
       {texts && texts.length > 0 && (
-        <section style={{ marginBottom: 28 }}>
-          <h3 style={{
-            fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
-            fontSize: 14,
-            fontWeight: 600,
-            letterSpacing: '0.14em',
-            textTransform: 'uppercase',
-            color: 'var(--dso-text-dim)',
-            marginBottom: 10,
-          }}>Recent Text Conversations</h3>
+        <CollapsibleSection title="Recent Text Conversations" open={isOpen('cr-texts')} onToggle={() => toggleSec('cr-texts')}>
           <TextsTable rows={texts} />
-        </section>
+        </CollapsibleSection>
       )}
 
       <CampaignMappingSuggester
