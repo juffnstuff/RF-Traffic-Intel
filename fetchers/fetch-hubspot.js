@@ -243,6 +243,13 @@ async function searchAllWithChunking({ endpoint, label, properties, sinceEpochMs
       chunkCount += (j.results || []).length;
       after = j.paging?.next?.after;
       if (!after) break;
+      // HubSpot's search API cannot page beyond the 10,000th result:
+      // requesting `after` >= 10000 returns HTTP 400 ("There was a problem
+      // with the request."). Stop paging this window at the cap and let the
+      // outer loop re-issue with an older upper bound (date-window chunking).
+      // Without this, any object with >10k rows in a single window — e.g. the
+      // 74k-contact base — hard-fails the entire fetch before persisting.
+      if (Number(after) >= 10000) break;
       if (out.length > maxRecords) {
         console.warn(`    ⚠️  ${label} exceeded ${maxRecords} records — stopping`);
         return out;
