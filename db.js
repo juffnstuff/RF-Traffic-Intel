@@ -483,6 +483,7 @@ export async function initDB() {
       company TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT '',
       parts_group TEXT NOT NULL DEFAULT '',
+      ns_lead_source TEXT NOT NULL DEFAULT '',
       price_level TEXT NOT NULL DEFAULT '',
       total NUMERIC(15,2),
       fulfillment_date DATE,
@@ -499,6 +500,9 @@ export async function initDB() {
   await p.query(`CREATE INDEX IF NOT EXISTS idx_hsnsq_email       ON hubspot_netsuite_quotes(email_normalized) WHERE email_normalized IS NOT NULL`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_hsnsq_status      ON hubspot_netsuite_quotes(status)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_hsnsq_parts_group ON hubspot_netsuite_quotes(parts_group)`);
+  // Idempotent migration: ns_lead_source (the quote's NetSuite Customer Lead
+  // Source) added after initial release for the optional "NetSuite" lens.
+  await p.query(`ALTER TABLE hubspot_netsuite_quotes ADD COLUMN IF NOT EXISTS ns_lead_source TEXT NOT NULL DEFAULT ''`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_hsnsq_created     ON hubspot_netsuite_quotes(created_at)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_hsnsq_modified    ON hubspot_netsuite_quotes(modified_at)`);
 
@@ -2350,11 +2354,11 @@ export async function upsertHubSpotNetsuiteQuotes(rows) {
       await client.query(`
         INSERT INTO hubspot_netsuite_quotes (
           quote_object_id, quote_no, email, email_normalized, company,
-          status, parts_group, price_level, total, fulfillment_date,
+          status, parts_group, ns_lead_source, price_level, total, fulfillment_date,
           include_in_forecast, owner_id, sales_rep,
           created_at, modified_at, raw, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
         ON CONFLICT (quote_object_id) DO UPDATE SET
           quote_no            = EXCLUDED.quote_no,
           email               = EXCLUDED.email,
@@ -2362,6 +2366,7 @@ export async function upsertHubSpotNetsuiteQuotes(rows) {
           company             = EXCLUDED.company,
           status              = EXCLUDED.status,
           parts_group         = EXCLUDED.parts_group,
+          ns_lead_source      = EXCLUDED.ns_lead_source,
           price_level         = EXCLUDED.price_level,
           total               = EXCLUDED.total,
           fulfillment_date    = EXCLUDED.fulfillment_date,
@@ -2374,7 +2379,7 @@ export async function upsertHubSpotNetsuiteQuotes(rows) {
           updated_at          = NOW()
       `, [
         r.quote_object_id, r.quote_no ?? '', r.email ?? '', r.email_normalized, r.company ?? '',
-        r.status ?? '', r.parts_group ?? '', r.price_level ?? '', r.total ?? null, r.fulfillment_date,
+        r.status ?? '', r.parts_group ?? '', r.ns_lead_source ?? '', r.price_level ?? '', r.total ?? null, r.fulfillment_date,
         !!r.include_in_forecast, r.owner_id ?? '', r.sales_rep ?? '',
         r.created_at, r.modified_at, r.raw ? JSON.stringify(r.raw) : null,
       ]);
@@ -2405,9 +2410,16 @@ export async function getHubSpotNetsuiteQuotesCount() {
 
 // Lead-source bucket for a row. Mirrors HubSpot's analytics source taxonomy
 // but folds blanks to '(UNKNOWN)' so the rollup doesn't silently drop them.
-// Caller picks which column to bucket on: 'hs_analytics_source' (first-touch,
-// stable per contact) or 'hs_latest_source' (most recent session source).
+// Caller picks which column to bucket on:
+//   'hs_analytics_source' — HubSpot first-touch / original (stable per contact)
+//   'hs_latest_source'    — HubSpot latest session source (overwrites on new sessions)
+//   'netsuite'            — the quote's own NetSuite Customer Lead Source
+//                           (q.ns_lead_source). Independent of the contact join,
+//                           so it works even for the ~93% OFFLINE/integration
+//                           contacts whose HubSpot source is frozen. Treat as
+//                           advisory — it's rep-entered in NetSuite.
 function hsSourceBucketSql(column) {
+  if (column === 'netsuite') return `COALESCE(NULLIF(q.ns_lead_source, ''), '(UNKNOWN)')`;
   const allowed = new Set(['hs_analytics_source', 'hs_latest_source']);
   if (!allowed.has(column)) throw new Error(`Invalid attribution column: ${column}`);
   return `COALESCE(NULLIF(hc.${column}, ''), '(UNKNOWN)')`;
@@ -2600,6 +2612,15 @@ export async function getPartGroupRoasFromHubSpot({ since = null, until = null }
   }
   const adsWhere = adsDateConds.length ? `WHERE ${adsDateConds.join(' AND ')}` : '';
   const qWhere   = qDateConds.length   ? `WHERE ${qDateConds.join(' AND ')}`   : '';
+  // Canonicalize part-group names so revenue and cost land on the same ROAS
+  // row. "Spill Containment" and "Next Gen Spill Containment" are one product
+  // line for ROAS (per RubberForm), so both collapse to "Spill Containment".
+  // NB: "MLSB" is intentionally NOT merged here — it spans speed bumps and
+  // spill depending on the SKUs on the order (RF-MLSB3/4 = speed bumps,
+  // RF-MLSBMINI = spill), which the quote-level parts_group can't distinguish,
+  // so it stays its own line rather than being misattributed.
+  const canon = (expr) => `CASE WHEN lower(btrim(${expr})) IN ('spill containment', 'next gen spill containment')
+        THEN 'Spill Containment' ELSE ${expr} END`;
   const sql = `
     WITH ads_by_campaign AS (
       SELECT campaign_name,
@@ -2612,7 +2633,7 @@ export async function getPartGroupRoasFromHubSpot({ since = null, until = null }
     ),
     ads_by_partgroup AS (
       SELECT
-        m.part_group,
+        ${canon('m.part_group')} as part_group,
         SUM(a.cost)           as cost,
         SUM(a.ad_clicks)      as ad_clicks,
         SUM(a.ad_impressions) as ad_impressions
@@ -2624,7 +2645,7 @@ export async function getPartGroupRoasFromHubSpot({ since = null, until = null }
          (m.match_kind = 'contains' AND a.campaign_name ILIKE '%' || m.pattern || '%') OR
          (m.match_kind = 'prefix'   AND a.campaign_name ILIKE m.pattern || '%')
        )
-      GROUP BY m.part_group
+      GROUP BY 1
     ),
     -- Spend that matched no campaign→part_group rule. Surfaces the gap
     -- between Ads spend and the curated mapping coverage.
@@ -2652,7 +2673,7 @@ export async function getPartGroupRoasFromHubSpot({ since = null, until = null }
     -- Revenue per part_group straight off the quote object — no mapping.
     revenue_by_partgroup AS (
       SELECT
-        COALESCE(NULLIF(q.parts_group, ''), '(unmapped)') as part_group,
+        ${canon(`COALESCE(NULLIF(q.parts_group, ''), '(unmapped)')`)} as part_group,
         COUNT(*)::int                                     as quotes,
         SUM(q.total)::float                               as revenue,
         COUNT(*) FILTER (WHERE q.status ILIKE '%won%')::int as quotes_won,

@@ -175,6 +175,7 @@ function AttrLensToggle({ value, onChange }) {
     <div style={{ display: 'flex', gap: 6 }}>
       {opt('first',  'First-touch', 'hs_analytics_source — original / first-touch (stable per contact)')}
       {opt('latest', 'Latest',      'hs_latest_source — most recent session source (overwrites on each new session)')}
+      {opt('netsuite', 'NetSuite',  "Quote's NetSuite Customer Lead Source — works for the OFFLINE/integration base, but is rep-entered so treat as advisory")}
     </div>
   );
 }
@@ -208,7 +209,7 @@ function HubSpotAttributionTable({ rows, lens }) {
     }}>
       <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 8 }}>
         Revenue from `hubspot_netsuite_quotes` (NetSuite quote totals mirrored into HubSpot),
-        bucketed by the matched contact's <strong>{lens === 'latest' ? 'hs_latest_source' : 'hs_analytics_source'}</strong>.
+        bucketed by <strong>{lens === 'latest' ? "the contact's hs_latest_source" : lens === 'netsuite' ? "the quote's NetSuite lead source (ns_lead_source)" : "the contact's hs_analytics_source"}</strong>.
         Quotes whose email doesn't match any contact land in the (UNKNOWN) bucket — see Unattributed columns.
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
@@ -567,7 +568,7 @@ export default function CrossSourcePage() {
     // Build the attribution endpoint with the chosen lens. Quote drill-down
     // doesn't take a lens because each row carries both sources.
     const hsParams = new URLSearchParams(params);
-    hsParams.set('lens', attrLens === 'latest' ? 'latest' : 'first');
+    hsParams.set('lens', ['latest', 'netsuite'].includes(attrLens) ? attrLens : 'first');
     const hsQs = hsParams.toString();
     Promise.all([
       fetch(`/api/insights/campaign-roi${qs ? '?' + qs : ''}`).then(r => r.ok ? r.json() : null).catch(() => null),

@@ -1318,8 +1318,13 @@ app.get('/api/insights/hubspot-netsuite-attribution', async (req, res) => {
   // 'first' is the default lens (most stable, what marketing reports on).
   // 'latest' uses hs_latest_source — only reliable for quotes whose date
   // post-dates the contact's hs_latest_source_timestamp.
-  const lens = req.query.lens === 'latest' ? 'latest' : 'first';
-  const column = lens === 'latest' ? 'hs_latest_source' : 'hs_analytics_source';
+  // 'netsuite' buckets on the quote's own NetSuite Customer Lead Source —
+  // independent of the contact join, so it works for the OFFLINE/integration
+  // base (advisory; rep-entered in NetSuite).
+  const lens = ['latest', 'netsuite'].includes(req.query.lens) ? req.query.lens : 'first';
+  const column = lens === 'latest' ? 'hs_latest_source'
+               : lens === 'netsuite' ? 'netsuite'
+               : 'hs_analytics_source';
   try {
     const { getCrossSourceLeadSourceRevenue } = await import('./db.js');
     const sources = await getCrossSourceLeadSourceRevenue({ since, until, column });

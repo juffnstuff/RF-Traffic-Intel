@@ -531,6 +531,7 @@ export async function fetchHubSpot({ since = null } = {}) {
           company:            company || '',
           status:             status || '',
           parts_group:        partsGroup || '',
+          ns_lead_source:     pickFirst(p, ['ns_customer_lead_source']) || '',
           price_level:        priceLevel || '',
           total:              total != null && total !== '' ? Number(total) : null,
           fulfillment_date:   parseDateOnly(fulfillment),
