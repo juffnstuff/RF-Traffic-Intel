@@ -1386,6 +1386,43 @@ app.get('/api/diag/callrail-coverage', async (req, res) => {
   res.json(out);
 });
 
+// NetSuite line-schema probe — reveals the real transactionline / item column
+// names (incl. the line-level parts-group custom column and the item's
+// parts-group custom field) so we can build the line-item fetcher against the
+// actual schema instead of guessing. Same discover-then-map pattern we used
+// for the HubSpot ns_ fields. Read-only; returns column keys + a few samples.
+app.get('/api/diag/netsuite-lines', async (req, res) => {
+  if (!hasNS) return res.status(400).json({ error: 'NetSuite credentials not configured' });
+  const out = { generated: new Date().toISOString() };
+  const { runSuiteQL } = await import('./fetchers/_netsuite-suiteql.js');
+  const probe = async (label, sql) => {
+    try {
+      const rows = await runSuiteQL(sql, { defaultMax: 50, label });
+      return {
+        columns: rows[0] ? Object.keys(rows[0]).sort() : [],
+        // Surface columns whose NAME or VALUE hints at a part-group, to speed mapping.
+        part_group_candidates: rows[0]
+          ? Object.entries(rows[0])
+              .filter(([k, v]) => /part|group|grp/i.test(k) || /part|group/i.test(String(v ?? '')))
+              .map(([k, v]) => ({ column: k, sample_value: v }))
+          : [],
+        sample: rows.slice(0, 3),
+      };
+    } catch (e) {
+      return { _error: e.message };
+    }
+  };
+  // Product lines from a few estimates/SOs — tl.* exposes every column incl. custcol_*.
+  out.transactionline = await probe('transactionline', `
+    SELECT tl.* FROM transactionline tl
+    JOIN transaction t ON t.id = tl.transaction
+    WHERE t.recordType IN ('estimate', 'salesorder') AND tl.item IS NOT NULL AND ROWNUM <= 5
+  `);
+  // Item master — reveals the item-level custitem parts-group field.
+  out.item = await probe('item', `SELECT i.* FROM item i WHERE ROWNUM <= 3`);
+  res.json(out);
+});
+
 // comes from the matched contact's hs_analytics_source (first-touch) or
 // hs_latest_source (latest), selected via `?lens=first|latest`.
 app.get('/api/insights/hubspot-netsuite-attribution', async (req, res) => {
