@@ -1243,6 +1243,40 @@ app.get('/api/diag/hubspot-quotes', async (req, res) => {
             .map(p => ({ name: p.name, label: p.label, type: p.type }))
             .sort((a, b) => a.name.localeCompare(b.name)),
         }));
+
+        // Ground truth: pull a few real quote records straight from HubSpot
+        // with the ns_ properties. This is independent of our fetcher/DB, so
+        // it tells us whether the values actually exist on the object (vs a
+        // mapping bug vs empty shells from the migration).
+        const quoteSchema = (j.results || []).find(s => {
+          const hay = `${s.labels?.plural || ''} ${s.labels?.singular || ''} ${s.name || ''}`.toLowerCase();
+          return hay.includes('netsuite') && (hay.includes('quote') || hay.includes('estimate'));
+        });
+        if (quoteSchema) {
+          try {
+            const sr = await fetch(`https://api.hubapi.com/crm/v3/objects/${quoteSchema.objectTypeId}/search`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${process.env.HUBSPOT_PRIVATE_APP_TOKEN}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                properties: [
+                  'ns_total', 'ns_email', 'ns_parts_group', 'ns_status', 'ns_qoute_no',
+                  'ns_company', 'ns_fulfillment_date', 'ns_customer_lead_source',
+                  'hs_createdate', 'hs_lastmodifieddate',
+                ],
+                sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'DESCENDING' }],
+                limit: 3,
+              }),
+            });
+            if (sr.ok) {
+              const sj = await sr.json();
+              out.live_sample_quotes = (sj.results || []).map(o => o.properties);
+            } else {
+              out.live_sample_quotes_error = `HTTP ${sr.status}: ${(await sr.text().catch(() => '')).slice(0, 300)}`;
+            }
+          } catch (e) {
+            out.live_sample_quotes_error = e.message;
+          }
+        }
       } else {
         out.hubspot_schemas_error = `HTTP ${r.status} — likely missing crm.schemas.custom.read scope or token not refreshed`;
       }
