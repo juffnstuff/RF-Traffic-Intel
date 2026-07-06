@@ -31,36 +31,77 @@ const PAID_CHANNEL_NAMES = new Set(['Paid Search', 'Paid Social', 'Paid Video', 
 // these as upper-snake strings; we compare against them verbatim.
 const PAID_HS_SOURCES = new Set(['PAID_SEARCH', 'PAID_SOCIAL', 'OTHER_CAMPAIGNS']);
 
+// Column defs: key, label, alignment, cell renderer, and a numeric/string
+// accessor used for sorting. Derived columns (won quotes/revenue, CPA, ROAS)
+// read from the per-row enrichment computed below.
+const CAMPAIGN_COLS = [
+  { key: 'campaign_name', label: 'Campaign', align: 'left',  get: e => (e.r.campaign_name || '').toLowerCase(), cell: e => e.r.campaign_name, str: true },
+  { key: 'cost',          label: 'Cost',        get: e => e.r.cost || 0,        cell: e => fmtMoney(e.r.cost) },
+  { key: 'clicks',        label: 'Clicks',      get: e => e.r.clicks || 0,      cell: e => fmtNum(e.r.clicks) },
+  { key: 'impressions',   label: 'Impr.',       get: e => e.r.impressions || 0, cell: e => fmtNum(e.r.impressions) },
+  { key: 'ctr',           label: 'CTR',         get: e => e.r.ctr || 0,         cell: e => fmtPct(e.r.ctr) },
+  { key: 'avg_cpc',       label: 'Avg CPC',     get: e => e.r.avg_cpc || 0,     cell: e => e.r.avg_cpc != null ? '$' + e.r.avg_cpc.toFixed(2) : '—' },
+  { key: 'conversions',   label: 'GAds conv.',  get: e => e.r.conversions || 0, cell: e => fmtNum(e.r.conversions) },
+  { key: 'won_quotes',    label: 'Won quotes',  get: e => e.hs.deals || 0,      cell: e => fmtNum(e.hs.deals) },
+  { key: 'won_revenue',   label: 'Won revenue', get: e => e.hs.revenue || 0,    cell: e => fmtMoney(e.hs.revenue) },
+  { key: 'cpa',           label: 'CPA',         get: e => e.cpa,                cell: e => e.cpa != null ? fmtMoney(e.cpa) : '—' },
+  { key: 'roas',          label: 'ROAS',        get: e => e.roas,               cell: e => e.roas != null ? fmtRatio(e.roas) : '—' },
+];
+
 function CampaignTable({ rows, dealsByCampaign }) {
+  const [sortKey, setSortKey] = useState('cost');
+  const [sortDir, setSortDir] = useState('desc');
+
+  const enriched = rows.map(r => {
+    const hs = dealsByCampaign.get(r.campaign_id) || dealsByCampaign.get(r.campaign_name) || { deals: 0, revenue: 0 };
+    const cpa = hs.deals > 0 ? r.cost / hs.deals : null;
+    const roas = r.cost > 0 ? hs.revenue / r.cost : null;
+    return { r, hs, cpa, roas };
+  });
+
+  const col = CAMPAIGN_COLS.find(c => c.key === sortKey) || CAMPAIGN_COLS[1];
+  const dir = sortDir === 'asc' ? 1 : -1;
+  const sorted = [...enriched].sort((a, b) => {
+    const av = col.get(a), bv = col.get(b);
+    // Nulls always sort last regardless of direction.
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    if (col.str) return dir * String(av).localeCompare(String(bv));
+    return dir * (av - bv);
+  });
+
+  const onSort = (key) => {
+    if (key === sortKey) { setSortDir(d => d === 'asc' ? 'desc' : 'asc'); }
+    else { setSortKey(key); setSortDir(CAMPAIGN_COLS.find(c => c.key === key)?.str ? 'asc' : 'desc'); }
+  };
+
   return (
     <div style={{
       background: '#334155', borderRadius: 8, padding: '14px 16px',
       flex: '1 1 100%', minWidth: 0, overflowX: 'auto',
     }}>
       <div style={{ color: '#cbd5e1', fontSize: 11, marginBottom: 8 }}>
-        Google Ads campaigns in the visible range — sorted by cost
+        Google Ads campaigns in the visible range — click a column to sort
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: '#e2e8f0' }}>
         <thead>
           <tr style={{ color: '#94a3b8', fontSize: 11, textAlign: 'left' }}>
-            <th style={{ padding: '6px 8px', fontWeight: 500 }}>Campaign</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Cost</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Clicks</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Impr.</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>CTR</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Avg CPC</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>GAds conv.</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Won quotes</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Won revenue</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>CPA</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>ROAS</th>
+            {CAMPAIGN_COLS.map(c => (
+              <th
+                key={c.key}
+                onClick={() => onSort(c.key)}
+                title="Sort"
+                style={{ padding: '6px 8px', fontWeight: 500, textAlign: c.align || 'right', cursor: 'pointer', whiteSpace: 'nowrap', color: c.key === sortKey ? '#e2e8f0' : '#94a3b8', userSelect: 'none' }}
+              >
+                {c.label}{c.key === sortKey ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
-          {rows.map((r, i) => {
-            const hs = dealsByCampaign.get(r.campaign_id) || dealsByCampaign.get(r.campaign_name) || { deals: 0, revenue: 0 };
-            const cpa = hs.deals > 0 ? r.cost / hs.deals : null;
-            const roas = r.cost > 0 ? hs.revenue / r.cost : null;
+          {sorted.map((e, i) => {
+            const r = e.r;
             return (
               <tr key={r.campaign_id} style={{ borderTop: i === 0 ? 'none' : '1px solid #475569' }}>
                 <td style={{ padding: '6px 8px', fontWeight: 600, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.campaign_name}>
@@ -72,10 +113,10 @@ function CampaignTable({ rows, dealsByCampaign }) {
                 <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtPct(r.ctr)}</td>
                 <td style={{ padding: '6px 8px', textAlign: 'right' }}>{r.avg_cpc != null ? '$' + r.avg_cpc.toFixed(2) : '—'}</td>
                 <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtNum(r.conversions)}</td>
-                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtNum(hs.deals)}</td>
-                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtMoney(hs.revenue)}</td>
-                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{cpa != null ? fmtMoney(cpa) : '—'}</td>
-                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{roas != null ? fmtRatio(roas) : '—'}</td>
+                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtNum(e.hs.deals)}</td>
+                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtMoney(e.hs.revenue)}</td>
+                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{e.cpa != null ? fmtMoney(e.cpa) : '—'}</td>
+                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{e.roas != null ? fmtRatio(e.roas) : '—'}</td>
               </tr>
             );
           })}
