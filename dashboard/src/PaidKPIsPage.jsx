@@ -311,6 +311,18 @@ export default function PaidKPIsPage() {
   const kpi = useMemo(() => {
     if (chartData.length === 0) return null;
     const sum = (f) => chartData.reduce((s, r) => s + (r[f] || 0), 0);
+    // Latest 30/90 DMAs (last row of the in-range series) drive the
+    // Growing/Contracting labels on the tiles below.
+    const last = chartData[chartData.length - 1] || {};
+    const ma = {
+      cost:   [last.cost30,   last.cost90],
+      clicks: [last.clk30,    last.clk90],
+      ctr:    [last.ctr30,    last.ctr90],
+      avgCpc: [last.cpc30,    last.cpc90],
+      cpa:    [last.cpa30,    last.cpa90],
+      roas:   [last.roas30,   last.roas90],
+      costPerCall: [last.cpCall30, last.cpCall90],
+    };
     const cost = sum('cost');
     const clicks = sum('clicks');
     const impressions = sum('impressions');
@@ -321,7 +333,7 @@ export default function PaidKPIsPage() {
     const calls = crKpi?.calls || 0;
     return {
       cost, clicks, impressions, gadsConv, paidSessions, hsDeals, hsRevenue,
-      calls,
+      calls, ma,
       answered: crKpi?.answered || 0,
       callDurationMin: crKpi?.durationMin || 0,
       ctr: impressions > 0 ? clicks / impressions : null,
@@ -415,23 +427,23 @@ export default function PaidKPIsPage() {
       <main style={{ padding: '16px clamp(12px, 4vw, 32px)', maxWidth: 1600, margin: '0 auto' }}>
         {kpi && (
           <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
-            <StatCard label="Cost" value={fmtMoney(kpi.cost)} sub="Google Ads, in range" />
-            <StatCard label="Clicks" value={fmtNum(kpi.clicks)} sub="Google Ads" />
+            <StatCard label="Cost" value={fmtMoney(kpi.cost)} sub="Google Ads, in range" ma30={kpi.ma.cost[0]} ma90={kpi.ma.cost[1]} formatter={fmtMoney} />
+            <StatCard label="Clicks" value={fmtNum(kpi.clicks)} sub="Google Ads" ma30={kpi.ma.clicks[0]} ma90={kpi.ma.clicks[1]} formatter={fmtNum} />
             <StatCard label="Impressions" value={fmtNum(kpi.impressions)} sub="Google Ads" />
-            <StatCard label="CTR" value={fmtPct(kpi.ctr)} sub="clicks / impressions" />
-            <StatCard label="Avg CPC" value={kpi.avgCpc != null ? '$' + kpi.avgCpc.toFixed(2) : '—'} sub="cost / clicks" />
+            <StatCard label="CTR" value={fmtPct(kpi.ctr)} sub="clicks / impressions" ma30={kpi.ma.ctr[0]} ma90={kpi.ma.ctr[1]} formatter={fmtPct} />
+            <StatCard label="Avg CPC" value={kpi.avgCpc != null ? '$' + kpi.avgCpc.toFixed(2) : '—'} sub="cost / clicks" ma30={kpi.ma.avgCpc[0]} ma90={kpi.ma.avgCpc[1]} formatter={(v) => v == null ? '—' : '$' + v.toFixed(2)} />
             <StatCard label="Paid sessions" value={fmtNum(kpi.paidSessions)} sub="GA4, paid channels" />
             <StatCard label="Cost / session" value={kpi.costPerSession != null ? '$' + kpi.costPerSession.toFixed(2) : '—'} sub="cost / paid sessions" />
             <StatCard label="Won quotes (paid)" value={fmtNum(kpi.hsDeals)} sub="NetSuite, paid-sourced" />
             <StatCard label="Won revenue (paid)" value={fmtMoney(kpi.hsRevenue)} sub="NetSuite" />
-            <StatCard label="CPA" value={kpi.cpa != null ? fmtMoney(kpi.cpa) : '—'} sub="cost / won quotes" />
-            <StatCard label="ROAS" value={kpi.roas != null ? fmtRatio(kpi.roas) : '—'} sub="revenue / cost" />
+            <StatCard label="CPA" value={kpi.cpa != null ? fmtMoney(kpi.cpa) : '—'} sub="cost / won quotes" ma30={kpi.ma.cpa[0]} ma90={kpi.ma.cpa[1]} formatter={fmtMoney} />
+            <StatCard label="ROAS" value={kpi.roas != null ? fmtRatio(kpi.roas) : '—'} sub="revenue / cost" ma30={kpi.ma.roas[0]} ma90={kpi.ma.roas[1]} formatter={fmtRatio} />
             <StatCard label="CPA (GAds conv.)" value={kpi.cpaGa4 != null ? fmtMoney(kpi.cpaGa4) : '—'} sub="cost / GAds conversions" />
             {kpi.calls > 0 && (
               <>
                 <StatCard label="Calls" value={fmtNum(kpi.calls)} sub="CallRail, in range" />
                 <StatCard label="Answered" value={kpi.answeredRate != null ? `${fmtNum(kpi.answered)} (${fmtPct(kpi.answeredRate)})` : '—'} sub="CallRail" />
-                <StatCard label="Cost / call" value={kpi.costPerCall != null ? fmtMoney(kpi.costPerCall) : '—'} sub="cost / CallRail calls" />
+                <StatCard label="Cost / call" value={kpi.costPerCall != null ? fmtMoney(kpi.costPerCall) : '—'} sub="cost / CallRail calls" ma30={kpi.ma.costPerCall[0]} ma90={kpi.ma.costPerCall[1]} formatter={fmtMoney} />
               </>
             )}
           </div>

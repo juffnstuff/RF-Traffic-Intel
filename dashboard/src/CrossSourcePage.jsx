@@ -392,11 +392,50 @@ function LeadSourceReconciliationTable({ rows }) {
   );
 }
 
+// Shared click-to-sort helpers for the ROAS-tab tables. Nulls always sort
+// last (so "—" ROAS rows sink); string columns use localeCompare.
+function cmpSort(arr, getter, dir, isStr) {
+  const d = dir === 'asc' ? 1 : -1;
+  return [...arr].sort((a, b) => {
+    const av = getter(a), bv = getter(b);
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return isStr ? d * String(av).localeCompare(String(bv)) : d * (av - bv);
+  });
+}
+function SortTh({ id, label, align = 'right', sortKey, sortDir, onSort }) {
+  const active = id === sortKey;
+  return (
+    <th onClick={() => onSort(id)} title="Sort"
+      style={{ padding: '8px 10px', fontWeight: 600, textAlign: align, cursor: 'pointer', whiteSpace: 'nowrap', userSelect: 'none', color: active ? 'var(--dso-text)' : undefined }}>
+      {label}{active ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+    </th>
+  );
+}
+// Toggle helper: same key flips direction, new key resets (asc for strings, desc for numbers).
+function useSort(defaultKey, defaultDir = 'desc') {
+  const [sortKey, setSortKey] = useState(defaultKey);
+  const [sortDir, setSortDir] = useState(defaultDir);
+  const onSort = (key, isStr = false) => {
+    if (key === sortKey) setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortKey(key); setSortDir(isStr ? 'asc' : 'desc'); }
+  };
+  return { sortKey, sortDir, onSort };
+}
+
 // Ads cost ÷ NetSuite revenue per part-group, attributed via HubSpot's
 // first-touch campaign + the curated campaign→part_group mappings. Surfaces
 // part-groups that are either (a) over-invested (cost without revenue) or
 // (b) revenue without spend (organic / non-Ads-driven part-groups).
+const PG_GET = {
+  part_group: r => (r.part_group || '').toLowerCase(),
+  cost: r => r.cost || 0, quotes: r => r.quotes || 0, quotes_won: r => r.quotes_won || 0,
+  revenue: r => r.revenue || 0, revenue_won: r => r.revenue_won || 0,
+  roas: r => r.roas, roas_won: r => r.roas_won,
+};
 function PartGroupRoasTable({ rows }) {
+  const { sortKey, sortDir, onSort } = useSort('revenue');
   if (!rows) return null;
   if (rows.length === 0) {
     return <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, padding: '20px 0' }}>
@@ -404,6 +443,7 @@ function PartGroupRoasTable({ rows }) {
       Part-Group Mappings section below to populate this table.
     </div>;
   }
+  const sorted = cmpSort(rows, PG_GET[sortKey] || PG_GET.revenue, sortDir, sortKey === 'part_group');
   const totals = rows.reduce((acc, r) => {
     acc.cost        += r.cost || 0;
     acc.quotes      += r.quotes || 0;
@@ -429,18 +469,18 @@ function PartGroupRoasTable({ rows }) {
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
           <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
-            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Part Group</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Ad Cost</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Quotes</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Wins</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Revenue (all)</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Revenue (won)</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>ROAS</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>ROAS (won)</th>
+            <SortTh id="part_group"  label="Part Group"    align="left" sortKey={sortKey} sortDir={sortDir} onSort={(k) => onSort(k, true)} />
+            <SortTh id="cost"        label="Ad Cost"       sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="quotes"      label="Quotes"        sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="quotes_won"  label="Wins"          sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue"     label="Revenue (all)" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue_won" label="Revenue (won)" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="roas"        label="ROAS"          sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="roas_won"    label="ROAS (won)"    sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
+          {sorted.map((r) => (
             <tr key={r.part_group} style={{ borderTop: '1px solid var(--dso-rule)' }}>
               <td style={{ padding: '8px 10px' }}>{r.part_group || <span style={{ color: 'var(--dso-text-faint)' }}>(unmapped)</span>}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.cost)}</td>
@@ -477,10 +517,17 @@ function PartGroupRoasTable({ rows }) {
 // Campaign ROAS via the contact bridge: Google Ads spend per campaign vs the
 // whole-order NetSuite revenue of the contacts that campaign acquired. Credits
 // brand/catalog campaigns without splitting orders across part-groups.
+const CAMP_GET = {
+  campaign: r => (r.campaign || '').toLowerCase(),
+  cost: r => r.cost || 0, leads: r => r.leads || 0, quotes: r => r.quotes || 0,
+  revenue: r => r.revenue || 0, revenue_won: r => r.revenue_won || 0,
+  roas: r => r.roas, roas_won: r => r.roas_won,
+};
 function CampaignRoasTable({ rows }) {
   const [q, setQ] = useState('');
   const [hideNoSpend, setHideNoSpend] = useState(false);
   const [hideNoRev, setHideNoRev] = useState(false);
+  const { sortKey, sortDir, onSort } = useSort('cost');
   if (!rows) return null;
   if (rows.length === 0) {
     return <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, padding: '20px 0' }}>
@@ -493,6 +540,7 @@ function CampaignRoasTable({ rows }) {
     (!hideNoSpend || (r.cost || 0) > 0) &&
     (!hideNoRev || (r.revenue || 0) > 0)
   );
+  const sorted = cmpSort(filtered, CAMP_GET[sortKey] || CAMP_GET.cost, sortDir, sortKey === 'campaign');
   const totals = filtered.reduce((acc, r) => {
     acc.cost += r.cost || 0; acc.leads += r.leads || 0; acc.quotes += r.quotes || 0;
     acc.revenue += r.revenue || 0; acc.revenue_won += r.revenue_won || 0;
@@ -523,18 +571,18 @@ function CampaignRoasTable({ rows }) {
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
           <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
-            <th style={{ padding: '8px 10px', fontWeight: 600 }}>Campaign</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Ad Cost</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Leads</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Quotes</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Revenue (all)</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Revenue (won)</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>ROAS</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>ROAS (won)</th>
+            <SortTh id="campaign"    label="Campaign"      align="left" sortKey={sortKey} sortDir={sortDir} onSort={(k) => onSort(k, true)} />
+            <SortTh id="cost"        label="Ad Cost"       sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="leads"       label="Leads"         sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="quotes"      label="Quotes"        sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue"     label="Revenue (all)" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue_won" label="Revenue (won)" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="roas"        label="ROAS"          sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="roas_won"    label="ROAS (won)"    sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
           </tr>
         </thead>
         <tbody>
-          {filtered.map((r) => {
+          {sorted.map((r) => {
             // Top record-level part groups this campaign's leads' orders fell
             // under (custbody4 / quote.parts_group) — the campaign→part-group
             // link, by revenue share. Shown as a compact caption, no order splitting.

@@ -179,8 +179,18 @@ export default function SEOKPIsPage() {
     };
     const clicks = sum('clicks');
     const impressions = sum('impressions');
+    // Latest 30/90 DMAs (last in-range row) drive the Growing/Contracting
+    // labels on the tiles. Position is intentionally excluded — "growing" on a
+    // rank number reads backwards (lower is better).
+    const last = chartData[chartData.length - 1] || {};
+    const ma = {
+      clicks:      [last.clk30,  last.clk90],
+      impressions: [last.imp30,  last.imp90],
+      ctr:         [last.ctr30,  last.ctr90],
+      sessions:    [last.sess30, last.sess90],
+    };
     return {
-      clicks, impressions,
+      clicks, impressions, ma,
       ctr: impressions > 0 ? clicks / impressions : null,
       avgPosition: weighted('position'),
       organicSessions: sum('organicSessions'),
@@ -248,11 +258,11 @@ export default function SEOKPIsPage() {
       <main style={{ padding: '16px clamp(12px, 4vw, 32px)', maxWidth: 1600, margin: '0 auto' }}>
         {kpi && (
           <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
-            <StatCard label="Impressions" value={fmtNum(kpi.impressions)} sub="GSC" />
-            <StatCard label="Clicks" value={fmtNum(kpi.clicks)} sub="GSC" />
-            <StatCard label="CTR" value={fmtPct(kpi.ctr)} sub="clicks / impressions" />
+            <StatCard label="Impressions" value={fmtNum(kpi.impressions)} sub="GSC" ma30={kpi.ma.impressions[0]} ma90={kpi.ma.impressions[1]} formatter={fmtNum} />
+            <StatCard label="Clicks" value={fmtNum(kpi.clicks)} sub="GSC" ma30={kpi.ma.clicks[0]} ma90={kpi.ma.clicks[1]} formatter={fmtNum} />
+            <StatCard label="CTR" value={fmtPct(kpi.ctr)} sub="clicks / impressions" ma30={kpi.ma.ctr[0]} ma90={kpi.ma.ctr[1]} formatter={fmtPct} />
             <StatCard label="Avg position" value={kpi.avgPosition != null ? kpi.avgPosition.toFixed(1) : '—'} sub="lower is better" />
-            <StatCard label="Organic sessions" value={fmtNum(kpi.organicSessions)} sub="GA4 channel" />
+            <StatCard label="Organic sessions" value={fmtNum(kpi.organicSessions)} sub="GA4 channel" ma30={kpi.ma.sessions[0]} ma90={kpi.ma.sessions[1]} formatter={fmtNum} />
             <StatCard label="Organic conversions" value={fmtNum(kpi.organicConv)} sub="GA4 key events" />
             <StatCard label="Won quotes (organic)" value={fmtNum(kpi.organicDeals)} sub="NetSuite, organic-sourced" />
             <StatCard label="Won revenue (organic)" value={fmtMoney(kpi.organicRevenue)} sub="NetSuite" />
