@@ -683,7 +683,8 @@ function ChannelTable({ rows }) {
       flex: '1 1 480px', minWidth: 0, overflowX: 'auto',
     }}>
       <div style={{ color: '#cbd5e1', fontSize: 11, marginBottom: 8 }}>
-        Per-channel quality (visible range)
+        Per-channel quality (visible range). NetSuite rev = won-quote revenue whose contact's
+        lead source maps to that GA4 channel (web channels only; OFFLINE/synced revenue isn't a channel).
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: '#e2e8f0' }}>
         <thead>
@@ -694,6 +695,7 @@ function ChannelTable({ rows }) {
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Conversions</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Conv / session</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Engaged %</th>
+            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>NetSuite rev</th>
           </tr>
         </thead>
         <tbody>
@@ -705,10 +707,11 @@ function ChannelTable({ rows }) {
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtNum(r.conversions)}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtRatio(r.conversion_rate)}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtPct(r.engagement_rate)}</td>
+              <td style={{ padding: '6px 8px', textAlign: 'right' }}>{r.ns_revenue > 0 ? fmtMoney(r.ns_revenue) : '—'}</td>
             </tr>
           ))}
           {rows.length === 0 && (
-            <tr><td colSpan={6} style={{ padding: '10px 8px', color: '#64748b' }}>No channel data in the current range.</td></tr>
+            <tr><td colSpan={7} style={{ padding: '10px 8px', color: '#64748b' }}>No channel data in the current range.</td></tr>
           )}
         </tbody>
       </table>
@@ -1189,6 +1192,23 @@ export default function GA4InsightsPage() {
     const visible = rows.filter(r => inRange(r, cutoff, selectedYears));
     if (visible.length === 0) return { data: [], channels: [], totals: [] };
 
+    // NetSuite won-quote revenue by GA4 channel, over the same window. HubSpot
+    // hs_analytics_source maps to GA4's channel taxonomy; sources with no web
+    // channel (OFFLINE/integration — the bulk — and OTHER_CAMPAIGNS) are left
+    // out on purpose, since they aren't a GA4 channel.
+    const HS_SOURCE_TO_GA4_CHANNEL = {
+      ORGANIC_SEARCH: 'Organic Search', PAID_SEARCH: 'Paid Search',
+      DIRECT_TRAFFIC: 'Direct', EMAIL_MARKETING: 'Email', REFERRALS: 'Referral',
+      SOCIAL_MEDIA: 'Organic Social', PAID_SOCIAL: 'Paid Social',
+    };
+    const nsRevByChannel = new Map();
+    for (const r of (nsRevDaily?.daily || [])) {
+      if (!inRange(r, cutoff, selectedYears)) continue;
+      const ch = HS_SOURCE_TO_GA4_CHANNEL[r.source];
+      if (!ch) continue;
+      nsRevByChannel.set(ch, (nsRevByChannel.get(ch) || 0) + (Number(r.revenue) || 0));
+    }
+
     // Rank channels by sessions in the window.
     const totalByChannel = new Map();
     for (const r of visible) {
@@ -1216,6 +1236,7 @@ export default function GA4InsightsPage() {
         sessions, new_users: newUsers, conversions: conv,
         conversion_rate: sessions > 0 ? conv / sessions : null,
         engagement_rate: sessions > 0 ? engaged / sessions : null,
+        ns_revenue: nsRevByChannel.get(ch) || 0,
       };
     }).filter(r => r.sessions > 0);
 
@@ -1235,7 +1256,7 @@ export default function GA4InsightsPage() {
       return row;
     });
     return { data, channels, totals };
-  }, [channelsDaily, cutoff, selectedYears, chartData]);
+  }, [channelsDaily, cutoff, selectedYears, chartData, nsRevDaily]);
 
   const handleClear = useCallback(() => {
     setRange('6m');
