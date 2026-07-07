@@ -2585,13 +2585,19 @@ export async function getCrossSourceLeadSourceReconciliation({ limit = 200 } = {
 // Part-group ROAS — Ads cost vs revenue per part-group.
 //
 // Revenue side: the HubSpot NetSuite Quotes custom object carries
-// `parts_group` directly on each quote, so no campaign→part_group mapping
-// fuzz is needed on revenue. Quotes with no parts_group go to '(unmapped)'.
+// `parts_group` directly on each quote (custbody4, the record-level field),
+// so revenue needs no mapping. Quotes with no parts_group go to '(none)'.
 //
-// Cost side: Google Ads has no concept of part-group, so we still need the
-// curated `part_group_mappings` table to attribute campaign spend to a
-// part-group. Spend that doesn't match any mapping rolls up under
-// '(unmapped)' so the operator can see how much spend isn't yet attributed.
+// Cost side (contact bridge — replaced the curated part_group_mappings
+// table): each campaign's spend is allocated across the part groups its own
+// leads' quotes fell under. Campaign → contact via first-touch PAID_SEARCH
+// hs_analytics_source_data_1 (= campaign name verbatim), contact → quotes by
+// email, quote → part group via the record-level parts_group. Allocation
+// weight per campaign: won-quote share when the campaign has any wins, else
+// all-quote share (data-driven, self-maintaining — no hand-curated rules).
+// Spend from campaigns whose leads have no quotes at all rolls up under
+// '(unattributed)' so the gap stays visible instead of being guessed onto a
+// group.
 //
 // Won-only metric reported alongside total so the operator can compare
 // gross-quote ROAS to closed-won ROAS.
@@ -2623,57 +2629,75 @@ export async function getPartGroupRoasFromHubSpot({ since = null, until = null }
         THEN 'Spill Containment' ELSE ${expr} END`;
   const sql = `
     WITH ads_by_campaign AS (
-      SELECT campaign_name,
+      SELECT lower(btrim(campaign_name)) as camp_key,
              SUM(cost)::float as cost,
-             SUM(clicks)::int as ad_clicks,
-             SUM(impressions)::int as ad_impressions
+             SUM(clicks)::float as ad_clicks,
+             SUM(impressions)::float as ad_impressions
       FROM google_ads_daily_by_campaign a
       ${adsWhere}
-      GROUP BY campaign_name
-    ),
-    ads_by_partgroup AS (
-      SELECT
-        ${canon('m.part_group')} as part_group,
-        SUM(a.cost)           as cost,
-        SUM(a.ad_clicks)      as ad_clicks,
-        SUM(a.ad_impressions) as ad_impressions
-      FROM ads_by_campaign a
-      JOIN part_group_mappings m
-        ON m.match_type = 'campaign'
-       AND (
-         (m.match_kind = 'exact'    AND a.campaign_name = m.pattern) OR
-         (m.match_kind = 'contains' AND a.campaign_name ILIKE '%' || m.pattern || '%') OR
-         (m.match_kind = 'prefix'   AND a.campaign_name ILIKE m.pattern || '%')
-       )
       GROUP BY 1
     ),
-    -- Spend that matched no campaign→part_group rule. Surfaces the gap
-    -- between Ads spend and the curated mapping coverage.
-    ads_unmapped AS (
-      SELECT '(unmapped)'::text   as part_group,
-             SUM(a.cost)          as cost,
-             SUM(a.ad_clicks)     as ad_clicks,
-             SUM(a.ad_impressions) as ad_impressions
+    paid_contacts AS (
+      SELECT contact_id, email_normalized,
+             lower(btrim(hs_analytics_source_data_1)) as camp_key
+      FROM hubspot_contacts
+      WHERE hs_analytics_source = 'PAID_SEARCH'
+        AND NULLIF(hs_analytics_source_data_1, '') IS NOT NULL
+        AND email_normalized IS NOT NULL
+    ),
+    -- Per (campaign, part-group): quote + won-quote counts from the quotes of
+    -- the contacts that campaign acquired. This is the allocation basis.
+    campaign_pg AS (
+      SELECT pc.camp_key,
+             ${canon(`COALESCE(NULLIF(q.parts_group, ''), '(none)')`)} as part_group,
+             COUNT(*)::float                                       as quotes,
+             COUNT(*) FILTER (WHERE q.status ILIKE '%won%')::float as wins
+      FROM paid_contacts pc
+      JOIN hubspot_netsuite_quotes q
+        ON q.email_normalized = pc.email_normalized
+      ${qWhere}
+      GROUP BY 1, 2
+    ),
+    campaign_tot AS (
+      SELECT camp_key, SUM(quotes) as tq, SUM(wins) as tw
+      FROM campaign_pg GROUP BY 1
+    ),
+    -- Allocate each campaign's spend across its leads' part groups: by
+    -- won-quote share when the campaign has wins, else by all-quote share.
+    -- Weights sum to 1 per campaign, so no spend is created or lost.
+    ads_by_partgroup AS (
+      SELECT cp.part_group,
+             SUM(a.cost * w.weight)                         as cost,
+             ROUND(SUM(a.ad_clicks * w.weight))::float      as ad_clicks,
+             ROUND(SUM(a.ad_impressions * w.weight))::float as ad_impressions
       FROM ads_by_campaign a
-      WHERE NOT EXISTS (
-        SELECT 1 FROM part_group_mappings m
-        WHERE m.match_type = 'campaign'
-          AND (
-            (m.match_kind = 'exact'    AND a.campaign_name = m.pattern) OR
-            (m.match_kind = 'contains' AND a.campaign_name ILIKE '%' || m.pattern || '%') OR
-            (m.match_kind = 'prefix'   AND a.campaign_name ILIKE m.pattern || '%')
-          )
-      )
+      JOIN campaign_tot ct ON ct.camp_key = a.camp_key
+      JOIN campaign_pg cp  ON cp.camp_key = a.camp_key
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN ct.tw > 0 THEN cp.wins / ct.tw
+                    ELSE cp.quotes / NULLIF(ct.tq, 0) END as weight
+      ) w
+      GROUP BY 1
+    ),
+    -- Spend from campaigns whose leads produced no quotes — kept visible as
+    -- its own row rather than guessed onto a part group.
+    ads_unattributed AS (
+      SELECT '(unattributed)'::text as part_group,
+             SUM(a.cost)            as cost,
+             SUM(a.ad_clicks)       as ad_clicks,
+             SUM(a.ad_impressions)  as ad_impressions
+      FROM ads_by_campaign a
+      WHERE NOT EXISTS (SELECT 1 FROM campaign_tot ct WHERE ct.camp_key = a.camp_key)
     ),
     ads_full AS (
       SELECT * FROM ads_by_partgroup
       UNION ALL
-      SELECT * FROM ads_unmapped WHERE cost IS NOT NULL
+      SELECT * FROM ads_unattributed WHERE cost IS NOT NULL
     ),
     -- Revenue per part_group straight off the quote object — no mapping.
     revenue_by_partgroup AS (
       SELECT
-        ${canon(`COALESCE(NULLIF(q.parts_group, ''), '(unmapped)')`)} as part_group,
+        ${canon(`COALESCE(NULLIF(q.parts_group, ''), '(none)')`)} as part_group,
         COUNT(*)::int                                     as quotes,
         SUM(q.total)::float                               as revenue,
         COUNT(*) FILTER (WHERE q.status ILIKE '%won%')::int as quotes_won,
@@ -3381,200 +3405,12 @@ export async function getPagePerformance({ limit = 100 } = {}) {
   }));
 }
 
-// ── Part-group mapping CRUD ──────────────────────────────────────────
-
-const VALID_MATCH_TYPES = new Set(['campaign', 'query', 'url']);
-const VALID_MATCH_KINDS = new Set(['exact', 'contains', 'prefix']);
-
-function validateMappingFields({ part_group, match_type, match_kind, pattern }) {
-  if (!part_group || typeof part_group !== 'string' || !part_group.trim()) {
-    throw new Error('part_group is required');
-  }
-  if (!VALID_MATCH_TYPES.has(match_type)) {
-    throw new Error(`match_type must be one of: ${[...VALID_MATCH_TYPES].join(', ')}`);
-  }
-  if (!VALID_MATCH_KINDS.has(match_kind)) {
-    throw new Error(`match_kind must be one of: ${[...VALID_MATCH_KINDS].join(', ')}`);
-  }
-  if (!pattern || typeof pattern !== 'string' || !pattern.trim()) {
-    throw new Error('pattern is required');
-  }
-}
-
-// Used by the campaign → part-group mapping suggester. Returns one row
-// per distinct campaign_name across Google Ads + GA4, with rollup metrics
-// so the UI can sort by spend / sessions / conversions. The OUTER JOIN
-// catches campaigns that appear in one table but not the other (paid
-// names without GA4 tagging, or organic campaigns from GA4 that don't
-// exist in Ads).
-export async function getDistinctCampaignsForSuggester() {
-  const p = getPool();
-  const { rows } = await p.query(`
-    WITH ads AS (
-      SELECT campaign_name,
-             SUM(cost)::float        AS total_cost,
-             SUM(conversions)::float AS total_conversions,
-             MAX(date)::text         AS last_seen
-      FROM google_ads_daily_by_campaign
-      WHERE campaign_name <> ''
-      GROUP BY campaign_name
-    ),
-    ga4 AS (
-      SELECT campaign_name,
-             SUM(sessions)::int      AS total_sessions,
-             SUM(conversions)::float AS ga4_conversions,
-             MAX(date)::text         AS last_seen
-      FROM ga4_daily_by_campaign
-      WHERE campaign_name <> ''
-        AND campaign_name <> '(not set)'
-        AND campaign_name <> '(direct)'
-      GROUP BY campaign_name
-    )
-    SELECT
-      COALESCE(ads.campaign_name, ga4.campaign_name) AS campaign_name,
-      COALESCE(ads.total_cost, 0)::float             AS total_cost,
-      COALESCE(ga4.total_sessions, 0)::int           AS total_sessions,
-      COALESCE(ads.total_conversions, ga4.ga4_conversions, 0)::float AS total_conversions,
-      GREATEST(ads.last_seen, ga4.last_seen)         AS last_seen
-    FROM ads
-    FULL OUTER JOIN ga4 USING (campaign_name)
-    ORDER BY total_cost DESC NULLS LAST, total_sessions DESC NULLS LAST
-  `);
-  return rows;
-}
-
-// Distinct non-empty part groups from the NetSuite line-level dim table.
-// The canonical source — these strings exactly match what's stored on
-// quote/SO lines, so a mapping pattern set against them roll up
-// correctly downstream.
-export async function getDistinctPartGroups() {
-  const p = getPool();
-  const { rows } = await p.query(`
-    SELECT DISTINCT part_group
-    FROM netsuite_daily_dim
-    WHERE part_group <> ''
-    ORDER BY part_group ASC
-  `);
-  return rows.map(r => r.part_group);
-}
-
-// Distinct campaign names across Google Ads and GA4. Used as autocomplete
-// hints in the part-group mapping admin when match_type='campaign'.
-// Sorted by recency-weighted volume so the most-used campaigns appear
-// first in the typeahead. Capped to keep the datalist responsive.
-export async function getDistinctCampaignNames({ limit = 500 } = {}) {
-  const p = getPool();
-  const { rows } = await p.query(`
-    WITH ads AS (
-      SELECT campaign_name, SUM(clicks)::bigint AS weight, MAX(date) AS last_seen
-      FROM google_ads_daily_by_campaign
-      WHERE COALESCE(campaign_name, '') <> ''
-      GROUP BY campaign_name
-    ),
-    ga4 AS (
-      SELECT campaign_name, SUM(sessions)::bigint AS weight, MAX(date) AS last_seen
-      FROM ga4_daily_by_campaign
-      WHERE COALESCE(campaign_name, '') <> ''
-      GROUP BY campaign_name
-    ),
-    combined AS (
-      SELECT campaign_name, weight, last_seen FROM ads
-      UNION ALL
-      SELECT campaign_name, weight, last_seen FROM ga4
-    )
-    SELECT campaign_name
-    FROM combined
-    GROUP BY campaign_name
-    ORDER BY MAX(last_seen) DESC NULLS LAST, SUM(weight) DESC
-    LIMIT $1
-  `, [limit]);
-  return rows.map(r => r.campaign_name);
-}
-
-// Distinct GSC search queries from the most recent snapshot window. Capped
-// because the queries table can have tens of thousands of rare long-tail
-// queries — only the top N by clicks are useful as autocomplete hints.
-export async function getDistinctGscQueries({ limit = 500 } = {}) {
-  const p = getPool();
-  const { rows } = await p.query(`
-    WITH latest AS (
-      SELECT MAX(window_end_date) AS d FROM gsc_top_queries
-    )
-    SELECT query
-    FROM gsc_top_queries, latest
-    WHERE gsc_top_queries.window_end_date = latest.d
-      AND COALESCE(query, '') <> ''
-    ORDER BY clicks DESC, impressions DESC
-    LIMIT $1
-  `, [limit]);
-  return rows.map(r => r.query);
-}
-
-// Distinct URL paths from GA4 landing pages, ranked by recent sessions.
-// Used for match_type='url' autocomplete. Path-only (strip host + query)
-// so the suggestions match what an operator would type.
-export async function getDistinctUrlPaths({ limit = 500 } = {}) {
-  const p = getPool();
-  const { rows } = await p.query(`
-    SELECT
-      -- Strip query string + fragment; leave the path as-is for matching.
-      regexp_replace(landing_page, '[\\?#].*$', '') AS path,
-      SUM(sessions)::bigint AS sessions
-    FROM ga4_daily_by_landing_page
-    WHERE COALESCE(landing_page, '') <> ''
-      AND date > (CURRENT_DATE - INTERVAL '180 days')
-    GROUP BY 1
-    ORDER BY sessions DESC
-    LIMIT $1
-  `, [limit]);
-  return rows.map(r => r.path);
-}
-
-export async function listPartGroupMappings() {
-  const p = getPool();
-  const { rows } = await p.query(`
-    SELECT id, part_group, match_type, match_kind, pattern, notes,
-           created_at, updated_at
-    FROM part_group_mappings
-    ORDER BY part_group ASC, match_type ASC, pattern ASC
-  `);
-  return rows;
-}
-
-export async function createPartGroupMapping({ part_group, match_type, match_kind, pattern, notes = null }) {
-  validateMappingFields({ part_group, match_type, match_kind, pattern });
-  const p = getPool();
-  const { rows } = await p.query(`
-    INSERT INTO part_group_mappings (part_group, match_type, match_kind, pattern, notes)
-    VALUES ($1, $2, $3, $4, $5)
-    RETURNING id, part_group, match_type, match_kind, pattern, notes, created_at, updated_at
-  `, [part_group.trim(), match_type, match_kind, pattern.trim(), notes?.trim() || null]);
-  return rows[0];
-}
-
-export async function updatePartGroupMapping(id, { part_group, match_type, match_kind, pattern, notes }) {
-  validateMappingFields({ part_group, match_type, match_kind, pattern });
-  const p = getPool();
-  const { rows } = await p.query(`
-    UPDATE part_group_mappings
-    SET part_group = $2,
-        match_type = $3,
-        match_kind = $4,
-        pattern    = $5,
-        notes      = $6,
-        updated_at = NOW()
-    WHERE id = $1
-    RETURNING id, part_group, match_type, match_kind, pattern, notes, created_at, updated_at
-  `, [id, part_group.trim(), match_type, match_kind, pattern.trim(), notes?.trim() || null]);
-  if (rows.length === 0) throw new Error('Mapping not found');
-  return rows[0];
-}
-
-export async function deletePartGroupMapping(id) {
-  const p = getPool();
-  const { rowCount } = await p.query(`DELETE FROM part_group_mappings WHERE id = $1`, [id]);
-  return rowCount > 0;
-}
+// ── Part-group mapping CRUD (retired) ───────────────────────────────
+// The curated campaign→part_group mapping lane was replaced by the contact
+// bridge: getPartGroupRoasFromHubSpot now allocates each campaign's spend
+// across the part groups its own leads' quotes fell under. The
+// part_group_mappings table is left in the schema (no destructive drop) but
+// nothing reads or writes it anymore.
 
 // ── CallRail helpers ─────────────────────────────────────────────────
 
