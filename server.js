@@ -136,6 +136,189 @@ function sanitizeScalar(raw, { maxLen = 100 } = {}) {
 
 // ── API Routes ───────────────────────────────────────────────────────
 
+// Cross-app endpoint for RF Traction. Returns DMA-30, DMA-90, and
+// detrended lead-lag values derived from the netsuite_daily + ga4_daily
+// tables. RF Traction overlays these on the scorecard charts whose
+// raw bars come from RF-DSOATD. Bearer-token auth keeps it scoped to
+// the configured consumer; an unset TRAFFIC_INTEL_API_KEY disables
+// the gate (dev-only).
+app.get('/api/traction/scorecard-summary', async (req, res) => {
+  const expectedKey = process.env.TRAFFIC_INTEL_API_KEY;
+  if (expectedKey) {
+    const header = req.get('Authorization') || '';
+    const match = /^Bearer\s+(.+)$/i.exec(header);
+    if (!match || match[1] !== expectedKey) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+  }
+  if (!hasDB) {
+    return res.status(503).json({ error: 'Database not configured' });
+  }
+
+  // Optional ?as_of=YYYY-MM-DD treats that date as "today" — every
+  // trailing window (DMA-30 / DMA-90) is computed against the daily
+  // series truncated at that point, and the 13-week trend rebases
+  // off it. Used by the EOSATD L10 snapshot backfill to compute
+  // what the DMA charts looked like the Tuesday before a past
+  // meeting. Rejects malformed values to avoid silently mis-slicing.
+  const asOfRaw = typeof req.query.as_of === 'string' ? req.query.as_of : null;
+  const asOf = asOfRaw && /^\d{4}-\d{2}-\d{2}$/.test(asOfRaw) ? asOfRaw : null;
+  if (asOfRaw && !asOf) {
+    return res.status(400).json({ error: 'as_of must be YYYY-MM-DD' });
+  }
+
+  try {
+    const { getAllDaily, zerofillDaily, getGa4Daily } = await import('./db.js');
+    const {
+      movingAverage, bestLagDetrended, alignByDate, isoWeekMonday, addDays,
+    } = await import('./lib/dma.js');
+
+    const dailyRaw = await getAllDaily();
+    if (!dailyRaw || dailyRaw.length === 0) {
+      return res.status(404).json({ error: 'No NetSuite data yet.' });
+    }
+    let daily = zerofillDaily(dailyRaw);
+
+    // Truncate the series at as_of (inclusive). If as_of falls inside
+    // the series, slice at that index. If it's earlier than the series
+    // starts, no data to derive from → 404 with a useful message. If
+    // it's later than the series ends, clamp to the full series (same
+    // behavior as no as_of).
+    if (asOf) {
+      let cut = -1;
+      for (let i = daily.length - 1; i >= 0; i--) {
+        if (daily[i].date <= asOf) { cut = i; break; }
+      }
+      if (cut < 0) {
+        return res.status(404).json({
+          error: `as_of=${asOf} predates the available NetSuite data (starts ${daily[0].date}).`,
+        });
+      }
+      daily = daily.slice(0, cut + 1);
+    }
+
+    // Pull the same calendar's GA4 sessions when GA4 is configured.
+    // When GA4 isn't wired up, the traffic→quotes lag drops out of
+    // the response (set to null) but the rest of the payload still
+    // renders.
+    let ga4Sessions = null;
+    if (hasGA4) {
+      try {
+        const ga4Rows = await getGa4Daily();
+        if (ga4Rows && ga4Rows.length > 0) {
+          const aligned = alignByDate(
+            ga4Rows,
+            ['sessions'],
+            daily[0].date,
+            daily[daily.length - 1].date,
+          );
+          ga4Sessions = aligned.map((r) => r.sessions);
+        }
+      } catch (e) {
+        console.warn('[traction-summary] ga4 fetch failed:', e.message);
+      }
+    }
+
+    // Per-day series. `quotes_total` etc. are dollars; the spec maps
+    // quoted = quotes, booked = orders, shipped = shipped.
+    const quoted  = daily.map((d) => Number(d.quotes_total)  || 0);
+    const booked  = daily.map((d) => Number(d.orders_total)  || 0);
+    const shipped = daily.map((d) => Number(d.shipped_total) || 0);
+
+    const dma30Q = movingAverage(quoted,  30);
+    const dma30B = movingAverage(booked,  30);
+    const dma30S = movingAverage(shipped, 30);
+    const dma90Q = movingAverage(quoted,  90);
+    const dma90B = movingAverage(booked,  90);
+    const dma90S = movingAverage(shipped, 90);
+
+    const tail = (xs) => xs[xs.length - 1] ?? 0;
+
+    // Lead-lag (in days). Traffic→Quotes only available with GA4.
+    let trafficToQuotes = null;
+    if (ga4Sessions) {
+      const t30 = movingAverage(ga4Sessions, 30);
+      const t90 = movingAverage(ga4Sessions, 90);
+      const r = bestLagDetrended(t30, t90, dma30Q, dma90Q);
+      trafficToQuotes = r.bestLag;
+    }
+    const qto = bestLagDetrended(dma30Q, dma90Q, dma30B, dma90B);
+
+    // 13-week trend, DMA-30 sampled at each Monday. Excludes the
+    // current partial week — same convention as the RF-DSOATD
+    // weekly_trend so the chart bars + overlay lines align.
+    const todayIso = daily[daily.length - 1].date;
+    const lastCompletedSun = addDays(isoWeekMonday(todayIso), -1);
+    const firstMonday = addDays(lastCompletedSun, -7 * 13 + 1);
+
+    // Map date -> index into the dma arrays for O(1) lookup.
+    const dateIndex = new Map();
+    for (let i = 0; i < daily.length; i++) dateIndex.set(daily[i].date, i);
+
+    const weekly = [];
+    for (let i = 0; i < 13; i++) {
+      const monday = addDays(firstMonday, i * 7);
+      const sunday = addDays(monday, 6);
+      const idx = dateIndex.get(sunday);
+      // Use the Sunday-anchor DMA value to represent the week's
+      // average. If a day is missing from the series (shouldn't be,
+      // after zerofill) fall back to whichever day in the week is
+      // available.
+      let dma30Quoted  = null;
+      let dma30Shipped = null;
+      if (idx != null) {
+        dma30Quoted  = dma30Q[idx];
+        dma30Shipped = dma30S[idx];
+      } else {
+        for (let d = 6; d >= 0; d--) {
+          const probe = dateIndex.get(addDays(monday, d));
+          if (probe != null) {
+            dma30Quoted  = dma30Q[probe];
+            dma30Shipped = dma30S[probe];
+            break;
+          }
+        }
+      }
+      weekly.push({
+        week_start:    monday,
+        dma30_quoted:  round2(dma30Quoted ?? 0),
+        dma30_shipped: round2(dma30Shipped ?? 0),
+      });
+    }
+
+    res.json({
+      // When asOf is set, anchor the response on the last day of the
+      // truncated series (the day the caller asked about). Otherwise
+      // mark it with current wall time as before.
+      as_of: asOf ? daily[daily.length - 1].date : new Date().toISOString(),
+      as_of_requested: asOf,
+      dma_30: {
+        quoted:  round2(tail(dma30Q)),
+        booked:  round2(tail(dma30B)),
+        shipped: round2(tail(dma30S)),
+      },
+      dma_90: {
+        quoted:  round2(tail(dma90Q)),
+        booked:  round2(tail(dma90B)),
+        shipped: round2(tail(dma90S)),
+      },
+      lead_lag: {
+        traffic_to_quotes_days: trafficToQuotes,
+        quotes_to_orders_days:  qto.bestLag,
+      },
+      weekly_trend_dma: weekly,
+    });
+  } catch (e) {
+    console.error('traction-summary error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+function round2(n) {
+  if (n == null || !Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
+}
+
 app.get('/api/health', async (req, res) => {
   let dbStatus = 'not configured';
   let rowCount = 0;
