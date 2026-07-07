@@ -912,6 +912,7 @@ export default function GA4InsightsPage() {
   const [cruxPages, setCruxPages] = useState(null);
   const [brandedShare, setBrandedShare] = useState(null);
   const [queryMovers, setQueryMovers] = useState(null);
+  const [nsRevDaily, setNsRevDaily] = useState(null);
   const [trendQuery, setTrendQuery] = useState(null);
   const [trendData, setTrendData] = useState(null);
   const [expandedLanding, setExpandedLanding] = useState(null);
@@ -939,8 +940,12 @@ export default function GA4InsightsPage() {
       fetch('/api/crux').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/crux-by-page').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/gsc-query-movers').then(r => r.ok ? r.json() : null).catch(() => null),
+      // Real revenue lives in NetSuite quotes, not GA4 (no on-site ecommerce).
+      // Pull daily won-quote revenue by lead source so we can overlay it on the
+      // GA4 trend by date and split it organic vs paid on the channel table.
+      fetch('/api/quotes-won-daily').then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([agg, chans, gscResp, brandResp, cruxResp, cruxPagesResp, moversResp]) => {
+      .then(([agg, chans, gscResp, brandResp, cruxResp, cruxPagesResp, moversResp, nsRev]) => {
         setAggregate(agg);
         setChannelsDaily(chans);
         setGsc(gscResp);
@@ -948,6 +953,7 @@ export default function GA4InsightsPage() {
         setCrux(cruxResp);
         setCruxPages(cruxPagesResp);
         setQueryMovers(moversResp);
+        setNsRevDaily(nsRev);
         if (!agg || (agg.daily || []).length === 0) {
           setError('No GA4 data yet. Run a GA4 fetch first.');
         } else {
@@ -1047,7 +1053,17 @@ export default function GA4InsightsPage() {
       return r ? Number(r.position) || null : null;
     });
 
+    // NetSuite won-quote revenue per date (summed across all lead sources) —
+    // the real revenue, joined to GA4 by date (GA4 has no PII so date is the
+    // shared key). This is what "revenue" should mean on this tab.
+    const nsRevByDate = new Map();
+    for (const r of (nsRevDaily?.daily || [])) {
+      nsRevByDate.set(r.date, (nsRevByDate.get(r.date) || 0) + (Number(r.revenue) || 0));
+    }
+    const nsRevenue = ordered.map(d => nsRevByDate.get(d.date) || 0);
+
     const mmm = (xs) => [movingAverage(xs, 30), movingAverage(xs, 90)];
+    const [nsRev30, nsRev90] = mmm(nsRevenue);
     const [sess30, sess90] = mmm(sessions);
     const [u30,    u90]    = mmm(users);
     const [nu30,   nu90]   = mmm(newUsers);
@@ -1075,6 +1091,7 @@ export default function GA4InsightsPage() {
       conversions: conv[i], conv30: conv30[i], conv90: conv90[i],
       avgSessionDuration: duration[i], d30: d30[i], d90: d90[i],
       totalRevenue: revenue[i], rev30: rev30[i], rev90: rev90[i],
+      nsRevenue: nsRevenue[i], nsRev30: nsRev30[i], nsRev90: nsRev90[i],
       pagesPerSession: pagesPerSession[i], pps30: pps30[i], pps90: pps90[i],
       conversionRate: convRate[i], cr30: cr30[i], cr90: cr90[i],
       engagementRate: engRate[i], er30: er30[i], er90: er90[i],
@@ -1085,7 +1102,7 @@ export default function GA4InsightsPage() {
       gscCtr: gscCtr[i], gctr30: gctr30[i], gctr90: gctr90[i],
       gscPosition: gscPosition[i], gpos30: gpos30[i], gpos90: gpos90[i],
     }));
-  }, [aggregate, weekdayOnly, gsc]);
+  }, [aggregate, weekdayOnly, gsc, nsRevDaily]);
 
   const chartData = useMemo(() => {
     if (!fullSeries.length) return [];
@@ -1112,6 +1129,7 @@ export default function GA4InsightsPage() {
     const totalEngaged = sum('engagedSessions');
     const totalPageviews = sum('pageviews');
     const totalRevenue = sum('totalRevenue');
+    const nsRevenue = sum('nsRevenue');
     const totalGscClicks = sum('gscClicks');
     const totalGscImpressions = sum('gscImpressions');
     // Latest 30/90 DMAs and 7-day slopes drive the trend arrows. The
@@ -1128,6 +1146,7 @@ export default function GA4InsightsPage() {
       engagedSessions: totalEngaged,
       conversions: totalConv,
       totalRevenue,
+      nsRevenue,
       // Quality
       conversionRate: totalSessions > 0 ? totalConv / totalSessions : null,
       engagementRate: totalSessions > 0 ? totalEngaged / totalSessions : null,
@@ -1148,6 +1167,7 @@ export default function GA4InsightsPage() {
       eng30:  last.eng30,  eng90:  last.eng90,  eng30Slope:  slopeOf('eng30'),  eng90Slope:  slopeOf('eng90'),
       conv30: last.conv30, conv90: last.conv90, conv30Slope: slopeOf('conv30'), conv90Slope: slopeOf('conv90'),
       rev30:  last.rev30,  rev90:  last.rev90,  rev30Slope:  slopeOf('rev30'),  rev90Slope:  slopeOf('rev90'),
+      nsRev30: last.nsRev30, nsRev90: last.nsRev90, nsRev30Slope: slopeOf('nsRev30'), nsRev90Slope: slopeOf('nsRev90'),
       cr30:   last.cr30,   cr90:   last.cr90,   cr30Slope:   slopeOf('cr30'),   cr90Slope:   slopeOf('cr90'),
       er30:   last.er30,   er90:   last.er90,   er30Slope:   slopeOf('er30'),   er90Slope:   slopeOf('er90'),
       epu30:  last.epu30,  epu90:  last.epu90,  epu30Slope:  slopeOf('epu30'),  epu90Slope:  slopeOf('epu90'),
@@ -1302,7 +1322,9 @@ export default function GA4InsightsPage() {
               ma30={kpi.nu30} ma90={kpi.nu90} slope30={kpi.nu30Slope} slope90={kpi.nu90Slope} formatter={fmtNum} />
             <StatCard label="Conversions" value={fmtNum(kpi.conversions)} sub="in range"
               ma30={kpi.conv30} ma90={kpi.conv90} slope30={kpi.conv30Slope} slope90={kpi.conv90Slope} formatter={fmtNum} />
-            <StatCard label="Total revenue" value={fmtMoney(kpi.totalRevenue)} sub="GA4 attributed in range"
+            <StatCard label="NetSuite revenue" value={fmtMoney(kpi.nsRevenue)} sub="won quotes, by quote date"
+              ma30={kpi.nsRev30} ma90={kpi.nsRev90} slope30={kpi.nsRev30Slope} slope90={kpi.nsRev90Slope} formatter={fmtMoney} />
+            <StatCard label="GA4 revenue" value={fmtMoney(kpi.totalRevenue)} sub="GA4-attributed (≈0 — no on-site sales)"
               ma30={kpi.rev30} ma90={kpi.rev90} slope30={kpi.rev30Slope} slope90={kpi.rev90Slope} formatter={fmtMoney} />
             <StatCard label="Conv / session" value={fmtRatio(kpi.conversionRate)} sub="events per session — can exceed 1"
               ma30={kpi.cr30} ma90={kpi.cr90} slope30={kpi.cr30Slope} slope90={kpi.cr90Slope} formatter={fmtRatio} />
@@ -1357,8 +1379,8 @@ export default function GA4InsightsPage() {
               <DMALineChart title="New users DMA" data={chartData}
                 fieldRaw="newUsers" field30="nu30" field90="nu90"
                 formatter={fmtNum} showDaily={showDaily} />
-              <DMALineChart title="Total revenue DMA (GA4 attributed)" data={chartData}
-                fieldRaw="totalRevenue" field30="rev30" field90="rev90"
+              <DMALineChart title="NetSuite won revenue DMA (by quote date)" data={chartData}
+                fieldRaw="nsRevenue" field30="nsRev30" field90="nsRev90"
                 formatter={fmtMoney} showDaily={showDaily} />
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
