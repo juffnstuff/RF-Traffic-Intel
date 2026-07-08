@@ -1252,7 +1252,19 @@ app.post('/api/refresh/google-ads', async (req, res) => {
       }
       return fetchGoogleAds({ since });
     });
-    res.json({ success: true, message: `Google Ads ${mode} refresh complete`, ...result });
+    // Refresh the gclid → campaign click lane in the same kick so a manual
+    // refresh also clears any stale google-ads-clicks fetch-health error.
+    // Fail-soft: campaign metrics landing matters more than the click lane.
+    let clicks = null;
+    try {
+      clicks = await withFetchLock('google-ads-clicks', async () => {
+        const { fetchGoogleAdsClicks } = await import('./fetchers/fetch-google-ads-clicks.js');
+        return fetchGoogleAdsClicks({ since: null });
+      });
+    } catch (clickErr) {
+      console.warn('Google Ads clicks refresh failed (campaign metrics unaffected):', clickErr.message);
+    }
+    res.json({ success: true, message: `Google Ads ${mode} refresh complete`, ...result, ...(clicks || {}) });
   } catch (e) {
     console.error('Google Ads refresh failed:', e);
     res.status(e.statusCode || 500).json({ error: e.message });

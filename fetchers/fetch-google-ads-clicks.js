@@ -32,9 +32,11 @@ function isoDaysAgo(days) {
 export async function fetchGoogleAdsClicks({ since = null } = {}) {
   const customerId = requireEnv('GOOGLE_ADS_CUSTOMER_ID').replace(/-/g, '');
 
-  // Clamp to the API's hard 90-day click_view retention (yesterday back,
-  // today's clicks are still accruing and land on the next run).
-  const oldestAllowed = isoDaysAgo(CLICK_VIEW_MAX_DAYS - 1);
+  // Clamp to the API's hard 90-day click_view retention. Google evaluates
+  // the boundary against the ADS ACCOUNT's timezone while our clock is UTC,
+  // so today-89 can already be "day 91" there and 400s — keep two days of
+  // margin (the boundary skip below is the real safety net).
+  const oldestAllowed = isoDaysAgo(CLICK_VIEW_MAX_DAYS - 2);
   const startDate = (since && since > oldestAllowed) ? since : oldestAllowed;
   const endDate = isoDaysAgo(1);
   if (startDate > endDate) {
@@ -47,19 +49,34 @@ export async function fetchGoogleAdsClicks({ since = null } = {}) {
   const headers = adsHeaders(accessToken);
 
   const rows = [];
+  const failedDays = [];
+  let totalDays = 0;
   const day = new Date(startDate + 'T00:00:00Z');
   const end = new Date(endDate + 'T00:00:00Z');
   while (day <= end) {
     const iso = day.toISOString().slice(0, 10);
-    const results = await searchStream(customerId, headers, `
-      SELECT
-        click_view.gclid,
-        campaign.id,
-        campaign.name,
-        segments.date
-      FROM click_view
-      WHERE segments.date = '${iso}'
-    `, `click_view ${iso}`);
+    totalDays++;
+    // One bad day must not zero out the whole run: a 400 on the oldest day
+    // is just the retention boundary disagreeing with our clock; skip it and
+    // keep collecting. If EVERY day fails, that's a real config/auth problem
+    // and we throw at the end so fetch-health shows it.
+    let results;
+    try {
+      results = await searchStream(customerId, headers, `
+        SELECT
+          click_view.gclid,
+          campaign.id,
+          campaign.name,
+          segments.date
+        FROM click_view
+        WHERE segments.date = '${iso}'
+      `, `click_view ${iso}`);
+    } catch (e) {
+      failedDays.push(iso);
+      console.warn(`    ⚠️  click_view ${iso} skipped: ${e.message.slice(0, 160)}`);
+      day.setUTCDate(day.getUTCDate() + 1);
+      continue;
+    }
     for (const r of results) {
       const gclid = r.clickView?.gclid;
       if (!gclid) continue;
@@ -71,6 +88,12 @@ export async function fetchGoogleAdsClicks({ since = null } = {}) {
       });
     }
     day.setUTCDate(day.getUTCDate() + 1);
+  }
+  if (failedDays.length) {
+    console.warn(`    ⚠️  ${failedDays.length}/${totalDays} day(s) skipped: ${failedDays.slice(0, 5).join(', ')}${failedDays.length > 5 ? '…' : ''}`);
+  }
+  if (totalDays > 0 && failedDays.length === totalDays) {
+    throw new Error(`click_view failed for all ${totalDays} day(s) — check Google Ads credentials/API access (first: ${failedDays[0]})`);
   }
   console.log(`    ${rows.length} click rows`);
 
