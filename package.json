@@ -8,6 +8,8 @@
     "fetch:gsc": "node fetchers/fetch-gsc.js",
     "fetch:ga4": "node fetchers/fetch-ga4.js",
     "fetch:google-ads": "node fetchers/fetch-google-ads.js",
+    "fetch:google-ads-clicks": "node fetchers/fetch-google-ads-clicks.js",
+    "upload:offline-conversions": "node fetchers/upload-offline-conversions.js",
     "fetch:hubspot": "node fetchers/fetch-hubspot.js",
     "fetch:callrail": "node fetchers/fetch-callrail.js",
     "fetch:netsuite": "node fetchers/fetch-netsuite.js",

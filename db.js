@@ -399,6 +399,36 @@ export async function initDB() {
   await p.query(`CREATE INDEX IF NOT EXISTS idx_gads_date ON google_ads_daily_by_campaign(date)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_gads_campaign ON google_ads_daily_by_campaign(campaign_name)`);
 
+  // gclid → campaign map from click_view (fetch-google-ads-clicks.js). The
+  // exact-match attribution lane: survives campaign renames that break
+  // campaign-name string joins. click_view only exists for the API's last
+  // 90 days, so rows accumulate here as the durable history.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS google_ads_clicks (
+      gclid TEXT PRIMARY KEY,
+      date DATE NOT NULL,
+      campaign_id TEXT NOT NULL DEFAULT '',
+      campaign_name TEXT NOT NULL DEFAULT '',
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_gads_clicks_date ON google_ads_clicks(date)`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_gads_clicks_campaign ON google_ads_clicks(campaign_id)`);
+
+  // Ledger of won-quote conversions pushed to Google Ads
+  // (upload-offline-conversions.js). PK on quote_no = never upload twice.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS google_ads_offline_uploads (
+      quote_no TEXT PRIMARY KEY,
+      gclid TEXT NOT NULL DEFAULT '',
+      conversion_value NUMERIC(15,2),
+      conversion_time TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'pending',
+      error TEXT,
+      uploaded_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   // HubSpot closed-won deals. One row per deal_id. Source/attribution fields
   // come from HubSpot's `hs_analytics_source*` on the deal record and power
   // the "which channel drove this deal" split on the Paid/SEO tabs.
@@ -2141,6 +2171,77 @@ export async function getGoogleAdsCampaignStats({ since = null, until = null } =
   }));
 }
 
+// ── Google Ads clicks (gclid lane) + offline-conversion ledger ───────
+
+export async function upsertGoogleAdsClicks(rows) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    // click_view can emit the same gclid twice across a re-fetched window;
+    // dedupe before the multi-row upsert (Postgres rejects a statement that
+    // touches one row twice).
+    const byGclid = new Map(rows.map(r => [r.gclid, r]));
+    const upserted = await bulkUpsert(client, {
+      table: 'google_ads_clicks',
+      cols: ['gclid', 'date', 'campaign_id', 'campaign_name'],
+      conflictCols: ['gclid'],
+      updateCols: ['date', 'campaign_id', 'campaign_name'],
+      rows: [...byGclid.values()],
+      toParams: r => [r.gclid, r.date, r.campaign_id ?? '', r.campaign_name ?? ''],
+    });
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// Won quotes carrying a contact gclid that haven't been uploaded to Google
+// Ads yet (or whose last attempt errored). Feeds upload-offline-conversions.
+export async function getWonQuotesWithGclid({ days = 90 } = {}) {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT
+      q.quote_no,
+      q.total::float                          as value,
+      ${WON_DATE_SQL}                         as conversion_time,
+      hc.gclid
+    FROM hubspot_netsuite_quotes q
+    JOIN (${CONTACTS_ONE_PER_EMAIL}) hc
+      ON hc.email_normalized = q.email_normalized
+    LEFT JOIN google_ads_offline_uploads u
+      ON u.quote_no = q.quote_no
+    WHERE q.status ILIKE '%won%'
+      AND q.quote_no <> ''
+      AND COALESCE(hc.gclid, '') <> ''
+      AND ${WON_DATE_SQL} >= NOW() - ($1 || ' days')::interval
+      AND (u.quote_no IS NULL OR u.status = 'error')
+    ORDER BY ${WON_DATE_SQL} ASC
+  `, [days]);
+  return rows;
+}
+
+export async function markOfflineUpload({ quote_no, gclid, conversion_value, conversion_time, status, error = null }) {
+  const p = getPool();
+  await p.query(`
+    INSERT INTO google_ads_offline_uploads
+      (quote_no, gclid, conversion_value, conversion_time, status, error, uploaded_at)
+    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    ON CONFLICT (quote_no) DO UPDATE SET
+      gclid = EXCLUDED.gclid,
+      conversion_value = EXCLUDED.conversion_value,
+      conversion_time = EXCLUDED.conversion_time,
+      status = EXCLUDED.status,
+      error = EXCLUDED.error,
+      uploaded_at = NOW()
+  `, [quote_no, gclid, conversion_value, conversion_time, status, error]);
+}
+
 // ── HubSpot helpers ──────────────────────────────────────────────────
 
 export async function upsertHubSpotDeals(rows) {
@@ -2247,16 +2348,34 @@ const FREEMAIL_DOMAINS_SQL = `(
   'roadrunner.com','netzero.net'
 )`;
 
-// First-touch paid-search contacts, one per email (earliest wins) — the
+// Paid-search-acquired contacts, one per email (earliest wins) — the
 // campaign that acquired each address. Shared by every ROAS query.
+//
+// Two admission lanes:
+//   1. First-touch PAID_SEARCH with a campaign name in source_data_1 — the
+//      original string-match lane.
+//   2. A stored gclid that resolves in google_ads_clicks — exact click-level
+//      proof of a paid acquisition. Recovers contacts HubSpot filed under
+//      OFFLINE/integration sources, and its campaign (resolved by campaign
+//      id at click time) survives renames, so it wins over the frozen
+//      source_data_1 string when both exist.
+const PAID_CONTACTS_SELECT = `
+      SELECT hc.contact_id, hc.email_normalized, hc.created_at,
+             COALESCE(NULLIF(lower(btrim(gac.campaign_name)), ''),
+                      NULLIF(lower(btrim(hc.hs_analytics_source_data_1)), '')) as camp_key
+      FROM hubspot_contacts hc
+      LEFT JOIN google_ads_clicks gac
+        ON hc.gclid <> '' AND gac.gclid = hc.gclid
+      WHERE hc.email_normalized IS NOT NULL
+        AND (
+          (hc.hs_analytics_source = 'PAID_SEARCH'
+           AND NULLIF(hc.hs_analytics_source_data_1, '') IS NOT NULL)
+          OR gac.gclid IS NOT NULL
+        )
+`;
 const PAID_CONTACTS_CTE = `
-      SELECT DISTINCT ON (email_normalized)
-             contact_id, email_normalized, created_at,
-             lower(btrim(hs_analytics_source_data_1)) as camp_key
-      FROM hubspot_contacts
-      WHERE hs_analytics_source = 'PAID_SEARCH'
-        AND NULLIF(hs_analytics_source_data_1, '') IS NOT NULL
-        AND email_normalized IS NOT NULL
+      SELECT DISTINCT ON (email_normalized) *
+      FROM (${PAID_CONTACTS_SELECT}) pc_all
       ORDER BY email_normalized, created_at ASC NULLS LAST, contact_id
 `;
 
@@ -2266,13 +2385,8 @@ const PAID_CONTACTS_CTE = `
 const PAID_DOMAIN_CTE = `
       SELECT DISTINCT ON (domain) contact_id, domain, created_at, camp_key
       FROM (
-        SELECT contact_id, created_at,
-               split_part(email_normalized, '@', 2) as domain,
-               lower(btrim(hs_analytics_source_data_1)) as camp_key
-        FROM hubspot_contacts
-        WHERE hs_analytics_source = 'PAID_SEARCH'
-          AND NULLIF(hs_analytics_source_data_1, '') IS NOT NULL
-          AND email_normalized IS NOT NULL
+        SELECT pc_all.*, split_part(email_normalized, '@', 2) as domain
+        FROM (${PAID_CONTACTS_SELECT}) pc_all
       ) x
       WHERE domain <> '' AND domain NOT IN ${FREEMAIL_DOMAINS_SQL}
       ORDER BY domain, created_at ASC NULLS LAST, contact_id
@@ -3619,9 +3733,13 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
         --      operator see "X calls from Google Ads, untagged" and
         --      fix the tagging gap rather than silently dropping the
         --      attribution.
+        -- gclid resolved through google_ads_clicks beats the untagged
+        -- bucket: the call joins its real campaign whenever the click lane
+        -- has the gclid on file.
         lower(btrim(COALESCE(
           NULLIF(c.utm_campaign, ''),
           NULLIF(c.campaign, ''),
+          NULLIF(gac.campaign_name, ''),
           CASE WHEN COALESCE(c.gclid, '')   <> '' THEN '(google ads — untagged)' END,
           CASE WHEN COALESCE(c.fbclid, '')  <> '' THEN '(facebook — untagged)'   END,
           CASE WHEN COALESCE(c.msclkid, '') <> '' THEN '(microsoft ads — untagged)' END
@@ -3629,6 +3747,7 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
         MAX(COALESCE(
           NULLIF(c.utm_campaign, ''),
           NULLIF(c.campaign, ''),
+          NULLIF(gac.campaign_name, ''),
           CASE WHEN COALESCE(c.gclid, '')   <> '' THEN '(google ads — untagged)' END,
           CASE WHEN COALESCE(c.fbclid, '')  <> '' THEN '(facebook — untagged)'   END,
           CASE WHEN COALESCE(c.msclkid, '') <> '' THEN '(microsoft ads — untagged)' END
@@ -3640,6 +3759,8 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
         SUM(COALESCE(c.value, 0))::float                             as cr_value,
         SUM(CASE WHEN c.lead_status = 'good_lead' THEN 1 ELSE 0 END)::int as cr_good_leads
       FROM callrail_calls c
+      LEFT JOIN google_ads_clicks gac
+        ON COALESCE(c.gclid, '') <> '' AND gac.gclid = c.gclid
       ${crWhere}
       GROUP BY 1
     ),

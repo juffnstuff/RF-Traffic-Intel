@@ -2131,6 +2131,22 @@ app.listen(PORT, async () => {
             } catch (e) {
               console.error('⚠️  Google Ads backfill failed:', e.message);
             }
+            // gclid → campaign map (click_view). Backfill the full 90-day
+            // retention window when the table is empty.
+            try {
+              const { getPool } = await import('./db.js');
+              const { rows } = await getPool().query(`SELECT COUNT(*)::int AS n FROM google_ads_clicks`);
+              if (rows[0].n === 0) {
+                await withFetchLock('google-ads-clicks', async () => {
+                  console.log('📦  Google Ads clicks backfill — full click_view window (90d)...');
+                  const { fetchGoogleAdsClicks } = await import('./fetchers/fetch-google-ads-clicks.js');
+                  const r = await fetchGoogleAdsClicks({ since: null });
+                  console.log(`✅  Google Ads clicks backfill complete: ${r.clicks} gclid rows`);
+                });
+              }
+            } catch (e) {
+              console.error('⚠️  Google Ads clicks backfill failed:', e.message);
+            }
           }
 
           // HubSpot backfill — contacts + NetSuite quotes (deals are not part
@@ -2292,6 +2308,12 @@ app.listen(PORT, async () => {
         await runOne('google-ads', async () => {
           const { fetchGoogleAds } = await import('./fetchers/fetch-google-ads.js');
           await fetchGoogleAds({ since });
+        });
+        // gclid → campaign map (click_view). The fetcher clamps to the
+        // API's 90-day click_view retention on its own.
+        await runOne('google-ads-clicks', async () => {
+          const { fetchGoogleAdsClicks } = await import('./fetchers/fetch-google-ads-clicks.js');
+          await fetchGoogleAdsClicks({ since });
         });
       }
       if (hasHubSpot) {
