@@ -2060,6 +2060,25 @@ app.listen(PORT, async () => {
   console.log(`    CR:   ${hasCallRail ? 'credentials set' : 'not configured'}`);
   console.log(`    AI:   ${hasAI ? 'Anthropic key set' : 'not configured'}\n`);
 
+  // Ads API version probe — a no-op request against the configured version.
+  // Google hard-blocks sunset versions with no grace period (v20 died
+  // 2026-06-10), so this puts "your version died" on the freshness strip at
+  // startup instead of letting the nightly fetchers discover it. Runs
+  // through withFetchLock so the result lands in fetch_log automatically.
+  if (hasGAds && hasDB) {
+    (async () => {
+      try {
+        await withFetchLock('google-ads-api-version', async () => {
+          const { probeAdsApiVersion } = await import('./fetchers/_google-ads-api.js');
+          const v = await probeAdsApiVersion();
+          console.log(`    ✅ Google Ads API ${v} reachable`);
+        });
+      } catch (e) {
+        console.error(`    ⚠️ Google Ads API version probe failed: ${e.message.slice(0, 200)}`);
+      }
+    })();
+  }
+
   // Initialize database
   if (hasDB) {
     try {
@@ -2336,6 +2355,12 @@ app.listen(PORT, async () => {
         });
       }
       if (hasGAds) {
+        // Version probe first — keeps the fetch-health row fresh between
+        // deploys and flags an approaching/actual version sunset nightly.
+        await runOne('google-ads-api-version', async () => {
+          const { probeAdsApiVersion } = await import('./fetchers/_google-ads-api.js');
+          await probeAdsApiVersion();
+        });
         await runOne('google-ads', async () => {
           const { fetchGoogleAds } = await import('./fetchers/fetch-google-ads.js');
           await fetchGoogleAds({ since });

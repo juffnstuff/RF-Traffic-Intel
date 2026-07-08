@@ -95,6 +95,24 @@ export function adsHeaders(accessToken) {
   return headers;
 }
 
+/**
+ * Cheapest possible live request against the configured API version.
+ * Google hard-blocks sunset versions (UNSUPPORTED_VERSION / VERSION_SUNSET),
+ * so this surfaces "your version died" in fetch-health BEFORE the nightly
+ * fetchers start failing. Throws with the parsed Google reason on failure.
+ */
+export async function probeAdsApiVersion() {
+  const customerId = requireEnv('GOOGLE_ADS_CUSTOMER_ID').replace(/-/g, '');
+  const accessToken = await getAccessToken();
+  await searchStream(
+    customerId,
+    adsHeaders(accessToken),
+    'SELECT customer.id FROM customer LIMIT 1',
+    `ads-api ${ADS_API_VERSION} probe`
+  );
+  return ADS_API_VERSION;
+}
+
 /** Run a GAQL query via searchStream; returns the flattened results array. */
 export async function searchStream(customerId, headers, query, label) {
   const url = `https://googleads.googleapis.com/${ADS_API_VERSION}/customers/${customerId}/googleAds:searchStream`;

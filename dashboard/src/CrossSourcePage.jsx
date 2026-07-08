@@ -72,14 +72,16 @@ function CampaignRoiTable({ rows }) {
     acc.ad_impressions += r.ad_impressions;
     acc.ga4_sessions += r.ga4_sessions;
     acc.ga4_conversions += r.ga4_conversions;
-    acc.ga4_revenue += r.ga4_revenue;
+    acc.ns_quote_value += r.ns_quote_value || 0;
+    acc.ns_revenue_won += r.ns_revenue_won || 0;
     acc.cr_calls    += r.cr_calls    || 0;
     acc.cr_answered += r.cr_answered || 0;
     acc.form_subs   += r.form_subs   || 0;
     return acc;
   }, { cost: 0, ad_clicks: 0, ad_impressions: 0, ga4_sessions: 0,
-       ga4_conversions: 0, ga4_revenue: 0, cr_calls: 0, cr_answered: 0,
-       form_subs: 0 });
+       ga4_conversions: 0, ns_quote_value: 0, ns_revenue_won: 0,
+       cr_calls: 0, cr_answered: 0, form_subs: 0 });
+  const totalRoasWon = totals.cost > 0 ? totals.ns_revenue_won / totals.cost : null;
   const totalCpa = totals.ga4_conversions > 0 ? totals.cost / totals.ga4_conversions : null;
   const totalCostPerCall = totals.cr_calls > 0 ? totals.cost / totals.cr_calls : null;
   const totalCostPerForm = totals.form_subs > 0 ? totals.cost / totals.form_subs : null;
@@ -109,7 +111,9 @@ function CampaignRoiTable({ rows }) {
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Sess/Click</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>GA4 Conv.</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}
-              title="GA4-attributed revenue is ≈$0 for this site (no on-site sales) — real ROAS lives in the NetSuite-based tables above">GA4 Revenue</th>
+              title="Total value of ALL NetSuite quotes (open + won + lost) from this campaign's leads, via the contact bridge — GA4's own revenue metric is ≈$0 here (no on-site checkout) so it is not shown">NS Quote opps</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}
+              title="Won NetSuite quote revenue of this campaign's leads (contact bridge: email first, corporate-domain fallback)">NS Won rev</th>
             {anyCalls && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', borderLeft: '1px solid var(--dso-rule)', color: '#a78bfa' }}>Calls</th>}
             {anyCalls && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', color: '#a78bfa' }}>Answered</th>}
             {anyCalls && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', color: '#a78bfa' }}>$/Call</th>}
@@ -117,9 +121,8 @@ function CampaignRoiTable({ rows }) {
             {anyForms && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', color: '#34d399' }}>$/Form</th>}
             {(anyCalls || anyForms) && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>$/Lead</th>}
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>CPA</th>
-            {/* No ROAS column here on purpose: ga4_revenue/cost is ≈0 and reads
-                as a fake "everything loses money" signal next to the real
-                NetSuite-based ROAS tables. */}
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}
+              title="NS won revenue ÷ ad cost — real ROAS from NetSuite, not GA4's ≈$0 revenue metric">ROAS (won)</th>
           </tr>
         </thead>
         <tbody>
@@ -134,7 +137,8 @@ function CampaignRoiTable({ rows }) {
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.ga4_sessions)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.sessions_per_click != null ? fmtRatio(r.sessions_per_click) : '—'}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.ga4_conversions)}</td>
-              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.ga4_revenue)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.ns_quote_value > 0 ? fmtMoney(r.ns_quote_value) : '—'}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.ns_revenue_won > 0 ? fmtMoney(r.ns_revenue_won) : '—'}</td>
               {anyCalls && <td style={{ padding: '8px 10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{fmtNum(r.cr_calls)}</td>}
               {anyCalls && <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.answered_rate != null ? `${fmtNum(r.cr_answered)} (${fmtPct(r.answered_rate)})` : '—'}</td>}
               {anyCalls && <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.cost_per_call != null ? fmtMoney(r.cost_per_call) : '—'}</td>}
@@ -142,6 +146,7 @@ function CampaignRoiTable({ rows }) {
               {anyForms && <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.cost_per_form != null ? fmtMoney(r.cost_per_form) : '—'}</td>}
               {(anyCalls || anyForms) && <td style={{ padding: '8px 10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{r.cost_per_lead != null ? fmtMoney(r.cost_per_lead) : '—'}</td>}
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.cost_per_ga4_conv != null ? fmtMoney(r.cost_per_ga4_conv) : '—'}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.roas_won != null ? fmtRatio(r.roas_won) : '—'}</td>
             </tr>
           ))}
         </tbody>
@@ -153,7 +158,8 @@ function CampaignRoiTable({ rows }) {
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.ga4_sessions)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>—</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.ga4_conversions)}</td>
-            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.ga4_revenue)}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.ns_quote_value)}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.ns_revenue_won)}</td>
             {anyCalls && <td style={{ padding: '10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{fmtNum(totals.cr_calls)}</td>}
             {anyCalls && <td style={{ padding: '10px', textAlign: 'right' }}>{totalAnsweredRate != null ? `${fmtNum(totals.cr_answered)} (${fmtPct(totalAnsweredRate)})` : '—'}</td>}
             {anyCalls && <td style={{ padding: '10px', textAlign: 'right' }}>{totalCostPerCall != null ? fmtMoney(totalCostPerCall) : '—'}</td>}
@@ -161,6 +167,7 @@ function CampaignRoiTable({ rows }) {
             {anyForms && <td style={{ padding: '10px', textAlign: 'right' }}>{totalCostPerForm != null ? fmtMoney(totalCostPerForm) : '—'}</td>}
             {(anyCalls || anyForms) && <td style={{ padding: '10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{totalCostPerLead != null ? fmtMoney(totalCostPerLead) : '—'}</td>}
             <td style={{ padding: '10px', textAlign: 'right' }}>{totalCpa != null ? fmtMoney(totalCpa) : '—'}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{totalRoasWon != null ? fmtRatio(totalRoasWon) : '—'}</td>
           </tr>
         </tfoot>
       </table>
@@ -845,6 +852,8 @@ function PagePerformanceTable({ rows, windowEnd }) {
       <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 8 }}>
         Latest GSC snapshot (window ending {windowEnd}) joined to GA4 over the same 28 days.
         Engagement gap = high CTR + low engagement → SERP click bait.
+        NS won rev = all-time won NetSuite revenue of contacts whose <em>first page seen</em> was
+        this page (fills in after the next HubSpot sync).
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
@@ -857,7 +866,8 @@ function PagePerformanceTable({ rows, windowEnd }) {
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>GA4 Sessions</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Engagement</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>GA4 Conv.</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>GA4 Revenue</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}
+              title="All-time won NetSuite quote revenue from contacts whose first page seen was this page — real revenue; GA4's own revenue metric is ≈$0 here (no on-site checkout)">NS Won rev · first page</th>
           </tr>
         </thead>
         <tbody>
@@ -873,7 +883,7 @@ function PagePerformanceTable({ rows, windowEnd }) {
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.ga4_sessions)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.ga4_engagement_rate != null ? fmtPct(r.ga4_engagement_rate) : '—'}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.ga4_conversions)}</td>
-              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.ga4_revenue)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.ns_revenue_won > 0 ? fmtMoney(r.ns_revenue_won) : '—'}</td>
             </tr>
           ))}
         </tbody>

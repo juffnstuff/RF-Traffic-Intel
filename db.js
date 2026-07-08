@@ -3636,6 +3636,11 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
   const formConds = tsFilter('f', 'submitted_at');
   formConds.push(`NULLIF(f.campaign, '') IS NOT NULL`);
   const formWhere = 'WHERE ' + formConds.join(' AND ');
+
+  // NetSuite quote window for the contact-bridge revenue columns — the real
+  // revenue lane; GA4's own revenue is ≈0 on this site (no on-site checkout).
+  const nsConds = tsFilter('q', 'created_at');
+  const nsAnd = nsConds.length ? `AND ${nsConds.join(' AND ')}` : '';
   // All four sources join on lower(btrim(name)) — the same normalization the
   // ROAS queries use — so case/whitespace variants of one campaign land on a
   // single row instead of splitting. Display name = the raw name from
@@ -3719,6 +3724,27 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
       ${formWhere}
       GROUP BY 1
     ),
+    paid_contacts AS (${PAID_CONTACTS_CTE}),
+    paid_domain AS (${PAID_DOMAIN_CTE}),
+    -- Real NetSuite revenue per campaign via the contact bridge (email
+    -- first, corporate-domain fallback) — the honest replacement for the
+    -- ga4_revenue column, which is ≈0 sitewide.
+    ns_rev AS (
+      SELECT COALESCE(pe.camp_key, pd.camp_key)                          as camp_key,
+             COUNT(*)::int                                               as ns_quotes,
+             SUM(q.total)::float                                         as ns_quote_value,
+             COUNT(*) FILTER (WHERE q.status ILIKE '%won%')::int         as ns_quotes_won,
+             SUM(q.total) FILTER (WHERE q.status ILIKE '%won%')::float   as ns_revenue_won
+      FROM hubspot_netsuite_quotes q
+      LEFT JOIN paid_contacts pe
+        ON pe.email_normalized = q.email_normalized
+      LEFT JOIN paid_domain pd
+        ON pe.contact_id IS NULL
+       AND pd.domain = split_part(q.email_normalized, '@', 2)
+      WHERE COALESCE(pe.contact_id, pd.contact_id) IS NOT NULL
+        ${nsAnd}
+      GROUP BY 1
+    ),
     names AS (
       SELECT camp_key FROM ads      WHERE camp_key IS NOT NULL
       UNION
@@ -3727,6 +3753,8 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
       SELECT camp_key FROM callrail WHERE camp_key IS NOT NULL
       UNION
       SELECT camp_key FROM forms    WHERE camp_key IS NOT NULL
+      UNION
+      SELECT camp_key FROM ns_rev   WHERE camp_key IS NOT NULL
     )
     SELECT
       COALESCE(a.display_name, g.display_name, c.display_name, f.display_name, n.camp_key) as campaign_name,
@@ -3748,6 +3776,10 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
       COALESCE(c.cr_good_leads, 0)        as cr_good_leads,
       COALESCE(f.form_subs, 0)            as form_subs,
       COALESCE(f.form_good_leads, 0)      as form_good_leads,
+      COALESCE(ns.ns_quotes, 0)           as ns_quotes,
+      COALESCE(ns.ns_quote_value, 0)      as ns_quote_value,
+      COALESCE(ns.ns_quotes_won, 0)       as ns_quotes_won,
+      COALESCE(ns.ns_revenue_won, 0)      as ns_revenue_won,
       (a.camp_key IS NOT NULL)            as in_ads,
       (g.camp_key IS NOT NULL)            as in_ga4,
       (c.camp_key IS NOT NULL)            as in_callrail,
@@ -3757,6 +3789,7 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
     LEFT JOIN ga4      g ON g.camp_key = n.camp_key
     LEFT JOIN callrail c ON c.camp_key = n.camp_key
     LEFT JOIN forms    f ON f.camp_key = n.camp_key
+    LEFT JOIN ns_rev  ns ON ns.camp_key = n.camp_key
     ORDER BY COALESCE(a.cost, 0) DESC, COALESCE(g.ga4_sessions, 0) DESC, COALESCE(c.cr_calls, 0) DESC
   `;
   const { rows } = await p.query(sql, params);
@@ -3780,6 +3813,10 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
     cr_good_leads: Number(r.cr_good_leads),
     form_subs: Number(r.form_subs),
     form_good_leads: Number(r.form_good_leads),
+    ns_quotes: Number(r.ns_quotes),
+    ns_quote_value: Number(r.ns_quote_value),
+    ns_quotes_won: Number(r.ns_quotes_won),
+    ns_revenue_won: Number(r.ns_revenue_won),
     in_ads: r.in_ads,
     in_ga4: r.in_ga4,
     in_callrail: r.in_callrail,
@@ -3798,7 +3835,9 @@ export async function getCampaignRoi({ since = null, until = null } = {}) {
     // ("we paid X to land each tracked lead, regardless of channel").
     cost_per_lead: (r.cr_answered + r.form_subs) > 0 ? r.cost / (Number(r.cr_answered) + Number(r.form_subs)) : null,
     total_leads: Number(r.cr_answered) + Number(r.form_subs),
-    roas: r.cost > 0 ? r.ga4_revenue / r.cost : null,
+    // Real ROAS from NetSuite won-quote revenue (ga4_revenue is ≈0 here —
+    // no on-site checkout — so a GA4-based roas would always read 0).
+    roas_won: r.cost > 0 ? Number(r.ns_revenue_won) / Number(r.cost) : null,
     sessions_per_click: r.ad_clicks > 0 ? r.ga4_sessions / r.ad_clicks : null,
   }));
 }
@@ -3836,6 +3875,28 @@ export async function getPagePerformance({ limit = 100 } = {}) {
       WHERE date >= latest_gsc.max_date - INTERVAL '27 days'
         AND date <= latest_gsc.max_date
       GROUP BY split_part(landing_page, '?', 1)
+    ),
+    -- All-time NetSuite revenue whose contact FIRST landed on this page
+    -- (hs_analytics_first_url via the contact bridge). Lifetime, not the
+    -- 28-day window: first-touch pages earn revenue months later, and a
+    -- 28-day slice would be too sparse to read.
+    ns_first_page AS (
+      SELECT
+        COALESCE(NULLIF(split_part(lower(regexp_replace(
+          COALESCE(NULLIF(he.first_url, ''), NULLIF(hd.first_url, '')),
+          '^https?://[^/]+', '')), '?', 1), ''), '/')            as path,
+        COUNT(*)::int                                            as ns_quotes,
+        SUM(q.total)::float                                      as ns_quote_value,
+        SUM(q.total) FILTER (WHERE q.status ILIKE '%won%')::float as ns_revenue_won
+      FROM hubspot_netsuite_quotes q
+      LEFT JOIN (${CONTACTS_ONE_PER_EMAIL}) he
+        ON he.email_normalized = q.email_normalized
+      LEFT JOIN (${CONTACTS_ONE_PER_DOMAIN}) hd
+        ON he.contact_id IS NULL
+       AND hd.domain = split_part(q.email_normalized, '@', 2)
+      WHERE COALESCE(he.contact_id, hd.contact_id) IS NOT NULL
+        AND COALESCE(NULLIF(he.first_url, ''), NULLIF(hd.first_url, '')) IS NOT NULL
+      GROUP BY 1
     )
     SELECT
       gsc.path,
@@ -3849,9 +3910,13 @@ export async function getPagePerformance({ limit = 100 } = {}) {
       COALESCE(ga4.ga4_users, 0)            as ga4_users,
       COALESCE(ga4.ga4_conversions, 0)      as ga4_conversions,
       COALESCE(ga4.ga4_revenue, 0)          as ga4_revenue,
+      COALESCE(nfp.ns_quotes, 0)            as ns_quotes,
+      COALESCE(nfp.ns_quote_value, 0)       as ns_quote_value,
+      COALESCE(nfp.ns_revenue_won, 0)       as ns_revenue_won,
       (SELECT max_date::text FROM latest_gsc) as window_end_date
     FROM gsc
     LEFT JOIN ga4 ON gsc.path = ga4.path
+    LEFT JOIN ns_first_page nfp ON nfp.path = lower(gsc.path)
     ORDER BY gsc.gsc_clicks DESC
     LIMIT $1
   `, [Math.min(500, Math.max(10, parseInt(limit, 10) || 100))]);
@@ -3868,6 +3933,9 @@ export async function getPagePerformance({ limit = 100 } = {}) {
     ga4_users: Number(r.ga4_users),
     ga4_conversions: Number(r.ga4_conversions),
     ga4_revenue: Number(r.ga4_revenue),
+    ns_quotes: Number(r.ns_quotes),
+    ns_quote_value: Number(r.ns_quote_value),
+    ns_revenue_won: Number(r.ns_revenue_won),
     // Engagement rate from GA4 (engaged / sessions) for cross-reference
     // with GSC CTR — high CTR + low engagement = misleading SERP snippet.
     ga4_engagement_rate: r.ga4_sessions > 0 ? Number(r.ga4_engaged_sessions) / Number(r.ga4_sessions) : null,
