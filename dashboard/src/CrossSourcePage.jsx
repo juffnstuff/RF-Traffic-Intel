@@ -232,8 +232,8 @@ function HubSpotAttributionTable({ rows, lens }) {
       overflowX: 'auto',
     }}>
       <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 8 }}>
-        Revenue from `hubspot_netsuite_quotes` (NetSuite quote totals mirrored into HubSpot),
-        bucketed by <strong>{lens === 'latest' ? "the contact's hs_latest_source" : lens === 'netsuite' ? "the quote's NetSuite lead source (ns_lead_source)" : "the contact's hs_analytics_source"}</strong>.
+        Quote opportunities from `hubspot_netsuite_quotes` (NetSuite quote totals — open + won + lost — mirrored
+        into HubSpot; only Win Revenue is realized revenue), bucketed by <strong>{lens === 'latest' ? "the contact's hs_latest_source" : lens === 'netsuite' ? "the quote's NetSuite lead source (ns_lead_source)" : "the contact's hs_analytics_source"}</strong>.
         Quotes whose email doesn't match any contact land in the (UNKNOWN) bucket — see Unattributed columns.
         "via domain" counts quotes matched through the corporate-domain fallback (quote email's company
         domain ↔ contact domain) rather than an exact email match — same company, lower confidence.
@@ -247,7 +247,8 @@ function HubSpotAttributionTable({ rows, lens }) {
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Unattributed</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Wins</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Win Revenue</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Total Revenue</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}
+              title="Total value of ALL quotes — open + won + lost. Win Revenue is the realized subset.">Quote opps ($)</th>
           </tr>
         </thead>
         <tbody>
@@ -437,10 +438,10 @@ function cmpSort(arr, getter, dir, isStr) {
     return isStr ? d * String(av).localeCompare(String(bv)) : d * (av - bv);
   });
 }
-function SortTh({ id, label, align = 'right', sortKey, sortDir, onSort }) {
+function SortTh({ id, label, align = 'right', sortKey, sortDir, onSort, title }) {
   const active = id === sortKey;
   return (
-    <th onClick={() => onSort(id)} title="Sort"
+    <th onClick={() => onSort(id)} title={title || 'Sort'}
       style={{ padding: '8px 10px', fontWeight: 600, textAlign: align, cursor: 'pointer', whiteSpace: 'nowrap', userSelect: 'none', color: active ? 'var(--dso-text)' : undefined }}>
       {label}{active ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
     </th>
@@ -502,11 +503,12 @@ function PartGroupRoasTable({ rows }) {
     }}>
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', marginBottom: 8 }}>
         <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, flex: 1 }}>
-          Revenue from `hubspot_netsuite_quotes.parts_group` (the record-level part group, direct from the quote).
+          Quote totals from `hubspot_netsuite_quotes.parts_group` (the record-level part group, direct from the quote).
           Cost is allocated via the contact bridge: each campaign's spend splits across the part groups its own leads' quotes fell under
           (by won-quote share; all-quote share when a campaign has no wins yet). Spend from campaigns whose leads have no quotes shows as <strong>(unattributed)</strong>.
-          ROAS numerators are <strong>paid-attributed revenue only</strong> (Paid revenue ÷ cost, and paid won revenue ÷ cost) —
-          "Revenue (all sources)" includes organic/direct/etc. and is context, not a return on the ad spend.
+          ROAS numerators are <strong>paid-attributed only</strong> (ROAS (opps) = paid quote opps ÷ cost; ROAS (won) = paid won revenue ÷ cost) —
+          "Quote opps (all sources)" includes organic/direct/etc. and is context, not a return on the ad spend.
+          Quote opps are the total value of all quotes (open + won + lost); only the won columns are realized revenue.
         </div>
         <ExportButton filename="part-group-roas.csv" rows={sorted.map(r => ({
           part_group: r.part_group, cost: r.cost, quotes: r.quotes, quotes_won: r.quotes_won,
@@ -522,11 +524,11 @@ function PartGroupRoasTable({ rows }) {
             <SortTh id="cost"             label="Ad Cost"              sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="quotes"           label="Quotes"               sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="quotes_won"       label="Wins"                 sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-            <SortTh id="revenue"          label="Revenue (all sources)" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue"          label="Quote opps (all sources)" title="Total value of ALL quotes — open + won + lost — from every lead source. Won revenue is the realized subset." sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="revenue_won"      label="Revenue (won)"        sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-            <SortTh id="revenue_paid"     label="Paid revenue"         sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue_paid"     label="Paid quote opps"      title="Total value of ALL quotes — open + won + lost — from paid-attributed leads only." sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="revenue_won_paid" label="Paid won rev."        sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-            <SortTh id="roas"             label="ROAS"                 sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="roas"             label="ROAS (opps)"          title="Paid quote opps ÷ cost — pipeline-based, not realized return" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="roas_won"         label="ROAS (won)"           sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
           </tr>
         </thead>
@@ -612,9 +614,10 @@ function CampaignRoasTable({ rows }) {
   return (
     <div style={{ background: 'var(--dso-surface)', borderRadius: 4, padding: '14px 16px', border: '1px solid var(--dso-rule)', overflowX: 'auto' }}>
       <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 8 }}>
-        Google Ads spend per campaign vs the <strong>whole-order</strong> NetSuite revenue of the contacts that campaign acquired
+        Google Ads spend per campaign vs the <strong>whole-order</strong> NetSuite quote opportunities of the contacts that campaign acquired —
+        all quotes, open + won + lost; only "Revenue (won)" is realized revenue
         (paid-search contact's <code>hs_analytics_source_data_1</code> = campaign, contact → quotes by email). Orders aren't split across part-groups,
-        so brand / catalog campaigns get credited for all the revenue their leads drove. Paid-search only, first-touch.
+        so brand / catalog campaigns get credited for all the quote value their leads drove. Paid-search only, first-touch.
         The grey line under each campaign shows the record-level part groups (custbody4) those orders fell under, by revenue share — the campaign→part-group link, no order splitting.
         "via domain" counts quotes matched through the corporate-domain fallback (quote email's company domain ↔ contact domain)
         rather than an exact email match — same company, lower confidence.
@@ -622,7 +625,7 @@ function CampaignRoasTable({ rows }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 10, flexWrap: 'wrap' }}>
         <input value={q} onChange={e => setQ(e.target.value)} placeholder="Filter campaigns…" style={{ ...inputStyle, minWidth: 200 }} />
         {chk(hideNoSpend, setHideNoSpend, 'Hide $0 ad spend')}
-        {chk(hideNoRev, setHideNoRev, 'Hide $0 revenue')}
+        {chk(hideNoRev, setHideNoRev, 'Hide $0 quote opps')}
         <span style={{ color: 'var(--dso-text-faint)', fontSize: 11 }}>{filtered.length} of {rows.length}</span>
         <ExportButton filename="campaign-roas.csv" rows={sorted.map(r => ({
           campaign: r.campaign, cost: r.cost, leads: r.leads, quotes: r.quotes,
@@ -637,7 +640,7 @@ function CampaignRoasTable({ rows }) {
             <SortTh id="cost"        label="Ad Cost"       sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="leads"       label="Leads"         sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="quotes"      label="Quotes"        sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-            <SortTh id="revenue"     label="Revenue (all)" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue"     label="Quote opps ($)" title="Total value of ALL quotes from this campaign's leads — open + won + lost. Won revenue is the realized subset." sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="revenue_won" label="Revenue (won)" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="roas"        label="ROAS"          sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="roas_won"    label="ROAS (won)"    sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -726,8 +729,9 @@ function CohortRoasTable({ rows }) {
     <div style={{ background: 'var(--dso-surface)', borderRadius: 4, padding: '14px 16px', border: '1px solid var(--dso-rule)', overflowX: 'auto' }}>
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', marginBottom: 8 }}>
         <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, flex: 1 }}>
-          Spend in window vs the <strong>lifetime</strong> revenue of leads acquired in that window — unlike the
-          windowed table above, spend and revenue belong to the same cohort.
+          Spend in window vs the <strong>lifetime</strong> quote opportunities (all quotes — open + won + lost)
+          of leads acquired in that window — unlike the windowed table above, spend and quotes belong to the same cohort.
+          Only "Won revenue" is realized revenue.
         </div>
         <ExportButton filename="cohort-roas.csv" rows={sorted.map(r => ({
           campaign: r.campaign, cost: r.cost, leads: r.leads, converting_leads: r.converting_leads,
@@ -744,7 +748,7 @@ function CohortRoasTable({ rows }) {
             <SortTh id="leads"             label="Leads"        sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="converting_leads"  label="Conv. leads"  sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="quotes"            label="Quotes"       sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-            <SortTh id="revenue"           label="Revenue"      sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue"           label="Quote opps ($)" title="Total value of ALL quotes from leads acquired in the window — open + won + lost. Won revenue is the realized subset." sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="revenue_won"       label="Won revenue"  sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="roas"              label="ROAS"         sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="roas_won"          label="Won ROAS"     sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -1118,10 +1122,10 @@ export default function CrossSourcePage() {
       {execSummary && (
         <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
           <StatCard label="Total spend" value={fmtMoney(execSummary.cost)} sub="Google Ads, in window" />
-          <StatCard label="Paid-attributed revenue" value={fmtMoney(execSummary.revenue)} sub="all quotes of paid leads" />
+          <StatCard label="Quote opportunities (paid)" value={fmtMoney(execSummary.revenue)} sub="all quotes from paid leads (open + won + lost)" />
           <StatCard label="Won revenue" value={fmtMoney(execSummary.revenueWon)} sub="closed-won quotes" />
           <StatCard label="Blended ROAS (won)" value={execSummary.roasWon != null ? fmtRatio(execSummary.roasWon) : '—'}
-            sub={`all-quote: ${execSummary.roasAll != null ? fmtRatio(execSummary.roasAll) : '—'}`} />
+            sub={`opps variant: ${execSummary.roasAll != null ? fmtRatio(execSummary.roasAll) : '—'}`} />
           <StatCard label="Unattributed spend" value={fmtMoney(execSummary.unattributedSpend)} sub="campaigns with 0 quotes" />
           <StatCard label="Quotes domain-matched" value={execSummary.pctDomainMatched != null ? fmtPct(execSummary.pctDomainMatched) : '—'}
             sub={`${fmtNum(execSummary.domainMatched)} of ${fmtNum(execSummary.quotes)} quotes`} />

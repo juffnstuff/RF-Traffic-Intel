@@ -732,14 +732,16 @@ function ChannelTable({ rows }) {
   );
 }
 
-function CampaignTable({ rows }) {
+function CampaignTable({ rows, wonRevByCampaign }) {
+  const nsWonRev = (name) => wonRevByCampaign?.get(String(name || '').toLowerCase());
   return (
     <div style={{
       background: '#334155', borderRadius: 8, padding: '14px 16px',
       flex: '1 1 100%', minWidth: 0, overflowX: 'auto',
     }}>
       <div style={{ color: '#cbd5e1', fontSize: 11, marginBottom: 8 }}>
-        Campaigns in the visible range — sorted by sessions
+        Campaigns in the visible range — sorted by sessions.
+        NS won rev = won NetSuite quote revenue of contacts whose first-touch campaign matches.
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: '#e2e8f0' }}>
         <thead>
@@ -751,12 +753,14 @@ function CampaignTable({ rows }) {
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Conversions</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Conv / session</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Engaged %</th>
-            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Revenue</th>
+            <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>NS won rev</th>
             <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Active days</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((r, i) => (
+          {rows.map((r, i) => {
+            const won = nsWonRev(r.campaign_name);
+            return (
             <tr key={r.campaign_name} style={{ borderTop: i === 0 ? 'none' : '1px solid #475569' }}>
               <td style={{ padding: '6px 8px', fontWeight: 600, maxWidth: 340, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.campaign_name}>
                 {r.campaign_name}
@@ -767,10 +771,11 @@ function CampaignTable({ rows }) {
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtNum(r.conversions)}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtRatio(r.conversion_rate)}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtPct(r.engagement_rate)}</td>
-              <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtMoney(r.total_revenue)}</td>
+              <td style={{ padding: '6px 8px', textAlign: 'right' }}>{won != null ? fmtMoney(won) : '—'}</td>
               <td style={{ padding: '6px 8px', textAlign: 'right', color: '#94a3b8' }}>{r.active_days}</td>
             </tr>
-          ))}
+            );
+          })}
           {rows.length === 0 && (
             <tr><td colSpan={9} style={{ padding: '10px 8px', color: '#64748b' }}>
               No campaigns with sessions in the current range. "(not set)" and "(direct)" are excluded.
@@ -940,6 +945,10 @@ export default function GA4InsightsPage() {
   const [countries, setCountries] = useState(null);
   const [events, setEvents] = useState(null);
   const [newVsReturning, setNewVsReturning] = useState(null);
+  // NetSuite won-quote joins over the same window: revenue by the contact's
+  // first page seen, and the raw won quotes (for campaign-name matching).
+  const [firstPageRev, setFirstPageRev] = useState(null);
+  const [wonWindow, setWonWindow] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refetching, setRefetching] = useState(false);
   const [error, setError] = useState(null);
@@ -1037,6 +1046,10 @@ export default function GA4InsightsPage() {
       fetchOpt('/api/ga4-countries',                setCountries),
       fetchOpt('/api/ga4-events?conversionsOnly=1', setEvents),
       fetchOpt('/api/ga4-new-vs-returning',         setNewVsReturning),
+      // NetSuite won-quote revenue joined to GA4 dims. first-page revenue is
+      // empty until the next HubSpot full sync — columns render '—' until then.
+      fetchOpt('/api/insights/won-revenue-by-first-page', setFirstPageRev),
+      fetchOpt('/api/quotes-won',                   setWonWindow),
     ]).finally(() => { if (!ac.signal.aborted) setRefetching(false); });
     return () => ac.abort();
   }, [aggregate, cutoff, selectedYears]);
@@ -1285,6 +1298,33 @@ export default function GA4InsightsPage() {
     });
     return { data, channels, totals };
   }, [channelsDaily, cutoff, selectedYears, chartData, nsRevDaily]);
+
+  // Won NetSuite quote revenue keyed by the contact's first-touch campaign
+  // (lowercased source_data_1/2), for the GA4 campaign table join.
+  const wonRevByCampaign = useMemo(() => {
+    const map = new Map();
+    for (const q of (wonWindow?.quotes || [])) {
+      const amt = Number(q.amount) || 0;
+      for (const k of [q.source_data_1, q.source_data_2]) {
+        if (!k) continue;
+        const key = String(k).toLowerCase();
+        map.set(key, (map.get(key) || 0) + amt);
+      }
+    }
+    return map;
+  }, [wonWindow]);
+
+  // Won revenue by the contact's FIRST page seen (lowercase path, query
+  // stripped server-side). Empty until the next HubSpot full sync populates
+  // hs_analytics_first_url — lookups just miss and render '—'.
+  const firstPageRevMap = useMemo(() => {
+    const map = new Map();
+    for (const p of (firstPageRev?.pages || [])) {
+      if (!p.page) continue;
+      map.set(p.page, (map.get(p.page) || 0) + (Number(p.revenue_won) || 0));
+    }
+    return map;
+  }, [firstPageRev]);
 
   const handleClear = useCallback(() => {
     setRange('6m');
@@ -1572,7 +1612,7 @@ export default function GA4InsightsPage() {
               Campaign performance
             </h2>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
-              <CampaignTable rows={campaignStats?.campaigns || []} />
+              <CampaignTable rows={campaignStats?.campaigns || []} wonRevByCampaign={wonRevByCampaign} />
             </div>
 
             {(landingPages?.landing_pages?.length ?? 0) > 0 && (
@@ -1583,7 +1623,7 @@ export default function GA4InsightsPage() {
                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
                   <FunnelTable
                     title="Top landing pages by sessions in range"
-                    subtitle="The single most useful SEO read — which pages earn their keep, and which drop off. Click (not set) to investigate."
+                    subtitle="The single most useful SEO read — which pages earn their keep, and which drop off. Click (not set) to investigate. NS won rev = revenue of won quotes from contacts whose FIRST page seen was this page (first-touch, populates after next HubSpot sync)."
                     rows={landingPages.landing_pages}
                     columns={[
                       { key: 'landing_page', label: 'Landing page', maxWidth: 360 },
@@ -1592,7 +1632,11 @@ export default function GA4InsightsPage() {
                       { key: 'engagement_rate', label: 'Eng %', align: 'right', format: v => v != null ? fmtPct(v) : '—' },
                       { key: 'conversions', label: 'Conv.', align: 'right', format: fmtNum },
                       { key: 'conversion_rate', label: 'Conv / sess', align: 'right', format: v => v != null ? fmtRatio(v) : '—' },
-                      { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
+                      { key: 'ns_won_revenue', label: 'NS won rev · first page', align: 'right', format: (_, r) => {
+                        const path = String(r.landing_page || '').split('?')[0].toLowerCase() || '/';
+                        const won = firstPageRevMap.get(path);
+                        return won != null ? fmtMoney(won) : '—';
+                      } },
                       { key: 'active_days', label: 'Active days', align: 'right', dim: true, format: v => v ?? '—' },
                     ]}
                     isExpandable={r => r.landing_page === '(not set)'}
@@ -1627,7 +1671,6 @@ export default function GA4InsightsPage() {
                       { key: 'new_users', label: 'New users', align: 'right', format: fmtNum },
                       { key: 'conversions', label: 'Conv.', align: 'right', format: fmtNum },
                       { key: 'conversion_rate', label: 'Conv / sess', align: 'right', format: v => v != null ? fmtRatio(v) : '—' },
-                      { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
                     ]}
                   />
                 </div>
@@ -1652,7 +1695,6 @@ export default function GA4InsightsPage() {
                           { key: 'engagement_rate', label: 'Eng %', align: 'right', format: v => v != null ? fmtPct(v) : '—' },
                           { key: 'conversions', label: 'Conv.', align: 'right', format: fmtNum },
                           { key: 'conversion_rate', label: 'Conv / sess', align: 'right', format: v => v != null ? fmtRatio(v) : '—' },
-                          { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
                         ]}
                       />
                     </div>
@@ -1668,7 +1710,6 @@ export default function GA4InsightsPage() {
                           { key: 'sessions', label: 'Sessions', align: 'right', format: fmtNum },
                           { key: 'new_users', label: 'New users', align: 'right', format: fmtNum },
                           { key: 'conversions', label: 'Conv.', align: 'right', format: fmtNum },
-                          { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
                         ]}
                       />
                     </div>
@@ -1688,7 +1729,7 @@ export default function GA4InsightsPage() {
                       key={ev.event_name}
                       label={ev.event_name}
                       value={fmtNum(ev.conversions)}
-                      sub={`${fmtNum(ev.event_count)} fires${ev.total_revenue ? ` · ${fmtMoney(ev.total_revenue)} revenue` : ''}`}
+                      sub={`${fmtNum(ev.event_count)} fires`}
                       small={ev.active_days != null ? `${ev.active_days} active days` : null}
                     />
                   ))}
@@ -1701,7 +1742,6 @@ export default function GA4InsightsPage() {
                       { key: 'event_name', label: 'Event' },
                       { key: 'conversions', label: 'Conversions', align: 'right', format: fmtNum },
                       { key: 'event_count', label: 'Total fires', align: 'right', format: fmtNum },
-                      { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
                       { key: 'active_days', label: 'Active days', align: 'right', dim: true, format: v => v ?? '—' },
                     ]}
                   />
@@ -1725,7 +1765,6 @@ export default function GA4InsightsPage() {
                       { key: 'engagement_rate', label: 'Eng %', align: 'right', format: v => v != null ? fmtPct(v) : '—' },
                       { key: 'conversions', label: 'Conv.', align: 'right', format: fmtNum },
                       { key: 'conversion_rate', label: 'Conv / sess', align: 'right', format: v => v != null ? fmtRatio(v) : '—' },
-                      { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
                     ]}
                   />
                 </div>
@@ -1749,7 +1788,6 @@ export default function GA4InsightsPage() {
                       { key: 'new_users', label: 'New users', align: 'right', format: fmtNum },
                       { key: 'conversions', label: 'Conv.', align: 'right', format: fmtNum },
                       { key: 'conversion_rate', label: 'Conv / sess', align: 'right', format: v => v != null ? fmtRatio(v) : '—' },
-                      { key: 'total_revenue', label: 'Revenue', align: 'right', format: fmtMoney },
                     ]}
                   />
                 </div>

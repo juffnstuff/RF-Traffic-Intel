@@ -151,6 +151,10 @@ export default function PaidKPIsPage() {
   const [selectedYears, setSelectedYears] = useLocalStorageState('years', []);
   const [weekdayOnly, setWeekdayOnly] = useLocalStorageState('weekdayOnly', false);
   const [showDaily, setShowDaily] = useLocalStorageState('showDaily', false);
+  // Attribution lens for won-quote joins: 'original' = HubSpot first-touch
+  // source (stable), 'latest' = most recent session source. Persisted so the
+  // choice survives reloads (localStorage key rfti.paid.lens).
+  const [lens, setLens] = useLocalStorageState('paid.lens', 'original');
 
   const [gads, setGads] = useState(null);
   const [gadsCampaigns, setGadsCampaigns] = useState(null);
@@ -169,14 +173,12 @@ export default function PaidKPIsPage() {
     setLoading(true);
     Promise.all([
       fetch('/api/google-ads').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/quotes-won-daily').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/ga4-channels-daily').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/ga4').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/callrail-daily').then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([g, h, c, a, cr]) => {
+      .then(([g, c, a, cr]) => {
         setGads(g);
-        setHsDealsDaily(h);
         setGa4Channels(c);
         setGa4Agg(a);
         setCrDaily(cr);
@@ -189,6 +191,19 @@ export default function PaidKPIsPage() {
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
+
+  // Daily won-quote attribution refetches when the lens flips — the server
+  // aliases source/source_data_1/2 to first- or latest-touch per lens.
+  // Aborted on the next run so a slow stale response can't overwrite
+  // fresher data.
+  useEffect(() => {
+    const ac = new AbortController();
+    fetch(`/api/quotes-won-daily?lens=${lens}`, { signal: ac.signal })
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (!ac.signal.aborted) setHsDealsDaily(j); })
+      .catch(() => { if (!ac.signal.aborted) setHsDealsDaily(null); });
+    return () => ac.abort();
+  }, [lens]);
 
   const availableYears = useMemo(() => {
     const rows = gads?.daily || ga4Agg?.daily || [];
@@ -213,6 +228,7 @@ export default function PaidKPIsPage() {
     } else if (cutoff) {
       params.set('since', cutoff);
     }
+    params.set('lens', lens);
     const qs = params.toString();
     Promise.all([
       fetch(`/api/google-ads-campaigns?${qs}`, { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
@@ -225,7 +241,7 @@ export default function PaidKPIsPage() {
       })
       .finally(() => { if (!ac.signal.aborted) setRefetching(false); });
     return () => ac.abort();
-  }, [gads, cutoff, selectedYears]);
+  }, [gads, cutoff, selectedYears, lens]);
 
   // Build the main daily series: cost / clicks / impressions from Google Ads,
   // paid-sessions from GA4 by-channel, paid-sourced HubSpot deals per day.
@@ -391,9 +407,9 @@ export default function PaidKPIsPage() {
     const map = new Map();
     for (const d of (hsDealsWindow?.quotes || [])) {
       if (!PAID_HS_SOURCES.has(d.source)) continue;
-      // The contact's first-touch source_data_1/2 carries the campaign/keyword
-      // that drove the quote; key won-quote revenue onto it to line up with
-      // Google Ads campaigns.
+      // The contact's source_data_1/2 (aliased per the active lens — first-
+      // or latest-touch) carries the campaign/keyword that drove the quote;
+      // key won-quote revenue onto it to line up with Google Ads campaigns.
       const keys = [d.source_data_1, d.source_data_2].filter(Boolean);
       for (const k of keys) {
         const cur = map.get(k) || { deals: 0, revenue: 0 };
@@ -462,6 +478,28 @@ export default function PaidKPIsPage() {
       </div>
 
       <main style={{ padding: '16px clamp(12px, 4vw, 32px)', maxWidth: 1600, margin: '0 auto' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+          <h2 style={{ fontSize: 13, color: '#94a3b8', margin: 0, fontWeight: 600 }}>
+            Paid KPIs
+          </h2>
+          <div
+            title="Original = the source that first acquired the contact (stable). Latest = the contact's most recent session source — on this portal the NetSuite integration overwrites it to OFFLINE for most contacts, so paid numbers under Latest are much smaller. That's the data, not a bug."
+            style={{ display: 'inline-flex', border: '1px solid #475569', borderRadius: 4, overflow: 'hidden' }}
+          >
+            {[['original', 'Original (first touch)'], ['latest', 'Latest (last touch)']].map(([k, label]) => (
+              <button
+                key={k}
+                onClick={() => setLens(k)}
+                style={{
+                  background: lens === k ? '#475569' : 'transparent',
+                  color: lens === k ? '#f8fafc' : '#94a3b8',
+                  border: 'none', padding: '4px 10px', fontSize: 11,
+                  fontWeight: 600, cursor: 'pointer',
+                }}
+              >{label}</button>
+            ))}
+          </div>
+        </div>
         {kpi && (
           <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
             <StatCard label="Cost" value={fmtMoney(kpi.cost)} sub="Google Ads, in range" ma30={kpi.ma.cost[0]} ma90={kpi.ma.cost[1]} formatter={fmtMoney} />
