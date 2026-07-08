@@ -9,7 +9,11 @@
 
 import 'dotenv/config';
 
-export const ADS_API_VERSION = 'v20';
+// Google sunsets Ads API versions aggressively (v20 died 2026-06-10 with
+// hard VERSION_SUNSET blocks; monthly release cadence since Jan 2026).
+// Override with GOOGLE_ADS_API_VERSION when the default ages out — current
+// supported versions: https://developers.google.com/google-ads/api/docs/sunset-dates
+export const ADS_API_VERSION = process.env.GOOGLE_ADS_API_VERSION?.trim() || 'v24';
 
 export function requireEnv(name) {
   const v = process.env[name]?.trim();

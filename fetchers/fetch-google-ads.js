@@ -21,12 +21,11 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { ADS_API_VERSION } from './_google-ads-api.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CACHE_DIR = path.join(__dirname, '..', 'data', 'cache');
 const CACHE_PATH = path.join(CACHE_DIR, 'google-ads-daily.json');
-
-const ADS_API_VERSION = 'v20';
 
 function requireEnv(name) {
   const v = process.env[name]?.trim();
