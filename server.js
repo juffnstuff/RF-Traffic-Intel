@@ -19,13 +19,20 @@ const CACHE_DIR = path.join(__dirname, 'data/cache');
 const CRON_TIMEZONE = process.env.CRON_TIMEZONE || 'America/New_York';
 
 const app = express();
-app.use(cors());
+// The dashboard is served same-origin (and the Vite dev server proxies /api),
+// so cross-origin access is opt-in: set CORS_ORIGIN to a comma-separated
+// allowlist only if some other origin genuinely needs to call this API.
+const corsOrigins = (process.env.CORS_ORIGIN || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+if (corsOrigins.length) app.use(cors({ origin: corsOrigins }));
 app.use(express.json());
 
-// ── Basic auth (optional) ─────────────────────────────────────────────
-// Gated on APP_USERNAME + APP_PASSWORD both being set. If either is unset
-// the middleware no-ops so local dev / preview deploys aren't locked out
-// just because the env hasn't been configured yet.
+// ── Basic auth ────────────────────────────────────────────────────────
+// Gated on APP_USERNAME + APP_PASSWORD both being set. In production the
+// server refuses to start without them — this app exposes customer emails,
+// quote revenue, and live-query diagnostics, so an unauthenticated deploy
+// is never acceptable. Set ALLOW_UNAUTHENTICATED=true to override for a
+// deliberately open deploy (e.g. behind an authenticating proxy).
 //
 // Skip list:
 //   /api/health  — Railway / uptime monitors hit this; locking it would
@@ -34,14 +41,26 @@ app.use(express.json());
 const APP_USERNAME = process.env.APP_USERNAME || '';
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
 const basicAuthEnabled = !!(APP_USERNAME && APP_PASSWORD);
+const isProductionDeploy =
+  process.env.NODE_ENV === 'production' ||
+  !!process.env.RAILWAY_ENVIRONMENT_NAME || !!process.env.RAILWAY_PROJECT_ID;
 if (basicAuthEnabled) {
   console.log('🔐  Basic auth enabled (APP_USERNAME / APP_PASSWORD set)');
+} else if (isProductionDeploy && process.env.ALLOW_UNAUTHENTICATED !== 'true') {
+  console.error(
+    'FATAL: production deploy without auth. Set APP_USERNAME + APP_PASSWORD ' +
+    '(or ALLOW_UNAUTHENTICATED=true if an upstream proxy handles auth).'
+  );
+  process.exit(1);
 } else {
   console.log('🔓  Basic auth disabled (set APP_USERNAME + APP_PASSWORD to enable)');
 }
 app.use((req, res, next) => {
   if (!basicAuthEnabled) return next();
   if (req.path === '/api/health') return next();
+  // Machine-to-machine route with its own mandatory bearer-token check —
+  // the RF Traction consumer has an API key, not browser credentials.
+  if (req.path === '/api/traction/scorecard-summary') return next();
   const header = req.headers.authorization || '';
   if (header.startsWith('Basic ')) {
     let decoded = '';
@@ -61,6 +80,23 @@ app.use((req, res, next) => {
   }
   res.set('WWW-Authenticate', 'Basic realm="RF Traffic Intel", charset="UTF-8"');
   res.status(401).send('Authentication required');
+});
+
+// Sensitive surface gate: diagnostics return raw PII (customer emails,
+// caller phones, quote revenue), /api/netsuite-customers is the whole
+// identity table, and /api/interpret spends Anthropic budget. When Basic
+// auth is enabled the global middleware already covers them; when it is
+// deliberately disabled (ALLOW_UNAUTHENTICATED dev/proxy setups) these
+// stay locked regardless.
+const SENSITIVE_PATH = /^\/api\/(diag\/|interpret$|netsuite-customers$|netsuite-transactions$)/;
+app.use((req, res, next) => {
+  if (basicAuthEnabled) return next();
+  if (SENSITIVE_PATH.test(req.path)) {
+    return res.status(403).json({
+      error: 'This endpoint requires Basic auth. Set APP_USERNAME + APP_PASSWORD to enable it.',
+    });
+  }
+  next();
 });
 
 app.use(express.static(path.join(__dirname, 'dashboard/dist')));
@@ -140,16 +176,21 @@ function sanitizeScalar(raw, { maxLen = 100 } = {}) {
 // detrended lead-lag values derived from the netsuite_daily + ga4_daily
 // tables. RF Traction overlays these on the scorecard charts whose
 // raw bars come from RF-DSOATD. Bearer-token auth keeps it scoped to
-// the configured consumer; an unset TRAFFIC_INTEL_API_KEY disables
-// the gate (dev-only).
+// the configured consumer; the endpoint is disabled until
+// TRAFFIC_INTEL_API_KEY is set so it is never silently open.
 app.get('/api/traction/scorecard-summary', async (req, res) => {
   const expectedKey = process.env.TRAFFIC_INTEL_API_KEY;
-  if (expectedKey) {
-    const header = req.get('Authorization') || '';
-    const match = /^Bearer\s+(.+)$/i.exec(header);
-    if (!match || match[1] !== expectedKey) {
-      return res.status(401).json({ error: 'unauthorized' });
-    }
+  if (!expectedKey) {
+    return res.status(503).json({ error: 'TRAFFIC_INTEL_API_KEY not configured' });
+  }
+  const header = req.get('Authorization') || '';
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  const supplied = match ? match[1] : '';
+  const ok =
+    Buffer.byteLength(supplied) === Buffer.byteLength(expectedKey) &&
+    crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expectedKey));
+  if (!ok) {
+    return res.status(401).json({ error: 'unauthorized' });
   }
   if (!hasDB) {
     return res.status(503).json({ error: 'Database not configured' });
