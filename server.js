@@ -109,7 +109,8 @@ let startupReady = !process.env.DATABASE_URL;
 app.use((req, res, next) => {
   if (startupReady) return next();
   if (!req.path.startsWith('/api/')) return next();
-  if (req.path === '/api/health' || req.path.startsWith('/api/refresh/')) return next();
+  if (req.path === '/api/health' || req.path === '/api/refresh-status' ||
+      req.path.startsWith('/api/refresh/')) return next();
   res.set('Retry-After', '15');
   res.status(503).json({ error: 'Initial data backfill in progress; retry shortly.' });
 });
@@ -379,6 +380,50 @@ app.get('/api/health', async (req, res) => {
     callRailCreds: hasCallRail ? 'configured' : 'missing',
     cacheFiles: fs.existsSync(CACHE_DIR) ? fs.readdirSync(CACHE_DIR).filter(f => f.endsWith('.json')) : [],
   });
+});
+
+// Last run per source from fetch_log — powers the dashboard's data-freshness
+// strip. A source whose last success is older than staleAfterHours gets
+// stale:true so the UI can flag it.
+app.get('/api/fetch-health', async (req, res) => {
+  if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
+  const staleAfterHours = 48;
+  try {
+    const { getFetchHealth } = await import('./db.js');
+    const sources = await getFetchHealth();
+    const now = Date.now();
+    res.json({
+      generated: new Date().toISOString(),
+      stale_after_hours: staleAfterHours,
+      sources: sources.map(s => ({
+        ...s,
+        stale: s.finished_at
+          ? (now - new Date(s.finished_at).getTime()) > staleAfterHours * 3600 * 1000
+          : true,
+      })),
+    });
+  } catch (e) {
+    console.error('fetch-health error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Real min/max data dates per source — feeds the year picker.
+app.get('/api/meta/date-range', async (req, res) => {
+  if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const { getDataDateRange } = await import('./db.js');
+    res.json(await getDataDateRange());
+  } catch (e) {
+    console.error('meta/date-range error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Which fetches are currently running (the withFetchLock set) — lets the UI
+// poll after POST /api/refresh/* instead of guessing with a fixed delay.
+app.get('/api/refresh-status', (req, res) => {
+  res.json({ running: [...runningFetches], startupReady });
 });
 
 // Main data endpoint — reads from DB first, falls back to JSON cache
@@ -1740,6 +1785,42 @@ app.get('/api/insights/campaign-roas', async (req, res) => {
     res.json({ generated: new Date().toISOString(), since, until, campaigns });
   } catch (e) {
     console.error('insights/campaign-roas error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Cohort ROAS — spend in window vs the lifetime downstream revenue of the
+// contacts acquired in that window. The honest pairing for a long B2B cycle;
+// the windowed campaign-roas above compares mismatched periods by design.
+app.get('/api/insights/campaign-roas-cohort', async (req, res) => {
+  if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  const since = iso.test(req.query.since) ? req.query.since : null;
+  const until = iso.test(req.query.until) ? req.query.until : null;
+  try {
+    const { getCampaignRoasCohort } = await import('./db.js');
+    const campaigns = await getCampaignRoasCohort({ since, until });
+    res.json({ generated: new Date().toISOString(), since, until, campaigns });
+  } catch (e) {
+    console.error('insights/campaign-roas-cohort error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Click-to-quote lag distribution — how long after acquisition quotes arrive.
+// ?paid_only=true restricts to first-touch paid-search contacts.
+app.get('/api/insights/quote-lag-histogram', async (req, res) => {
+  if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  const since = iso.test(req.query.since) ? req.query.since : null;
+  const until = iso.test(req.query.until) ? req.query.until : null;
+  const paidOnly = req.query.paid_only === 'true';
+  try {
+    const { getQuoteLagHistogram } = await import('./db.js');
+    const result = await getQuoteLagHistogram({ since, until, paidOnly });
+    res.json({ generated: new Date().toISOString(), since, until, paid_only: paidOnly, ...result });
+  } catch (e) {
+    console.error('insights/quote-lag-histogram error:', e);
     res.status(500).json({ error: e.message });
   }
 });

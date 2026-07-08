@@ -48,6 +48,11 @@ export async function initDB() {
       error TEXT
     )
   `);
+  // Which source the run belonged to ('' on legacy rows written before the
+  // column existed). Every source now logs here — see logFetch callers in
+  // server.js — so /api/fetch-health can show last-sync per source.
+  await p.query(`ALTER TABLE fetch_log ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT ''`);
+  await p.query(`CREATE INDEX IF NOT EXISTS idx_fetch_log_source ON fetch_log(source, finished_at DESC)`);
 
   // Auto-migrate: if the dim table exists without the size_bucket or is_first
   // columns, drop it so the new schema gets created below. An empty dim table
@@ -840,12 +845,12 @@ export async function getRowCount() {
   return parseInt(rows[0].cnt, 10);
 }
 
-export async function logFetch(status, rowsUpserted, error) {
+export async function logFetch(source, status, rowsUpserted = 0, error = null, startedAt = null) {
   const p = getPool();
   await p.query(`
-    INSERT INTO fetch_log (finished_at, status, rows_upserted, error)
-    VALUES (NOW(), $1, $2, $3)
-  `, [status, rowsUpserted, error]);
+    INSERT INTO fetch_log (source, started_at, finished_at, status, rows_upserted, error)
+    VALUES ($1, COALESCE($5, NOW()), NOW(), $2, $3, $4)
+  `, [source, status, rowsUpserted, error, startedAt]);
 }
 
 /**
@@ -2198,6 +2203,63 @@ const CONTACTS_ONE_PER_EMAIL = `
   ORDER BY email_normalized, created_at ASC NULLS LAST, contact_id
 `;
 
+// Consumer mailbox providers — a shared domain here means two unrelated
+// people, so the domain-fallback lane must never match on these. Corporate
+// domains, by contrast, identify the company: the engineer clicks the ad,
+// purchasing requests the quote, both @acme.com.
+const FREEMAIL_DOMAINS_SQL = `(
+  'gmail.com','yahoo.com','hotmail.com','outlook.com','aol.com','icloud.com',
+  'msn.com','live.com','comcast.net','att.net','verizon.net','protonmail.com',
+  'proton.me','mail.com','ymail.com','bellsouth.net','sbcglobal.net','me.com',
+  'mac.com','gmx.com','zoho.com','yandex.com','charter.net','cox.net',
+  'earthlink.net','frontier.com','windstream.net','optonline.net','juno.com',
+  'roadrunner.com','netzero.net'
+)`;
+
+// First-touch paid-search contacts, one per email (earliest wins) — the
+// campaign that acquired each address. Shared by every ROAS query.
+const PAID_CONTACTS_CTE = `
+      SELECT DISTINCT ON (email_normalized)
+             contact_id, email_normalized, created_at,
+             lower(btrim(hs_analytics_source_data_1)) as camp_key
+      FROM hubspot_contacts
+      WHERE hs_analytics_source = 'PAID_SEARCH'
+        AND NULLIF(hs_analytics_source_data_1, '') IS NOT NULL
+        AND email_normalized IS NOT NULL
+      ORDER BY email_normalized, created_at ASC NULLS LAST, contact_id
+`;
+
+// Same population keyed by corporate email domain, one per domain — the
+// fallback lane for B2B quotes that go to a different person (purchasing)
+// than the one who clicked (engineering) at the same company.
+const PAID_DOMAIN_CTE = `
+      SELECT DISTINCT ON (domain) contact_id, domain, created_at, camp_key
+      FROM (
+        SELECT contact_id, created_at,
+               split_part(email_normalized, '@', 2) as domain,
+               lower(btrim(hs_analytics_source_data_1)) as camp_key
+        FROM hubspot_contacts
+        WHERE hs_analytics_source = 'PAID_SEARCH'
+          AND NULLIF(hs_analytics_source_data_1, '') IS NOT NULL
+          AND email_normalized IS NOT NULL
+      ) x
+      WHERE domain <> '' AND domain NOT IN ${FREEMAIL_DOMAINS_SQL}
+      ORDER BY domain, created_at ASC NULLS LAST, contact_id
+`;
+
+// All contacts (any source), one per corporate domain — the domain-fallback
+// lane for source attribution. Built on the per-email dedup so a duplicated
+// contact can't win the domain slot either.
+const CONTACTS_ONE_PER_DOMAIN = `
+  SELECT DISTINCT ON (domain) *
+  FROM (
+    SELECT e.*, split_part(e.email_normalized, '@', 2) as domain
+    FROM (${CONTACTS_ONE_PER_EMAIL}) e
+  ) x
+  WHERE domain <> '' AND domain NOT IN ${FREEMAIL_DOMAINS_SQL}
+  ORDER BY domain, created_at ASC NULLS LAST, contact_id
+`;
+
 // The date a quote counts as won. won_detected_at is stamped when a sync
 // observes the status flip to won; rows that were already won when first
 // mirrored (or won before the column existed) fall back to the quote's
@@ -2484,7 +2546,17 @@ function hsCampaignDrilldownSql(column) {
 // revenue is unattributed and drill in.
 export async function getCrossSourceLeadSourceRevenue({ since = null, until = null, column = 'hs_analytics_source' } = {}) {
   const p = getPool();
-  const sourceCol = hsSourceBucketSql(column);
+  // Source bucket expression: for HubSpot lenses, prefer the exact-email
+  // contact and fall back to the corporate-domain contact; the NetSuite lens
+  // reads off the quote itself (no contact join needed).
+  let sourceCol;
+  if (column === 'netsuite') {
+    sourceCol = `COALESCE(NULLIF(q.ns_lead_source, ''), '(UNKNOWN)')`;
+  } else {
+    const allowed = new Set(['hs_analytics_source', 'hs_latest_source']);
+    if (!allowed.has(column)) throw new Error(`Invalid attribution column: ${column}`);
+    sourceCol = `COALESCE(NULLIF(he.${column}, ''), NULLIF(hd.${column}, ''), '(UNKNOWN)')`;
+  }
   const params = [];
   const dateConds = [];
   // Quote's own `created_at` is when the NetSuite quote was created
@@ -2501,17 +2573,22 @@ export async function getCrossSourceLeadSourceRevenue({ since = null, until = nu
         q.status,
         q.parts_group,
         q.created_at,
-        hc.contact_id,
+        COALESCE(he.contact_id, hd.contact_id) as contact_id,
+        (he.contact_id IS NULL AND hd.contact_id IS NOT NULL) as via_domain,
         ${sourceCol} as hs_source
       FROM hubspot_netsuite_quotes q
-      LEFT JOIN (${CONTACTS_ONE_PER_EMAIL}) hc
-        ON hc.email_normalized = q.email_normalized
+      LEFT JOIN (${CONTACTS_ONE_PER_EMAIL}) he
+        ON he.email_normalized = q.email_normalized
+      LEFT JOIN (${CONTACTS_ONE_PER_DOMAIN}) hd
+        ON he.contact_id IS NULL
+       AND hd.domain = split_part(q.email_normalized, '@', 2)
       ${dateWhere}
     )
     SELECT
       hs_source,
       COUNT(*)::int                                                                       as quotes,
       COUNT(DISTINCT contact_id) FILTER (WHERE contact_id IS NOT NULL)::int               as contacts,
+      COUNT(*) FILTER (WHERE via_domain)::int                                             as quotes_domain_matched,
       SUM(total)::float                                                                    as revenue,
       COUNT(*) FILTER (WHERE status ILIKE '%won%')::int                                    as wins,
       SUM(total) FILTER (WHERE status ILIKE '%won%')::float                                as revenue_won,
@@ -2653,6 +2730,7 @@ export async function getPartGroupRoasFromHubSpot({ since = null, until = null }
   }
   const adsWhere = adsDateConds.length ? `WHERE ${adsDateConds.join(' AND ')}` : '';
   const qWhere   = qDateConds.length   ? `WHERE ${qDateConds.join(' AND ')}`   : '';
+  const qAnd     = qDateConds.length   ? `AND ${qDateConds.join(' AND ')}`     : '';
   // Canonicalize part-group names so revenue and cost land on the same ROAS
   // row. "Spill Containment" and "Next Gen Spill Containment" are one product
   // line for ROAS (per RubberForm), so both collapse to "Spill Containment".
@@ -2672,30 +2750,33 @@ export async function getPartGroupRoasFromHubSpot({ since = null, until = null }
       ${adsWhere}
       GROUP BY 1
     ),
-    -- One paid contact per email (earliest wins): duplicate HubSpot
-    -- contacts sharing an address would otherwise credit the same quote's
-    -- revenue to every duplicate's campaign.
-    paid_contacts AS (
-      SELECT DISTINCT ON (email_normalized)
-             contact_id, email_normalized,
-             lower(btrim(hs_analytics_source_data_1)) as camp_key
-      FROM hubspot_contacts
-      WHERE hs_analytics_source = 'PAID_SEARCH'
-        AND NULLIF(hs_analytics_source_data_1, '') IS NOT NULL
-        AND email_normalized IS NOT NULL
-      ORDER BY email_normalized, created_at ASC NULLS LAST, contact_id
+    paid_contacts AS (${PAID_CONTACTS_CTE}),
+    paid_domain AS (${PAID_DOMAIN_CTE}),
+    -- Quotes attributable to paid search: exact email match first, corporate-
+    -- domain fallback second (same company, different person). One shared
+    -- population drives both the allocation weights and the ROAS numerator.
+    paid_quotes AS (
+      SELECT COALESCE(pe.camp_key, pd.camp_key)                    as camp_key,
+             ${canon(`COALESCE(NULLIF(q.parts_group, ''), '(none)')`)} as part_group,
+             q.total::float                                        as total,
+             q.status
+      FROM hubspot_netsuite_quotes q
+      LEFT JOIN paid_contacts pe
+        ON pe.email_normalized = q.email_normalized
+      LEFT JOIN paid_domain pd
+        ON pe.contact_id IS NULL
+       AND pd.domain = split_part(q.email_normalized, '@', 2)
+      WHERE COALESCE(pe.contact_id, pd.contact_id) IS NOT NULL
+        ${qAnd}
     ),
     -- Per (campaign, part-group): quote + won-quote counts from the quotes of
     -- the contacts that campaign acquired. This is the allocation basis.
     campaign_pg AS (
-      SELECT pc.camp_key,
-             ${canon(`COALESCE(NULLIF(q.parts_group, ''), '(none)')`)} as part_group,
-             COUNT(*)::float                                       as quotes,
-             COUNT(*) FILTER (WHERE q.status ILIKE '%won%')::float as wins
-      FROM paid_contacts pc
-      JOIN hubspot_netsuite_quotes q
-        ON q.email_normalized = pc.email_normalized
-      ${qWhere}
+      SELECT camp_key,
+             part_group,
+             COUNT(*)::float                                     as quotes,
+             COUNT(*) FILTER (WHERE status ILIKE '%won%')::float as wins
+      FROM paid_quotes
       GROUP BY 1, 2
     ),
     campaign_tot AS (
@@ -2754,15 +2835,12 @@ export async function getPartGroupRoasFromHubSpot({ since = null, until = null }
     -- population whose part-group mix drives the cost allocation above.
     paid_revenue_by_partgroup AS (
       SELECT
-        ${canon(`COALESCE(NULLIF(q.parts_group, ''), '(none)')`)} as part_group,
+        part_group,
         COUNT(*)::int                                     as quotes_paid,
-        SUM(q.total)::float                               as revenue_paid,
-        COUNT(*) FILTER (WHERE q.status ILIKE '%won%')::int as quotes_won_paid,
-        SUM(q.total) FILTER (WHERE q.status ILIKE '%won%')::float as revenue_won_paid
-      FROM paid_contacts pc
-      JOIN hubspot_netsuite_quotes q
-        ON q.email_normalized = pc.email_normalized
-      ${qWhere}
+        SUM(total)::float                                 as revenue_paid,
+        COUNT(*) FILTER (WHERE status ILIKE '%won%')::int as quotes_won_paid,
+        SUM(total) FILTER (WHERE status ILIKE '%won%')::float as revenue_won_paid
+      FROM paid_quotes
       GROUP BY 1
     )
     SELECT
@@ -2840,33 +2918,31 @@ export async function getCampaignRoasViaContacts({ since = null, until = null } 
       ${adsWhere}
       GROUP BY 1
     ),
-    -- One paid contact per email (earliest wins): duplicate HubSpot
-    -- contacts sharing an address would otherwise credit the same quote's
-    -- revenue to every duplicate's campaign.
-    paid_contacts AS (
-      SELECT DISTINCT ON (email_normalized)
-             contact_id, email_normalized,
-             lower(btrim(hs_analytics_source_data_1)) as camp_key
-      FROM hubspot_contacts
-      WHERE hs_analytics_source = 'PAID_SEARCH'
-        AND NULLIF(hs_analytics_source_data_1, '') IS NOT NULL
-        AND email_normalized IS NOT NULL
-      ORDER BY email_normalized, created_at ASC NULLS LAST, contact_id
-    ),
+    paid_contacts AS (${PAID_CONTACTS_CTE}),
+    paid_domain AS (${PAID_DOMAIN_CTE}),
+    -- Exact email match first; corporate-domain fallback second (purchasing
+    -- requests the quote, engineering clicked the ad — same company). Free
+    -- mailbox domains are excluded from the fallback (see FREEMAIL list).
     quotes_j AS (
-      SELECT pc.camp_key,
+      SELECT COALESCE(pe.camp_key, pd.camp_key)       as camp_key,
              q.quote_object_id, q.total::float as total, q.status,
              COALESCE(NULLIF(q.parts_group, ''), '(none)') as parts_group,
-             pc.contact_id
-      FROM paid_contacts pc
-      JOIN hubspot_netsuite_quotes q
-        ON q.email_normalized = pc.email_normalized
+             COALESCE(pe.contact_id, pd.contact_id)   as contact_id,
+             (pe.contact_id IS NULL)                  as via_domain
+      FROM hubspot_netsuite_quotes q
+      LEFT JOIN paid_contacts pe
+        ON pe.email_normalized = q.email_normalized
+      LEFT JOIN paid_domain pd
+        ON pe.contact_id IS NULL
+       AND pd.domain = split_part(q.email_normalized, '@', 2)
+      WHERE COALESCE(pe.contact_id, pd.contact_id) IS NOT NULL
         ${qWhere}
     ),
     rev AS (
       SELECT camp_key,
              COUNT(DISTINCT contact_id)::int                          as leads,
              COUNT(*)::int                                            as quotes,
+             COUNT(*) FILTER (WHERE via_domain)::int                  as quotes_domain_matched,
              SUM(total)::float                                        as revenue,
              COUNT(*) FILTER (WHERE status ILIKE '%won%')::int        as quotes_won,
              SUM(total) FILTER (WHERE status ILIKE '%won%')::float    as revenue_won
@@ -2899,6 +2975,7 @@ export async function getCampaignRoasViaContacts({ since = null, until = null } 
       COALESCE(a.impressions, 0)             as impressions,
       COALESCE(r.leads, 0)                   as leads,
       COALESCE(r.quotes, 0)                  as quotes,
+      COALESCE(r.quotes_domain_matched, 0)   as quotes_domain_matched,
       COALESCE(r.revenue, 0)                 as revenue,
       COALESCE(r.quotes_won, 0)              as quotes_won,
       COALESCE(r.revenue_won, 0)             as revenue_won,
@@ -2915,6 +2992,212 @@ export async function getCampaignRoasViaContacts({ since = null, until = null } 
   `;
   const { rows } = await p.query(sql, params);
   return rows;
+}
+
+// Cohort ROAS: spend in [since, until] vs the LIFETIME downstream revenue of
+// the contacts acquired (created) in that same window. This is the honest
+// pairing for a 30–90-day B2B cycle — the windowed ROAS above divides this
+// month's spend by revenue from leads acquired possibly years ago, and
+// excludes revenue this month's leads will quote next month. Here, spend and
+// leads belong to the same cohort; their quotes are counted whenever they
+// happen (from contact creation up to now).
+export async function getCampaignRoasCohort({ since = null, until = null } = {}) {
+  const p = getPool();
+  const params = [];
+  const adsConds = [];
+  const cohortConds = [];
+  if (since) {
+    params.push(since);
+    adsConds.push(`date >= $${params.length}::date`);
+    cohortConds.push(`pc.created_at >= $${params.length}::date`);
+  }
+  if (until) {
+    params.push(until);
+    adsConds.push(`date <= $${params.length}::date`);
+    cohortConds.push(`pc.created_at < $${params.length}::date + INTERVAL '1 day'`);
+  }
+  const adsWhere    = adsConds.length    ? `WHERE ${adsConds.join(' AND ')}`   : '';
+  const cohortWhere = cohortConds.length ? `WHERE ${cohortConds.join(' AND ')}` : '';
+  const sql = `
+    WITH ads AS (
+      SELECT lower(btrim(campaign_name))  as camp_key,
+             MAX(campaign_name)           as campaign_name,
+             SUM(cost)::float             as cost,
+             SUM(clicks)::int             as clicks,
+             SUM(impressions)::int        as impressions
+      FROM google_ads_daily_by_campaign
+      ${adsWhere}
+      GROUP BY 1
+    ),
+    all_paid AS (${PAID_CONTACTS_CTE}),
+    cohort AS (
+      SELECT * FROM all_paid pc ${cohortWhere}
+    ),
+    -- Every quote a cohort contact ever produced from their creation onward —
+    -- no upper date bound; the cohort's revenue matures over time.
+    quotes_j AS (
+      SELECT pc.camp_key, pc.contact_id,
+             q.total::float as total, q.status,
+             GREATEST(0, (q.created_at::date - pc.created_at::date))::int as days_to_quote
+      FROM cohort pc
+      JOIN hubspot_netsuite_quotes q
+        ON q.email_normalized = pc.email_normalized
+       AND q.created_at >= pc.created_at - INTERVAL '1 day'
+    ),
+    rev AS (
+      SELECT camp_key,
+             COUNT(DISTINCT contact_id)::int                        as converting_leads,
+             COUNT(*)::int                                          as quotes,
+             SUM(total)::float                                      as revenue,
+             COUNT(*) FILTER (WHERE status ILIKE '%won%')::int      as quotes_won,
+             SUM(total) FILTER (WHERE status ILIKE '%won%')::float  as revenue_won,
+             AVG(days_to_quote)::float                              as avg_days_to_quote
+      FROM quotes_j
+      GROUP BY camp_key
+    ),
+    leads AS (
+      SELECT camp_key, COUNT(*)::int as leads
+      FROM cohort GROUP BY camp_key
+    )
+    SELECT
+      COALESCE(a.campaign_name, l.camp_key, r.camp_key) as campaign,
+      COALESCE(a.cost, 0)                    as cost,
+      COALESCE(a.clicks, 0)                  as clicks,
+      COALESCE(a.impressions, 0)             as impressions,
+      COALESCE(l.leads, 0)                   as leads,
+      COALESCE(r.converting_leads, 0)        as converting_leads,
+      COALESCE(r.quotes, 0)                  as quotes,
+      COALESCE(r.revenue, 0)                 as revenue,
+      COALESCE(r.quotes_won, 0)              as quotes_won,
+      COALESCE(r.revenue_won, 0)             as revenue_won,
+      r.avg_days_to_quote,
+      CASE WHEN COALESCE(a.cost, 0) > 0
+        THEN COALESCE(r.revenue, 0)     / a.cost ELSE NULL END as roas,
+      CASE WHEN COALESCE(a.cost, 0) > 0
+        THEN COALESCE(r.revenue_won, 0) / a.cost ELSE NULL END as roas_won,
+      CASE WHEN COALESCE(l.leads, 0) > 0
+        THEN COALESCE(a.cost, 0) / l.leads ELSE NULL END       as cost_per_lead
+    FROM ads a
+    FULL OUTER JOIN leads l ON l.camp_key = a.camp_key
+    FULL OUTER JOIN rev   r ON r.camp_key = COALESCE(a.camp_key, l.camp_key)
+    ORDER BY cost DESC NULLS LAST, revenue DESC NULLS LAST
+  `;
+  const { rows } = await p.query(sql, params);
+  return rows;
+}
+
+// Click-to-quote lag distribution: how long after a contact is created do
+// their quotes arrive? This is what makes windowed/first-touch ROAS
+// interpretable — if the median lag is 45 days, a 30-day ROAS window is
+// structurally blind to most of its own return.
+export async function getQuoteLagHistogram({ since = null, until = null, paidOnly = false } = {}) {
+  const p = getPool();
+  const params = [];
+  const conds = [`q.created_at IS NOT NULL`, `hc.created_at IS NOT NULL`,
+                 `q.created_at >= hc.created_at - INTERVAL '1 day'`];
+  if (since) { params.push(since); conds.push(`q.created_at >= $${params.length}::date`); }
+  if (until) { params.push(until); conds.push(`q.created_at < $${params.length}::date + INTERVAL '1 day'`); }
+  if (paidOnly) conds.push(`hc.hs_analytics_source = 'PAID_SEARCH'`);
+  const sql = `
+    WITH matched AS (
+      SELECT
+        q.total::float as total,
+        q.status,
+        GREATEST(0, (q.created_at::date - hc.created_at::date))::int as lag_days
+      FROM hubspot_netsuite_quotes q
+      JOIN (${CONTACTS_ONE_PER_EMAIL}) hc
+        ON hc.email_normalized = q.email_normalized
+      WHERE ${conds.join(' AND ')}
+    ),
+    bucketed AS (
+      SELECT
+        CASE
+          WHEN lag_days <= 7   THEN 0
+          WHEN lag_days <= 14  THEN 1
+          WHEN lag_days <= 30  THEN 2
+          WHEN lag_days <= 60  THEN 3
+          WHEN lag_days <= 90  THEN 4
+          WHEN lag_days <= 180 THEN 5
+          WHEN lag_days <= 365 THEN 6
+          ELSE 7
+        END as bucket_order,
+        CASE
+          WHEN lag_days <= 7   THEN '0–7d'
+          WHEN lag_days <= 14  THEN '8–14d'
+          WHEN lag_days <= 30  THEN '15–30d'
+          WHEN lag_days <= 60  THEN '31–60d'
+          WHEN lag_days <= 90  THEN '61–90d'
+          WHEN lag_days <= 180 THEN '91–180d'
+          WHEN lag_days <= 365 THEN '181–365d'
+          ELSE '365d+'
+        END as bucket,
+        total, status, lag_days
+      FROM matched
+    )
+    SELECT
+      bucket,
+      bucket_order,
+      COUNT(*)::int                                          as quotes,
+      SUM(total)::float                                      as revenue,
+      COUNT(*) FILTER (WHERE status ILIKE '%won%')::int      as quotes_won,
+      SUM(total) FILTER (WHERE status ILIKE '%won%')::float  as revenue_won
+    FROM bucketed
+    GROUP BY bucket, bucket_order
+    ORDER BY bucket_order
+  `;
+  const { rows: buckets } = await p.query(sql, params);
+  const { rows: [stats] } = await p.query(`
+    SELECT
+      COUNT(*)::int as quotes,
+      PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY GREATEST(0, (q.created_at::date - hc.created_at::date)))::float as median_days,
+      AVG(GREATEST(0, (q.created_at::date - hc.created_at::date)))::float as avg_days
+    FROM hubspot_netsuite_quotes q
+    JOIN (${CONTACTS_ONE_PER_EMAIL}) hc
+      ON hc.email_normalized = q.email_normalized
+    WHERE ${conds.join(' AND ')}
+  `, params);
+  return { buckets, ...stats };
+}
+
+// Last outcome per source from fetch_log — the "is my data fresh?" strip.
+export async function getFetchHealth() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT DISTINCT ON (source)
+      source,
+      started_at,
+      finished_at,
+      status,
+      rows_upserted,
+      error
+    FROM fetch_log
+    WHERE source <> ''
+    ORDER BY source, finished_at DESC NULLS LAST, id DESC
+  `);
+  return rows;
+}
+
+// Real min/max data dates per source — feeds the dashboard's year picker so
+// it offers years that actually exist instead of a fabricated range.
+export async function getDataDateRange() {
+  const p = getPool();
+  const { rows: [row] } = await p.query(`
+    SELECT
+      (SELECT MIN(date) FROM netsuite_daily)                 as netsuite_min,
+      (SELECT MAX(date) FROM netsuite_daily)                 as netsuite_max,
+      (SELECT MIN(date) FROM ga4_daily)                      as ga4_min,
+      (SELECT MAX(date) FROM ga4_daily)                      as ga4_max,
+      (SELECT MIN(date) FROM google_ads_daily_by_campaign)   as ads_min,
+      (SELECT MAX(date) FROM google_ads_daily_by_campaign)   as ads_max,
+      (SELECT MIN(date) FROM gsc_daily)                      as gsc_min,
+      (SELECT MAX(date) FROM gsc_daily)                      as gsc_max
+  `);
+  const dates = Object.values(row).filter(Boolean).map(d => d.toISOString().slice(0, 10));
+  return {
+    ...Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v ? v.toISOString().slice(0, 10) : null])),
+    min_date: dates.length ? dates.reduce((a, b) => (a < b ? a : b)) : null,
+    max_date: dates.length ? dates.reduce((a, b) => (a > b ? a : b)) : null,
+  };
 }
 
 // ── Google Search Console helpers ────────────────────────────────────

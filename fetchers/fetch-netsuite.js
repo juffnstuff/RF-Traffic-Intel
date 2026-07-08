@@ -301,10 +301,10 @@ export async function fetchNetSuite({ since = null } = {}) {
     const { upsertDailyRows, logFetch } = await import('../db.js');
     try {
       const upserted = await upsertDailyRows(daily);
-      await logFetch('success', upserted, null);
+      await logFetch('netsuite', 'success', upserted, null);
       console.log(`✅  Upserted ${upserted} rows into PostgreSQL`);
     } catch (e) {
-      await logFetch('error', 0, e.message).catch(() => {});
+      await logFetch('netsuite', 'error', 0, e.message).catch(() => {});
       throw e;
     }
   }
