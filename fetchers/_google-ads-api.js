@@ -36,7 +36,25 @@ export async function fetchWithRetry(url, init, label) {
     const retriable = res.status === 429 || (res.status >= 500 && res.status < 600);
     if (!retriable || attempt >= MAX_ATTEMPTS - 1) {
       const body = await res.text().catch(() => '');
-      throw new Error(`${label} HTTP ${res.status}: ${body.slice(0, 400)}`);
+      // Surface the actual GoogleAdsFailure reason instead of the raw JSON
+      // envelope — the envelope truncates before the useful part.
+      let reason = '';
+      try {
+        const parsed = JSON.parse(body);
+        const nodes = Array.isArray(parsed) ? parsed : [parsed];
+        const msgs = [];
+        for (const n of nodes) {
+          for (const d of (n.error?.details || [])) {
+            for (const e of (d.errors || [])) {
+              const code = e.errorCode ? Object.entries(e.errorCode).map(([k, v]) => `${k}=${v}`).join(',') : '';
+              msgs.push(`${code}${code && e.message ? ': ' : ''}${e.message || ''}`);
+            }
+          }
+          if (!msgs.length && n.error?.message) msgs.push(n.error.message);
+        }
+        reason = msgs.slice(0, 3).join(' | ');
+      } catch { /* not JSON — fall through to raw slice */ }
+      throw new Error(`${label} HTTP ${res.status}: ${reason || body.slice(0, 400)}`);
     }
     const waitMs = Math.min(30000, 1000 * (2 ** attempt) + Math.floor(Math.random() * 500));
     console.log(`    ⏳ ${label} HTTP ${res.status}; retrying in ${Math.round(waitMs / 1000)}s (${attempt + 1}/${MAX_ATTEMPTS})`);
