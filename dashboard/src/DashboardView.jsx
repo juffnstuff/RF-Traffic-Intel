@@ -69,15 +69,19 @@ function TrendArrow({ slope, size = 12 }) {
  *   ma30, ma90       raw numeric DMAs — used to derive growth vs contracting
  *   slope30, slope90 7-day linear-regression slopes — sign drives arrows
  *   formatter        function used to format ma90 inline
+ *   invert           for lower-is-better metrics (e.g. GSC avg position):
+ *                    flips the badge to Improving/Worsening with the colors
+ *                    keyed to "lower = good"
  *
  * Without those, the card renders the legacy label/value/sub/small layout.
  */
 export function StatCard({
   label, value, sub, small,
-  ma30, ma90, slope30, slope90, formatter,
+  ma30, ma90, slope30, slope90, formatter, invert = false,
 }) {
   const hasCompare = ma30 != null && ma90 != null;
   const growth = hasCompare ? ma30 > ma90 : null;
+  const good = hasCompare ? (invert ? !growth : growth) : null;
   const showTrendRow = slope30 != null || slope90 != null || hasCompare || ma90 != null;
   return (
     <div style={{
@@ -124,14 +128,14 @@ export function StatCard({
           {slope90 !== undefined && <TrendArrow slope={slope90} size={11} />}
           {hasCompare && (
             <span style={{
-              color: growth ? '#22c55e' : '#ef4444',
+              color: good ? '#22c55e' : '#ef4444',
               fontFamily: "var(--dso-font-heading, 'Oswald', sans-serif)",
               fontSize: 10,
               fontWeight: 700,
               letterSpacing: '0.12em',
               textTransform: 'uppercase',
             }}>
-              · {growth ? 'Growing' : 'Contracting'}
+              · {invert ? (good ? 'Improving' : 'Worsening') : (growth ? 'Growing' : 'Contracting')}
             </span>
           )}
         </div>
@@ -558,6 +562,7 @@ export default function DashboardView({
   subtitle = null,
   onRefresh,
   refreshing = false,
+  refreshError = null,               // optional — inline error from the parent's refresh flow
   sourceLabel = '',
   aiContext = { page: 'overview' },   // { page, filters? } — metadata for the interpret call
   onClearFilters,                      // optional — parent callback for additional state to clear
@@ -700,18 +705,20 @@ export default function DashboardView({
 
   const chartData = useMemo(() => {
     if (!fullSeries.length) return [];
+    // Trim today's still-in-progress row here (not just inside DMALineChart)
+    // so the KPI tiles' summary / period totals / slopes agree with the charts.
     if (selectedYears.length > 0) {
       const ySet = new Set(selectedYears);
-      return fullSeries.filter(d => ySet.has(d.date.slice(0, 4)));
+      return trimToYesterday(fullSeries.filter(d => ySet.has(d.date.slice(0, 4))));
     }
-    if (range === 'all') return fullSeries;
+    if (range === 'all') return trimToYesterday(fullSeries);
     if (RELATIVE_RANGES[range]) {
       const cutoff = new Date();
       cutoff.setDate(cutoff.getDate() - RELATIVE_RANGES[range]);
       const cutStr = cutoff.toISOString().slice(0, 10);
-      return fullSeries.filter(d => d.date >= cutStr);
+      return trimToYesterday(fullSeries.filter(d => d.date >= cutStr));
     }
-    return fullSeries;
+    return trimToYesterday(fullSeries);
   }, [fullSeries, range, selectedYears]);
 
   const summary = useMemo(() => {
@@ -929,11 +936,11 @@ export default function DashboardView({
         orders_to_shipped_dollars: leadLagResults.ordersToShippedDollars
           ? { best_lag_days: leadLagResults.ordersToShippedDollars.bestLag, r: +leadLagResults.ordersToShippedDollars.bestR.toFixed(3) }
           : null,
-        sessions_to_quotes_count: leadLagResults.sessionsToQuotesCount
-          ? { best_lag_days: leadLagResults.sessionsToQuotesCount.bestLag, r: +leadLagResults.sessionsToQuotesCount.bestR.toFixed(3) }
+        engaged_sessions_to_quotes_count: leadLagResults.engagedToQuotesCount
+          ? { best_lag_days: leadLagResults.engagedToQuotesCount.bestLag, r: +leadLagResults.engagedToQuotesCount.bestR.toFixed(3) }
           : null,
-        sessions_to_quotes_dollars: leadLagResults.sessionsToQuotesDollars
-          ? { best_lag_days: leadLagResults.sessionsToQuotesDollars.bestLag, r: +leadLagResults.sessionsToQuotesDollars.bestR.toFixed(3) }
+        engaged_sessions_to_quotes_dollars: leadLagResults.engagedToQuotesDollars
+          ? { best_lag_days: leadLagResults.engagedToQuotesDollars.bestLag, r: +leadLagResults.engagedToQuotesDollars.bestR.toFixed(3) }
           : null,
         conversions_to_quotes_count: leadLagResults.conversionsToQuotesCount
           ? { best_lag_days: leadLagResults.conversionsToQuotesCount.bestLag, r: +leadLagResults.conversionsToQuotesCount.bestR.toFixed(3) }
@@ -1056,6 +1063,9 @@ export default function DashboardView({
               }}>
                 Full Backfill
               </button>
+              {refreshError && (
+                <span style={{ color: '#f87171', fontSize: 11, maxWidth: 360 }}>{refreshError}</span>
+              )}
             </>
           )}
         </div>

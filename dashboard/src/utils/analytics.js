@@ -8,16 +8,23 @@
  * Uses a partial window at the start of the series (mean of 0..i) so that
  * the MA has a value from day 1 rather than blank for the first `window-1` days.
  * Once enough history exists, it becomes a full trailing `window` average.
- * @param {number[]} values - raw data points
+ * Null/undefined/NaN values are skipped (the mean is taken over the non-null
+ * values in the window); returns null when the window has no valid values.
+ * @param {(number|null)[]} values - raw data points
  * @param {number} window - max number of periods
  * @returns {(number|null)[]} MA values
  */
 export function movingAverage(values, window) {
   return values.map((_, i) => {
     const start = Math.max(0, i - window + 1);
-    const slice = values.slice(start, i + 1);
-    if (slice.length === 0) return null;
-    return slice.reduce((a, b) => a + b, 0) / slice.length;
+    let sum = 0, n = 0;
+    for (let j = start; j <= i; j++) {
+      const v = values[j];
+      if (v == null || Number.isNaN(v)) continue;
+      sum += v;
+      n++;
+    }
+    return n === 0 ? null : sum / n;
   });
 }
 
@@ -130,7 +137,9 @@ export function slopeLastN(values, n = 7) {
  */
 export function weekdaysOnly(daily) {
   return daily.filter(d => {
-    const day = new Date(d.date).getDay();
+    // Parse + read the weekday in UTC: 'YYYY-MM-DD' parses as UTC midnight,
+    // so a local-time .getDay() shifts the weekday in US timezones.
+    const day = new Date(d.date + 'T00:00:00Z').getUTCDay();
     return day !== 0 && day !== 6;
   });
 }

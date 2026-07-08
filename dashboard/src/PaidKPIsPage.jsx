@@ -7,6 +7,9 @@ import {
   useLocalStorageState, clearAllFilters,
 } from './FilterControls';
 import { movingAverage, weekdaysOnly } from './utils/analytics';
+import { trimToYesterday } from './utils/pins';
+import { downloadCsv } from './utils/csv';
+import UpdatingPill from './components/UpdatingPill';
 
 function rangeCutoff(range, selectedYears) {
   if (selectedYears.length > 0) return null;
@@ -81,8 +84,20 @@ function CampaignTable({ rows, dealsByCampaign }) {
       background: '#334155', borderRadius: 8, padding: '14px 16px',
       flex: '1 1 100%', minWidth: 0, overflowX: 'auto',
     }}>
-      <div style={{ color: '#cbd5e1', fontSize: 11, marginBottom: 8 }}>
-        Google Ads campaigns in the visible range — click a column to sort
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
+        <div style={{ color: '#cbd5e1', fontSize: 11 }}>
+          Google Ads campaigns in the visible range — click a column to sort
+        </div>
+        <button
+          onClick={() => downloadCsv('paid-campaigns.csv', sorted.map(e => ({
+            campaign: e.r.campaign_name, cost: e.r.cost, clicks: e.r.clicks,
+            impressions: e.r.impressions, ctr: e.r.ctr, avg_cpc: e.r.avg_cpc,
+            gads_conversions: e.r.conversions, won_quotes: e.hs.deals,
+            won_revenue: e.hs.revenue, cpa: e.cpa, roas: e.roas,
+          })))}
+          style={{ background: 'transparent', border: '1px solid #475569', color: '#94a3b8',
+            borderRadius: 3, padding: '3px 10px', fontSize: 11, cursor: 'pointer' }}
+        >Export CSV</button>
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: '#e2e8f0' }}>
         <thead>
@@ -147,6 +162,7 @@ export default function PaidKPIsPage() {
   // page renders fine if CallRail isn't wired yet.
   const [crDaily, setCrDaily] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refetching, setRefetching] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
@@ -182,10 +198,13 @@ export default function PaidKPIsPage() {
 
   const cutoff = useMemo(() => rangeCutoff(range, selectedYears), [range, selectedYears]);
 
-  // Campaign + deal window stats refetch on range change.
+  // Campaign + deal window stats refetch on range change. Aborted on the next
+  // run so a slow stale response can't overwrite fresher data.
   useEffect(() => {
     const rows = gads?.daily || [];
-    if (!rows.length) return;
+    if (!rows.length) return undefined;
+    const ac = new AbortController();
+    setRefetching(true);
     const last = rows[rows.length - 1].date;
     const params = new URLSearchParams({ until: last });
     if (selectedYears.length > 0) {
@@ -196,13 +215,16 @@ export default function PaidKPIsPage() {
     }
     const qs = params.toString();
     Promise.all([
-      fetch(`/api/google-ads-campaigns?${qs}`).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`/api/quotes-won?${qs}`).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/google-ads-campaigns?${qs}`, { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/quotes-won?${qs}`, { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
     ])
       .then(([cmp, deals]) => {
+        if (ac.signal.aborted) return;
         setGadsCampaigns(cmp);
         setHsDealsWindow(deals);
-      });
+      })
+      .finally(() => { if (!ac.signal.aborted) setRefetching(false); });
+    return () => ac.abort();
   }, [gads, cutoff, selectedYears]);
 
   // Build the main daily series: cost / clicks / impressions from Google Ads,
@@ -246,25 +268,37 @@ export default function PaidKPIsPage() {
     const hsRev     = ordered.map(d => paidRevByDate.get(d.date) || 0);
     const calls     = ordered.map(d => Number(crByDate.get(d.date)?.calls)    || 0);
     const callsAns  = ordered.map(d => Number(crByDate.get(d.date)?.answered) || 0);
-    const cpa       = ordered.map((_, i) => hsDeals[i] > 0 ? cost[i] / hsDeals[i] : 0);
-    const roas      = ordered.map((_, i) => cost[i] > 0 ? hsRev[i] / cost[i] : 0);
+    // Daily ratios are for the raw "Daily" line only — null (not 0) when the
+    // denominator is 0 so no-deal days don't read as $0 CPA.
+    const cpa       = ordered.map((_, i) => hsDeals[i] > 0 ? cost[i] / hsDeals[i] : null);
+    const roas      = ordered.map((_, i) => cost[i] > 0 ? hsRev[i] / cost[i] : null);
     const ctr       = ordered.map((_, i) => impr[i] > 0 ? clicks[i] / impr[i] : 0);
     const cpc       = ordered.map((_, i) => clicks[i] > 0 ? cost[i] / clicks[i] : 0);
     // $/call uses cost across ALL paid networks but calls only from
     // CallRail's tracked numbers. Reads as "what each tracked phone
     // lead cost the paid budget on this day" — useful for spotting
     // days when calls cratered without spend changing.
-    const cpCall    = ordered.map((_, i) => calls[i] > 0 ? cost[i] / calls[i] : 0);
+    const cpCall    = ordered.map((_, i) => calls[i] > 0 ? cost[i] / calls[i] : null);
 
     const mmm = (xs) => [movingAverage(xs, 30), movingAverage(xs, 90)];
     const [cost30, cost90]     = mmm(cost);
     const [clk30, clk90]       = mmm(clicks);
     const [ctr30, ctr90]       = mmm(ctr);
     const [cpc30, cpc90]       = mmm(cpc);
-    const [cpa30, cpa90]       = mmm(cpa);
-    const [roas30, roas90]     = mmm(roas);
     const [calls30, calls90]   = mmm(calls);
-    const [cpCall30, cpCall90] = mmm(cpCall);
+    // Ratio metrics use ratio-of-DMAs (DMA numerator ÷ DMA denominator), not
+    // DMA-of-daily-ratios: averaging daily cpa with 0 on no-deal days badly
+    // understates true CPA. Same pattern as DashboardView's AOV.
+    const [deals30, deals90]   = mmm(hsDeals);
+    const [rev30, rev90]       = mmm(hsRev);
+    const ratio = (num, den) => num.map((v, i) =>
+      (v == null || den[i] == null || den[i] === 0) ? null : v / den[i]);
+    const cpa30    = ratio(cost30, deals30);
+    const cpa90    = ratio(cost90, deals90);
+    const roas30   = ratio(rev30, cost30);
+    const roas90   = ratio(rev90, cost90);
+    const cpCall30 = ratio(cost30, calls30);
+    const cpCall90 = ratio(cost90, calls90);
 
     return ordered.map((d, i) => ({
       date: d.date,
@@ -287,7 +321,9 @@ export default function PaidKPIsPage() {
 
   const chartData = useMemo(() => {
     if (!fullSeries.length) return [];
-    return fullSeries.filter(d => inRange(d, cutoff, selectedYears));
+    // Trim today's partial row so KPI sums/DMAs agree with the charts
+    // (DMALineChart trims internally already).
+    return trimToYesterday(fullSeries.filter(d => inRange(d, cutoff, selectedYears)));
   }, [fullSeries, cutoff, selectedYears]);
 
   // CallRail totals over the same date window. Independent of chartData
@@ -397,6 +433,7 @@ export default function PaidKPIsPage() {
 
   return (
     <>
+      <UpdatingPill show={refetching || (loading && !!gads)} />
       <div style={{
         padding: '12px clamp(12px, 4vw, 32px)', borderBottom: '1px solid #1e293b',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,

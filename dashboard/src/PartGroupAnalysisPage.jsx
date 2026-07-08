@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { movingAverage, leadLag, leadLagDetrended, weekdaysOnly } from './utils/analytics';
 import { RELATIVE_RANGES, RangeDropdown, YearsDropdown, useLocalStorageState, clearAllFilters } from './FilterControls';
+import UpdatingPill from './components/UpdatingPill';
 
 const MIN_DAYS_FOR_R = 60;  // hide a row's r if it has fewer days than this
 
@@ -198,6 +199,7 @@ export default function PartGroupAnalysisPage() {
 
   return (
     <>
+      <UpdatingPill show={loading && !!groups} />
       {/* Filter bar — same time controls as the other tabs */}
       <div style={{
         padding: '12px clamp(12px, 4vw, 32px)', borderBottom: '1px solid #1e293b',
@@ -228,7 +230,7 @@ export default function PartGroupAnalysisPage() {
                 setSelectedYears([]);
                 setRange('6m');
                 setWeekdayOnly(false);
-                clearAllFilters();
+                clearAllFilters(['pgR.sizeBucket']);
               }}
               style={{
                 background: '#7f1d1d', color: '#fecaca', border: 'none', borderRadius: 4,

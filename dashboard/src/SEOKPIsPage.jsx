@@ -7,6 +7,20 @@ import {
   useLocalStorageState, clearAllFilters,
 } from './FilterControls';
 import { movingAverage, weekdaysOnly } from './utils/analytics';
+import { trimToYesterday } from './utils/pins';
+import UpdatingPill from './components/UpdatingPill';
+
+// GSC daily data lags 2-3 days — the trailing rows are incomplete, not a real
+// crash. Returns the first date of the trailing 3-day window (values on dates
+// >= this should be treated as null), or null when there are no GSC rows.
+function gscLagCutoff(rows) {
+  if (!rows?.length) return null;
+  let max = '';
+  for (const r of rows) if (r.date > max) max = r.date;
+  const d = new Date(max + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - 2);
+  return d.toISOString().slice(0, 10);
+}
 
 function rangeCutoff(range, selectedYears) {
   if (selectedYears.length > 0) return null;
@@ -82,15 +96,17 @@ export default function SEOKPIsPage() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    const ac = new AbortController();
     setLoading(true);
     Promise.all([
-      fetch('/api/gsc').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/gsc-top?kind=query&limit=50').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/gsc-top?kind=page&limit=50').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/ga4-channels-daily').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/quotes-won-daily').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/gsc', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/gsc-top?kind=query&limit=50', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/gsc-top?kind=page&limit=50', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/ga4-channels-daily', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/quotes-won-daily', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
     ])
       .then(([g, q, p, c, h]) => {
+        if (ac.signal.aborted) return;
         setGsc(g); setTopQueries(q); setTopPages(p); setGa4Channels(c); setHsDealsDaily(h);
         if (!g || (g.daily || []).length === 0) {
           setError('No Search Console data yet. Configure GSC_SITE_URL and run a GSC fetch.');
@@ -98,8 +114,9 @@ export default function SEOKPIsPage() {
           setError(null);
         }
       })
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false));
+      .catch(e => { if (e.name !== 'AbortError') setError(e.message); })
+      .finally(() => { if (!ac.signal.aborted) setLoading(false); });
+    return () => ac.abort();
   }, []);
 
   const availableYears = useMemo(() => {
@@ -132,10 +149,14 @@ export default function SEOKPIsPage() {
       revByDate.set(r.date, (revByDate.get(r.date) || 0) + (r.revenue || 0));
     }
 
-    const clicks   = ordered.map(d => Number(d.clicks) || 0);
-    const impr     = ordered.map(d => Number(d.impressions) || 0);
-    const ctr      = ordered.map(d => Number(d.ctr) || 0);
-    const pos      = ordered.map(d => Number(d.position) || 0);
+    // Null (don't zero) the lagging GSC tail and the API's null gap-day
+    // ctr/position — the null-aware MA skips them and charts break the line.
+    const lagCut = gscLagCutoff(gsc?.daily);
+    const lagged = (d) => lagCut != null && d.date >= lagCut;
+    const clicks   = ordered.map(d => lagged(d) ? null : Number(d.clicks) || 0);
+    const impr     = ordered.map(d => lagged(d) ? null : Number(d.impressions) || 0);
+    const ctr      = ordered.map(d => (lagged(d) || d.ctr == null) ? null : Number(d.ctr));
+    const pos      = ordered.map(d => (lagged(d) || d.position == null) ? null : Number(d.position));
     const orgSess  = ordered.map(d => sessByDate.get(d.date) || 0);
     const orgConv  = ordered.map(d => convByDate.get(d.date) || 0);
     const orgDeals = ordered.map(d => dealsByDate.get(d.date) || 0);
@@ -163,7 +184,8 @@ export default function SEOKPIsPage() {
 
   const chartData = useMemo(() => {
     if (!fullSeries.length) return [];
-    return fullSeries.filter(d => inRange(d, cutoff, selectedYears));
+    // Trim today's partial row so KPI sums agree with the charts.
+    return trimToYesterday(fullSeries.filter(d => inRange(d, cutoff, selectedYears)));
   }, [fullSeries, cutoff, selectedYears]);
 
   const kpi = useMemo(() => {
@@ -228,6 +250,7 @@ export default function SEOKPIsPage() {
 
   return (
     <>
+      <UpdatingPill show={loading && !!gsc} />
       <div style={{
         padding: '12px clamp(12px, 4vw, 32px)', borderBottom: '1px solid #1e293b',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,

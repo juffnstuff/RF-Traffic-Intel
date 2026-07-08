@@ -1,9 +1,30 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { fmtNum, fmtMoney, fmtPct, fmtRatio } from './DashboardView';
+import {
+  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
+} from 'recharts';
+import { StatCard, fmtNum, fmtMoney, fmtPct, fmtRatio } from './DashboardView';
 import {
   RELATIVE_RANGES, RangeDropdown, YearsDropdown,
   useLocalStorageState, clearAllFilters,
 } from './FilterControls';
+import { downloadCsv } from './utils/csv';
+import UpdatingPill from './components/UpdatingPill';
+
+// Small "Export CSV" button reused by the ROAS-tab tables. `rows` should be
+// the currently-sorted/filtered rows, already mapped to flat objects.
+function ExportButton({ filename, rows }) {
+  if (!rows || rows.length === 0) return null;
+  return (
+    <button
+      onClick={() => downloadCsv(filename, rows)}
+      style={{
+        background: 'transparent', border: '1px solid var(--dso-rule)',
+        color: 'var(--dso-text-dim)', borderRadius: 3, padding: '3px 10px',
+        fontSize: 11, cursor: 'pointer', flexShrink: 0,
+      }}
+    >Export CSV</button>
+  );
+}
 
 function rangeCutoff(range, selectedYears) {
   if (selectedYears.length > 0) return null;
@@ -59,7 +80,6 @@ function CampaignRoiTable({ rows }) {
   }, { cost: 0, ad_clicks: 0, ad_impressions: 0, ga4_sessions: 0,
        ga4_conversions: 0, ga4_revenue: 0, cr_calls: 0, cr_answered: 0,
        form_subs: 0 });
-  const totalRoas = totals.cost > 0 ? totals.ga4_revenue / totals.cost : null;
   const totalCpa = totals.ga4_conversions > 0 ? totals.cost / totals.ga4_conversions : null;
   const totalCostPerCall = totals.cr_calls > 0 ? totals.cost / totals.cr_calls : null;
   const totalCostPerForm = totals.form_subs > 0 ? totals.cost / totals.form_subs : null;
@@ -76,6 +96,9 @@ function CampaignRoiTable({ rows }) {
       border: '1px solid var(--dso-rule)',
       overflowX: 'auto',
     }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+        <ExportButton filename="campaign-roi.csv" rows={rows} />
+      </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
           <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
@@ -85,7 +108,8 @@ function CampaignRoiTable({ rows }) {
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>GA4 Sessions</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Sess/Click</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>GA4 Conv.</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>GA4 Revenue</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}
+              title="GA4-attributed revenue is ≈$0 for this site (no on-site sales) — real ROAS lives in the NetSuite-based tables above">GA4 Revenue</th>
             {anyCalls && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', borderLeft: '1px solid var(--dso-rule)', color: '#a78bfa' }}>Calls</th>}
             {anyCalls && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', color: '#a78bfa' }}>Answered</th>}
             {anyCalls && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', color: '#a78bfa' }}>$/Call</th>}
@@ -93,7 +117,9 @@ function CampaignRoiTable({ rows }) {
             {anyForms && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', color: '#34d399' }}>$/Form</th>}
             {(anyCalls || anyForms) && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>$/Lead</th>}
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>CPA</th>
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>ROAS</th>
+            {/* No ROAS column here on purpose: ga4_revenue/cost is ≈0 and reads
+                as a fake "everything loses money" signal next to the real
+                NetSuite-based ROAS tables. */}
           </tr>
         </thead>
         <tbody>
@@ -116,7 +142,6 @@ function CampaignRoiTable({ rows }) {
               {anyForms && <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.cost_per_form != null ? fmtMoney(r.cost_per_form) : '—'}</td>}
               {(anyCalls || anyForms) && <td style={{ padding: '8px 10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{r.cost_per_lead != null ? fmtMoney(r.cost_per_lead) : '—'}</td>}
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.cost_per_ga4_conv != null ? fmtMoney(r.cost_per_ga4_conv) : '—'}</td>
-              <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{r.roas != null ? fmtRatio(r.roas) : '—'}</td>
             </tr>
           ))}
         </tbody>
@@ -136,7 +161,6 @@ function CampaignRoiTable({ rows }) {
             {anyForms && <td style={{ padding: '10px', textAlign: 'right' }}>{totalCostPerForm != null ? fmtMoney(totalCostPerForm) : '—'}</td>}
             {(anyCalls || anyForms) && <td style={{ padding: '10px', textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>{totalCostPerLead != null ? fmtMoney(totalCostPerLead) : '—'}</td>}
             <td style={{ padding: '10px', textAlign: 'right' }}>{totalCpa != null ? fmtMoney(totalCpa) : '—'}</td>
-            <td style={{ padding: '10px', textAlign: 'right' }}>{totalRoas != null ? fmtRatio(totalRoas) : '—'}</td>
           </tr>
         </tfoot>
       </table>
@@ -211,6 +235,8 @@ function HubSpotAttributionTable({ rows, lens }) {
         Revenue from `hubspot_netsuite_quotes` (NetSuite quote totals mirrored into HubSpot),
         bucketed by <strong>{lens === 'latest' ? "the contact's hs_latest_source" : lens === 'netsuite' ? "the quote's NetSuite lead source (ns_lead_source)" : "the contact's hs_analytics_source"}</strong>.
         Quotes whose email doesn't match any contact land in the (UNKNOWN) bucket — see Unattributed columns.
+        "via domain" counts quotes matched through the corporate-domain fallback (quote email's company
+        domain ↔ contact domain) rather than an exact email match — same company, lower confidence.
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
@@ -229,7 +255,14 @@ function HubSpotAttributionTable({ rows, lens }) {
             <tr key={r.hs_source + i} style={{ borderTop: '1px solid var(--dso-rule)' }}>
               <td style={{ padding: '8px 10px' }}>{r.hs_source || <span style={{ color: 'var(--dso-text-faint)' }}>(unknown)</span>}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.contacts)}</td>
-              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.quotes)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                {fmtNum(r.quotes)}
+                {(r.quotes_domain_matched || 0) > 0 && (
+                  <span style={{ color: 'var(--dso-text-faint)', fontSize: 10, marginLeft: 4 }}>
+                    ({fmtNum(r.quotes_domain_matched)} via domain)
+                  </span>
+                )}
+              </td>
               <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--dso-text-dim)', fontSize: 11 }}>
                 {fmtNum(r.quotes_unattributed)} ({fmtMoney(r.revenue_unattributed)})
               </td>
@@ -433,6 +466,7 @@ const PG_GET = {
   part_group: r => (r.part_group || '').toLowerCase(),
   cost: r => r.cost || 0, quotes: r => r.quotes || 0, quotes_won: r => r.quotes_won || 0,
   revenue: r => r.revenue || 0, revenue_won: r => r.revenue_won || 0,
+  revenue_paid: r => r.revenue_paid || 0, revenue_won_paid: r => r.revenue_won_paid || 0,
   roas: r => r.roas, roas_won: r => r.roas_won,
 };
 function PartGroupRoasTable({ rows }) {
@@ -446,15 +480,18 @@ function PartGroupRoasTable({ rows }) {
   }
   const sorted = cmpSort(rows, PG_GET[sortKey] || PG_GET.revenue, sortDir, sortKey === 'part_group');
   const totals = rows.reduce((acc, r) => {
-    acc.cost        += r.cost || 0;
-    acc.quotes      += r.quotes || 0;
-    acc.quotes_won  += r.quotes_won || 0;
-    acc.revenue     += r.revenue || 0;
-    acc.revenue_won += r.revenue_won || 0;
+    acc.cost             += r.cost || 0;
+    acc.quotes           += r.quotes || 0;
+    acc.quotes_won       += r.quotes_won || 0;
+    acc.revenue          += r.revenue || 0;
+    acc.revenue_won      += r.revenue_won || 0;
+    acc.revenue_paid     += r.revenue_paid || 0;
+    acc.revenue_won_paid += r.revenue_won_paid || 0;
     return acc;
-  }, { cost: 0, quotes: 0, quotes_won: 0, revenue: 0, revenue_won: 0 });
-  const totalRoas    = totals.cost > 0 ? totals.revenue     / totals.cost : null;
-  const totalRoasWon = totals.cost > 0 ? totals.revenue_won / totals.cost : null;
+  }, { cost: 0, quotes: 0, quotes_won: 0, revenue: 0, revenue_won: 0, revenue_paid: 0, revenue_won_paid: 0 });
+  // Footer ROAS matches the row semantics — paid-attributed revenue ÷ cost.
+  const totalRoas    = totals.cost > 0 ? totals.revenue_paid     / totals.cost : null;
+  const totalRoasWon = totals.cost > 0 ? totals.revenue_won_paid / totals.cost : null;
   return (
     <div style={{
       background: 'var(--dso-surface)',
@@ -463,23 +500,34 @@ function PartGroupRoasTable({ rows }) {
       border: '1px solid var(--dso-rule)',
       overflowX: 'auto',
     }}>
-      <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, marginBottom: 8 }}>
-        Revenue from `hubspot_netsuite_quotes.parts_group` (the record-level part group, direct from the quote).
-        Cost is allocated via the contact bridge: each campaign's spend splits across the part groups its own leads' quotes fell under
-        (by won-quote share; all-quote share when a campaign has no wins yet). Spend from campaigns whose leads have no quotes shows as <strong>(unattributed)</strong>.
-        ROAS shown for all quotes and for closed-won only.
+      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', marginBottom: 8 }}>
+        <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, flex: 1 }}>
+          Revenue from `hubspot_netsuite_quotes.parts_group` (the record-level part group, direct from the quote).
+          Cost is allocated via the contact bridge: each campaign's spend splits across the part groups its own leads' quotes fell under
+          (by won-quote share; all-quote share when a campaign has no wins yet). Spend from campaigns whose leads have no quotes shows as <strong>(unattributed)</strong>.
+          ROAS numerators are <strong>paid-attributed revenue only</strong> (Paid revenue ÷ cost, and paid won revenue ÷ cost) —
+          "Revenue (all sources)" includes organic/direct/etc. and is context, not a return on the ad spend.
+        </div>
+        <ExportButton filename="part-group-roas.csv" rows={sorted.map(r => ({
+          part_group: r.part_group, cost: r.cost, quotes: r.quotes, quotes_won: r.quotes_won,
+          revenue_all_sources: r.revenue, revenue_won_all_sources: r.revenue_won,
+          revenue_paid: r.revenue_paid, revenue_won_paid: r.revenue_won_paid,
+          roas: r.roas, roas_won: r.roas_won,
+        }))} />
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
           <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
-            <SortTh id="part_group"  label="Part Group"    align="left" sortKey={sortKey} sortDir={sortDir} onSort={(k) => onSort(k, true)} />
-            <SortTh id="cost"        label="Ad Cost"       sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-            <SortTh id="quotes"      label="Quotes"        sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-            <SortTh id="quotes_won"  label="Wins"          sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-            <SortTh id="revenue"     label="Revenue (all)" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-            <SortTh id="revenue_won" label="Revenue (won)" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-            <SortTh id="roas"        label="ROAS"          sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-            <SortTh id="roas_won"    label="ROAS (won)"    sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="part_group"       label="Part Group"           align="left" sortKey={sortKey} sortDir={sortDir} onSort={(k) => onSort(k, true)} />
+            <SortTh id="cost"             label="Ad Cost"              sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="quotes"           label="Quotes"               sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="quotes_won"       label="Wins"                 sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue"          label="Revenue (all sources)" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue_won"      label="Revenue (won)"        sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue_paid"     label="Paid revenue"         sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue_won_paid" label="Paid won rev."        sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="roas"             label="ROAS"                 sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="roas_won"         label="ROAS (won)"           sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
           </tr>
         </thead>
         <tbody>
@@ -491,6 +539,8 @@ function PartGroupRoasTable({ rows }) {
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.quotes_won)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue_won)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue_paid)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue_won_paid)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>
                 {r.roas != null ? fmtRatio(r.roas) : '—'}
               </td>
@@ -508,6 +558,8 @@ function PartGroupRoasTable({ rows }) {
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtNum(totals.quotes_won)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.revenue)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.revenue_won)}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.revenue_paid)}</td>
+            <td style={{ padding: '10px', textAlign: 'right' }}>{fmtMoney(totals.revenue_won_paid)}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{totalRoas != null ? fmtRatio(totalRoas) : '—'}</td>
             <td style={{ padding: '10px', textAlign: 'right' }}>{totalRoasWon != null ? fmtRatio(totalRoasWon) : '—'}</td>
           </tr>
@@ -564,12 +616,19 @@ function CampaignRoasTable({ rows }) {
         (paid-search contact's <code>hs_analytics_source_data_1</code> = campaign, contact → quotes by email). Orders aren't split across part-groups,
         so brand / catalog campaigns get credited for all the revenue their leads drove. Paid-search only, first-touch.
         The grey line under each campaign shows the record-level part groups (custbody4) those orders fell under, by revenue share — the campaign→part-group link, no order splitting.
+        "via domain" counts quotes matched through the corporate-domain fallback (quote email's company domain ↔ contact domain)
+        rather than an exact email match — same company, lower confidence.
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 10, flexWrap: 'wrap' }}>
         <input value={q} onChange={e => setQ(e.target.value)} placeholder="Filter campaigns…" style={{ ...inputStyle, minWidth: 200 }} />
         {chk(hideNoSpend, setHideNoSpend, 'Hide $0 ad spend')}
         {chk(hideNoRev, setHideNoRev, 'Hide $0 revenue')}
         <span style={{ color: 'var(--dso-text-faint)', fontSize: 11 }}>{filtered.length} of {rows.length}</span>
+        <ExportButton filename="campaign-roas.csv" rows={sorted.map(r => ({
+          campaign: r.campaign, cost: r.cost, leads: r.leads, quotes: r.quotes,
+          quotes_domain_matched: r.quotes_domain_matched,
+          revenue: r.revenue, revenue_won: r.revenue_won, roas: r.roas, roas_won: r.roas_won,
+        }))} />
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
@@ -609,7 +668,14 @@ function CampaignRoasTable({ rows }) {
               </td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.cost)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.leads)}</td>
-              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.quotes)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                {fmtNum(r.quotes)}
+                {(r.quotes_domain_matched || 0) > 0 && (
+                  <span style={{ color: 'var(--dso-text-faint)', fontSize: 10, marginLeft: 4 }}>
+                    ({fmtNum(r.quotes_domain_matched)} via domain)
+                  </span>
+                )}
+              </td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue_won)}</td>
               <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{r.roas != null ? fmtRatio(r.roas) : '—'}</td>
@@ -631,6 +697,129 @@ function CampaignRoasTable({ rows }) {
           </tr>
         </tfoot>
       </table>
+    </div>
+  );
+}
+
+// Cohort ROAS: spend in the window vs the LIFETIME revenue of the leads
+// acquired in that window — spend and revenue belong to the same cohort,
+// unlike the windowed campaign table where a quote can land in the window
+// from a lead acquired long before it.
+const COHORT_GET = {
+  campaign: r => (r.campaign || '').toLowerCase(),
+  cost: r => r.cost || 0, leads: r => r.leads || 0,
+  converting_leads: r => r.converting_leads || 0, quotes: r => r.quotes || 0,
+  revenue: r => r.revenue || 0, revenue_won: r => r.revenue_won || 0,
+  roas: r => r.roas, roas_won: r => r.roas_won,
+  cost_per_lead: r => r.cost_per_lead, avg_days_to_quote: r => r.avg_days_to_quote,
+};
+function CohortRoasTable({ rows }) {
+  const { sortKey, sortDir, onSort } = useSort('cost');
+  if (!rows) return null;
+  if (rows.length === 0) {
+    return <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, padding: '20px 0' }}>
+      No cohort data in window. Needs Google Ads spend + paid-search leads created in the window.
+    </div>;
+  }
+  const sorted = cmpSort(rows, COHORT_GET[sortKey] || COHORT_GET.cost, sortDir, sortKey === 'campaign');
+  return (
+    <div style={{ background: 'var(--dso-surface)', borderRadius: 4, padding: '14px 16px', border: '1px solid var(--dso-rule)', overflowX: 'auto' }}>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', marginBottom: 8 }}>
+        <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, flex: 1 }}>
+          Spend in window vs the <strong>lifetime</strong> revenue of leads acquired in that window — unlike the
+          windowed table above, spend and revenue belong to the same cohort.
+        </div>
+        <ExportButton filename="cohort-roas.csv" rows={sorted.map(r => ({
+          campaign: r.campaign, cost: r.cost, leads: r.leads, converting_leads: r.converting_leads,
+          quotes: r.quotes, revenue: r.revenue, revenue_won: r.revenue_won,
+          roas: r.roas, roas_won: r.roas_won, cost_per_lead: r.cost_per_lead,
+          avg_days_to_quote: r.avg_days_to_quote,
+        }))} />
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
+        <thead>
+          <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+            <SortTh id="campaign"          label="Campaign"     align="left" sortKey={sortKey} sortDir={sortDir} onSort={(k) => onSort(k, true)} />
+            <SortTh id="cost"              label="Cost"         sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="leads"             label="Leads"        sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="converting_leads"  label="Conv. leads"  sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="quotes"            label="Quotes"       sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue"           label="Revenue"      sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="revenue_won"       label="Won revenue"  sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="roas"              label="ROAS"         sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="roas_won"          label="Won ROAS"     sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="cost_per_lead"     label="Cost/lead"    sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="avg_days_to_quote" label="Avg days→quote" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r) => (
+            <tr key={r.campaign} style={{ borderTop: '1px solid var(--dso-rule)' }}>
+              <td style={{ padding: '8px 10px', maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.campaign}>{r.campaign}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.cost)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.leads)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.converting_leads)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtNum(r.quotes)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtMoney(r.revenue_won)}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{r.roas != null ? fmtRatio(r.roas) : '—'}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{r.roas_won != null ? fmtRatio(r.roas_won) : '—'}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.cost_per_lead != null ? fmtMoney(r.cost_per_lead) : '—'}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>{r.avg_days_to_quote != null ? Math.round(r.avg_days_to_quote) : '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function LagHistogramTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0].payload;
+  return (
+    <div style={{
+      background: '#0f172a', border: '1px solid #64748b', borderRadius: 6,
+      padding: '6px 10px', fontSize: 11, color: '#f8fafc', lineHeight: 1.5,
+    }}>
+      <div><strong>{p.bucket}</strong></div>
+      <div>{fmtNum(p.quotes)} quotes · {fmtMoney(p.revenue)}</div>
+    </div>
+  );
+}
+
+// Lead→quote lag distribution. Shows how long paid (or all) leads take to
+// produce a quote — the reason windowed ROAS understates recent spend.
+function QuoteLagHistogram({ data, paidOnly, onPaidOnlyChange }) {
+  const buckets = [...(data?.buckets || [])].sort((a, b) => (a.bucket_order ?? 0) - (b.bucket_order ?? 0));
+  return (
+    <div style={{ background: 'var(--dso-surface)', borderRadius: 4, padding: '14px 16px', border: '1px solid var(--dso-rule)', marginTop: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 8, flexWrap: 'wrap' }}>
+        <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, flex: 1 }}>
+          Lead-to-quote lag distribution
+          {data?.quotes != null && <> — {fmtNum(data.quotes)} quotes</>}
+          {data?.median_days != null && <>, median <strong>{Math.round(data.median_days)}d</strong></>}
+          {data?.avg_days != null && <>, avg <strong>{Math.round(data.avg_days)}d</strong></>}.
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: 'var(--dso-text-dim)', fontSize: 11, cursor: 'pointer' }}>
+          <input type="checkbox" checked={paidOnly} onChange={e => onPaidOnlyChange(e.target.checked)} /> Paid leads only
+        </label>
+      </div>
+      {buckets.length === 0 ? (
+        <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, padding: '10px 0' }}>No lag data in window.</div>
+      ) : (
+        <ResponsiveContainer width="100%" height={180}>
+          <BarChart data={buckets} margin={{ top: 6, right: 10, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--dso-rule)" strokeOpacity={0.5} vertical={false} />
+            <XAxis dataKey="bucket" tick={{ fill: 'var(--dso-text-dim)', fontSize: 10 }}
+              axisLine={{ stroke: 'var(--dso-rule)' }} tickLine={false} interval={0} />
+            <YAxis tickFormatter={fmtNum} tick={{ fill: 'var(--dso-text-dim)', fontSize: 10 }}
+              axisLine={false} tickLine={false} width={45} />
+            <Tooltip content={<LagHistogramTooltip />} cursor={{ fill: '#0f172a', opacity: 0.3 }} />
+            <Bar dataKey="quotes" fill="#a8d8e8" isAnimationActive={false} />
+          </BarChart>
+        </ResponsiveContainer>
+      )}
     </div>
   );
 }
@@ -695,6 +884,7 @@ const SECTION_DEFAULTS = {
   'rev-source':     true,
   'partgroup-roas': true,
   'campaign-roas':  true,
+  'cohort-roas':    true,
   'quote-attr':     false,
   'lead-recon':     false,
   'campaign-roi':   false,
@@ -739,6 +929,9 @@ export default function CrossSourcePage() {
   const [leadReconciliation, setLeadReconciliation] = useState(null);
   const [partGroupRoas, setPartGroupRoas] = useState(null);
   const [campaignRoas, setCampaignRoas] = useState(null);
+  const [cohortRoas, setCohortRoas] = useState(null);
+  const [lagHist, setLagHist] = useState(null);
+  const [lagPaidOnly, setLagPaidOnly] = useState(false);
   const [quoteAttribution, setQuoteAttribution] = useState(null);
   // 'first' = hs_analytics_source (original / first-touch).
   // 'latest' = hs_latest_source (most recent session source, may post-date quote).
@@ -759,6 +952,7 @@ export default function CrossSourcePage() {
   const cutoff = useMemo(() => rangeCutoff(range, selectedYears), [range, selectedYears]);
 
   useEffect(() => {
+    const ac = new AbortController();
     setLoading(true);
     const params = new URLSearchParams();
     if (selectedYears.length > 0) {
@@ -773,22 +967,26 @@ export default function CrossSourcePage() {
     const hsParams = new URLSearchParams(params);
     hsParams.set('lens', ['latest', 'netsuite'].includes(attrLens) ? attrLens : 'first');
     const hsQs = hsParams.toString();
+    const qaParams = new URLSearchParams(params);
+    qaParams.set('limit', '500');
     Promise.all([
-      fetch(`/api/insights/campaign-roi${qs ? '?' + qs : ''}`).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/insights/page-performance?limit=100').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/insights/campaign-roi${qs ? '?' + qs : ''}`, { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/insights/page-performance?limit=100', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
       // Trackers + texts are not date-windowed — fetch once on mount and
       // re-fetch when the window changes is unnecessary, but Promise.all
       // here keeps the loading state coherent and the cost is trivial.
-      fetch('/api/callrail-trackers').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/callrail-text-messages?limit=50').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/callrail-trackers', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/callrail-text-messages?limit=50', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
       // HubSpot → NetSuite attribution lanes — date-windowed alongside Ads/GA4.
-      fetch(`/api/insights/hubspot-netsuite-attribution?${hsQs}`).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/insights/lead-source-reconciliation?limit=100').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`/api/insights/part-group-roas${qs ? '?' + qs : ''}`).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`/api/insights/quote-attribution${qs ? '?' + qs : ''}&limit=500`).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`/api/insights/campaign-roas${qs ? '?' + qs : ''}`).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/insights/hubspot-netsuite-attribution?${hsQs}`, { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/insights/lead-source-reconciliation?limit=100', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/insights/part-group-roas${qs ? '?' + qs : ''}`, { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/insights/quote-attribution?${qaParams.toString()}`, { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/insights/campaign-roas${qs ? '?' + qs : ''}`, { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/insights/campaign-roas-cohort${qs ? '?' + qs : ''}`, { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([c, p, t, m, hs, rec, pg, qa, cr]) => {
+      .then(([c, p, t, m, hs, rec, pg, qa, cr, coh]) => {
+        if (ac.signal.aborted) return;
         setCampaigns(c?.campaigns || []);
         setPages(p?.pages || []);
         setPageWindowEnd(p?.pages?.[0]?.window_end_date || null);
@@ -799,25 +997,79 @@ export default function CrossSourcePage() {
         setPartGroupRoas(pg?.part_groups || []);
         setQuoteAttribution(qa?.quotes || []);
         setCampaignRoas(cr?.campaigns || []);
+        setCohortRoas(coh?.campaigns || []);
         if (!c && !p) setError('Cross-source endpoints returned no data. Are GA4 and Ads/GSC backfilled?');
         else setError(null);
       })
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false));
+      .catch(e => { if (e.name !== 'AbortError') setError(e.message); })
+      .finally(() => { if (!ac.signal.aborted) setLoading(false); });
+    return () => ac.abort();
   }, [cutoff, selectedYears, attrLens]);
 
-  // Probe years from the campaign rows once we have any.
+  // Lead→quote lag histogram — separate effect because the paid-only toggle
+  // refetches it without touching everything else.
   useEffect(() => {
-    if (!campaigns) return;
-    // Campaign-level rows are aggregated and don't have date — just fall back
-    // to the last few years as filter options. Better than nothing; can wire
-    // up a dedicated /api/insights/years endpoint later if useful.
-    const now = new Date().getFullYear();
-    setAvailableYears([now - 4, now - 3, now - 2, now - 1, now].map(String));
-  }, [campaigns]);
+    const ac = new AbortController();
+    const params = new URLSearchParams();
+    if (selectedYears.length > 0) {
+      params.set('since', `${selectedYears[0]}-01-01`);
+      params.set('until', `${selectedYears[selectedYears.length - 1]}-12-31`);
+    } else if (cutoff) {
+      params.set('since', cutoff);
+    }
+    if (lagPaidOnly) params.set('paid_only', 'true');
+    fetch(`/api/insights/quote-lag-histogram?${params.toString()}`, { signal: ac.signal })
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (!ac.signal.aborted) setLagHist(j); })
+      .catch(() => {});
+    return () => ac.abort();
+  }, [cutoff, selectedYears, lagPaidOnly]);
+
+  // Year options come from the real data extents; fall back to the last five
+  // calendar years if the meta endpoint isn't available.
+  useEffect(() => {
+    fetch('/api/meta/date-range')
+      .then(r => r.ok ? r.json() : null)
+      .then(j => {
+        const min = Number(String(j?.min_date || '').slice(0, 4));
+        const max = Number(String(j?.max_date || '').slice(0, 4));
+        if (!min || !max || min > max) throw new Error('no date range');
+        const years = [];
+        for (let y = min; y <= max; y++) years.push(String(y));
+        setAvailableYears(years);
+      })
+      .catch(() => {
+        const now = new Date().getFullYear();
+        setAvailableYears([now - 4, now - 3, now - 2, now - 1, now].map(String));
+      });
+  }, []);
+
+  // Exec one-glance rollup of the campaign-ROAS response (item tiles below
+  // the header). Same cohort semantics as the campaign table.
+  const execSummary = useMemo(() => {
+    if (!campaignRoas || campaignRoas.length === 0) return null;
+    const t = campaignRoas.reduce((acc, r) => {
+      acc.cost += r.cost || 0;
+      acc.revenue += r.revenue || 0;
+      acc.revenueWon += r.revenue_won || 0;
+      acc.quotes += r.quotes || 0;
+      acc.domainMatched += r.quotes_domain_matched || 0;
+      if ((r.quotes || 0) === 0) acc.unattributedSpend += r.cost || 0;
+      return acc;
+    }, { cost: 0, revenue: 0, revenueWon: 0, quotes: 0, domainMatched: 0, unattributedSpend: 0 });
+    return {
+      ...t,
+      roasWon: t.cost > 0 ? t.revenueWon / t.cost : null,
+      roasAll: t.cost > 0 ? t.revenue / t.cost : null,
+      pctDomainMatched: t.quotes > 0 ? t.domainMatched / t.quotes : null,
+    };
+  }, [campaignRoas]);
+
+  const hasAnyData = campaigns != null || campaignRoas != null;
 
   return (
     <div style={{ padding: '20px 24px', color: 'var(--dso-text)' }}>
+      <UpdatingPill show={loading && hasAnyData} />
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
         <div>
           <div style={{
@@ -858,8 +1110,22 @@ export default function CrossSourcePage() {
       {error && (
         <div style={{ color: '#f87171', fontSize: 13, marginBottom: 16 }}>Error: {error}</div>
       )}
-      {loading && (
+      {loading && !hasAnyData && (
         <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, marginBottom: 16 }}>Loading…</div>
+      )}
+
+      {/* Exec one-glance rollup of the campaign-ROAS response. */}
+      {execSummary && (
+        <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+          <StatCard label="Total spend" value={fmtMoney(execSummary.cost)} sub="Google Ads, in window" />
+          <StatCard label="Paid-attributed revenue" value={fmtMoney(execSummary.revenue)} sub="all quotes of paid leads" />
+          <StatCard label="Won revenue" value={fmtMoney(execSummary.revenueWon)} sub="closed-won quotes" />
+          <StatCard label="Blended ROAS (won)" value={execSummary.roasWon != null ? fmtRatio(execSummary.roasWon) : '—'}
+            sub={`all-quote: ${execSummary.roasAll != null ? fmtRatio(execSummary.roasAll) : '—'}`} />
+          <StatCard label="Unattributed spend" value={fmtMoney(execSummary.unattributedSpend)} sub="campaigns with 0 quotes" />
+          <StatCard label="Quotes domain-matched" value={execSummary.pctDomainMatched != null ? fmtPct(execSummary.pctDomainMatched) : '—'}
+            sub={`${fmtNum(execSummary.domainMatched)} of ${fmtNum(execSummary.quotes)} quotes`} />
+        </div>
       )}
 
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 14, marginBottom: 12 }}>
@@ -878,6 +1144,11 @@ export default function CrossSourcePage() {
 
       <CollapsibleSection title="Campaign ROAS — Ads Cost ÷ Revenue of the Campaign's Leads" open={isOpen('campaign-roas')} onToggle={() => toggleSec('campaign-roas')}>
         <CampaignRoasTable rows={campaignRoas} />
+      </CollapsibleSection>
+
+      <CollapsibleSection title="Cohort ROAS (lead-month cohorts)" open={isOpen('cohort-roas')} onToggle={() => toggleSec('cohort-roas')}>
+        <CohortRoasTable rows={cohortRoas} />
+        <QuoteLagHistogram data={lagHist} paidOnly={lagPaidOnly} onPaidOnlyChange={setLagPaidOnly} />
       </CollapsibleSection>
 
       <CollapsibleSection title="Per-Quote Attribution Drill-Down" open={isOpen('quote-attr')} onToggle={() => toggleSec('quote-attr')}>

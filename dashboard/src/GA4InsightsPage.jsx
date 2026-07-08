@@ -13,6 +13,19 @@ import {
 import { movingAverage, slopeLastN, weekdaysOnly } from './utils/analytics';
 import { usePins, trimToYesterday } from './utils/pins';
 import { ReferenceLine } from 'recharts';
+import UpdatingPill from './components/UpdatingPill';
+
+// GSC daily data lags 2-3 days — the trailing rows are incomplete, not a real
+// crash. Returns the first date of the trailing 3-day window (values on dates
+// >= this should be treated as null), or null when there are no GSC rows.
+function gscLagCutoff(rows) {
+  if (!rows?.length) return null;
+  let max = '';
+  for (const r of rows) if (r.date > max) max = r.date;
+  const d = new Date(max + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - 2);
+  return d.toISOString().slice(0, 10);
+}
 
 // Seconds → "1m 23s" or "45s". Used for avg session duration KPI.
 function fmtDuration(secs) {
@@ -928,27 +941,30 @@ export default function GA4InsightsPage() {
   const [events, setEvents] = useState(null);
   const [newVsReturning, setNewVsReturning] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refetching, setRefetching] = useState(false);
   const [error, setError] = useState(null);
 
   // Aggregate + per-channel daily + GSC daily + branded share are
   // range-independent; fetch once. Each integration degrades quietly if
   // not configured — rendering should still work on a GA4-only environment.
   useEffect(() => {
+    const ac = new AbortController();
     setLoading(true);
     Promise.all([
-      fetch('/api/ga4').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/ga4-channels-daily').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/gsc').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/gsc-branded-share').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/crux').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/crux-by-page').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/gsc-query-movers').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/ga4', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/ga4-channels-daily', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/gsc', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/gsc-branded-share', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/crux', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/crux-by-page', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/gsc-query-movers', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
       // Real revenue lives in NetSuite quotes, not GA4 (no on-site ecommerce).
       // Pull daily won-quote revenue by lead source so we can overlay it on the
       // GA4 trend by date and split it organic vs paid on the channel table.
-      fetch('/api/quotes-won-daily').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/quotes-won-daily', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
     ])
       .then(([agg, chans, gscResp, brandResp, cruxResp, cruxPagesResp, moversResp, nsRev]) => {
+        if (ac.signal.aborted) return;
         setAggregate(agg);
         setChannelsDaily(chans);
         setGsc(gscResp);
@@ -963,8 +979,9 @@ export default function GA4InsightsPage() {
           setError(null);
         }
       })
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false));
+      .catch(e => { if (e.name !== 'AbortError') setError(e.message); })
+      .finally(() => { if (!ac.signal.aborted) setLoading(false); });
+    return () => ac.abort();
   }, []);
 
   // Lazy-fetch query rank history when the user picks a query in the movers
@@ -988,10 +1005,13 @@ export default function GA4InsightsPage() {
   // Campaign + every dim breakdown refetches on range change — the server
   // aggregates over [since, until] so we can't filter client-side without
   // per-day data. Fire them in parallel; each is independently optional so
-  // the page still renders if some endpoints aren't yet populated.
+  // the page still renders if some endpoints aren't yet populated. Aborted on
+  // the next run so a slow stale response can't overwrite fresher data.
   useEffect(() => {
     const rows = aggregate?.daily || [];
-    if (!rows.length) return;
+    if (!rows.length) return undefined;
+    const ac = new AbortController();
+    setRefetching(true);
     const last = rows[rows.length - 1].date;
     const params = new URLSearchParams({ until: last });
     if (selectedYears.length > 0) {
@@ -1003,18 +1023,22 @@ export default function GA4InsightsPage() {
     const qs = params.toString();
     const fetchOpt = (url, setter) => {
       const sep = url.includes('?') ? '&' : '?';
-      fetch(`${url}${sep}${qs}`).then(r => r.ok ? r.json() : null)
+      return fetch(`${url}${sep}${qs}`, { signal: ac.signal })
+        .then(r => r.ok ? r.json() : null)
         .then(j => setter(j))
-        .catch(() => setter(null));
+        .catch(e => { if (e.name !== 'AbortError') setter(null); });
     };
-    fetchOpt('/api/ga4-campaign-stats',           setCampaignStats);
-    fetchOpt('/api/ga4-landing-pages',            setLandingPages);
-    fetchOpt('/api/ga4-source-medium',            setSourceMedium);
-    fetchOpt('/api/ga4-first-touch',              setFirstTouch);
-    fetchOpt('/api/ga4-devices',                  setDevices);
-    fetchOpt('/api/ga4-countries',                setCountries);
-    fetchOpt('/api/ga4-events?conversionsOnly=1', setEvents);
-    fetchOpt('/api/ga4-new-vs-returning',         setNewVsReturning);
+    Promise.all([
+      fetchOpt('/api/ga4-campaign-stats',           setCampaignStats),
+      fetchOpt('/api/ga4-landing-pages',            setLandingPages),
+      fetchOpt('/api/ga4-source-medium',            setSourceMedium),
+      fetchOpt('/api/ga4-first-touch',              setFirstTouch),
+      fetchOpt('/api/ga4-devices',                  setDevices),
+      fetchOpt('/api/ga4-countries',                setCountries),
+      fetchOpt('/api/ga4-events?conversionsOnly=1', setEvents),
+      fetchOpt('/api/ga4-new-vs-returning',         setNewVsReturning),
+    ]).finally(() => { if (!ac.signal.aborted) setRefetching(false); });
+    return () => ac.abort();
   }, [aggregate, cutoff, selectedYears]);
 
   // Build the main daily series with DMAs + a derived pages/session and
@@ -1044,16 +1068,20 @@ export default function GA4InsightsPage() {
 
     // GSC daily aligned to GA4 dates. CTR and position are weighted means in
     // GSC's own response, so we keep them as-is per day rather than re-deriving.
+    // Gap-day ctr/position come back null from the API and stay null here, and
+    // the lagging 3-day GSC tail is nulled too — the null-aware MA skips both.
     const gscByDate = new Map((gsc?.daily || []).map(d => [d.date, d]));
-    const gscClicks      = ordered.map(d => Number(gscByDate.get(d.date)?.clicks)      || 0);
-    const gscImpressions = ordered.map(d => Number(gscByDate.get(d.date)?.impressions) || 0);
+    const lagCut = gscLagCutoff(gsc?.daily);
+    const lagged = (d) => lagCut != null && d.date >= lagCut;
+    const gscClicks      = ordered.map(d => lagged(d) ? null : Number(gscByDate.get(d.date)?.clicks) || 0);
+    const gscImpressions = ordered.map(d => lagged(d) ? null : Number(gscByDate.get(d.date)?.impressions) || 0);
     const gscCtr         = ordered.map(d => {
-      const r = gscByDate.get(d.date);
-      return r ? Number(r.ctr) || 0 : null;
+      const v = gscByDate.get(d.date)?.ctr;
+      return (lagged(d) || v == null) ? null : Number(v);
     });
     const gscPosition    = ordered.map(d => {
-      const r = gscByDate.get(d.date);
-      return r ? Number(r.position) || null : null;
+      const v = gscByDate.get(d.date)?.position;
+      return (lagged(d) || v == null) ? null : Number(v);
     });
 
     // NetSuite won-quote revenue per date (summed across all lead sources) —
@@ -1081,8 +1109,8 @@ export default function GA4InsightsPage() {
     const [epu30,  epu90]  = mmm(engPerUser);
     const [gc30,   gc90]   = mmm(gscClicks);
     const [gi30,   gi90]   = mmm(gscImpressions);
-    const [gctr30, gctr90] = mmm(gscCtr.map(v => v ?? 0));
-    const [gpos30, gpos90] = mmm(gscPosition.map(v => v ?? 0));
+    const [gctr30, gctr90] = mmm(gscCtr);
+    const [gpos30, gpos90] = mmm(gscPosition);
 
     return ordered.map((d, i) => ({
       date: d.date,
@@ -1099,7 +1127,7 @@ export default function GA4InsightsPage() {
       conversionRate: convRate[i], cr30: cr30[i], cr90: cr90[i],
       engagementRate: engRate[i], er30: er30[i], er90: er90[i],
       engPerUser: engPerUser[i], epu30: epu30[i], epu90: epu90[i],
-      // GSC raw + DMAs (zero where GSC has no row for the date)
+      // GSC raw + DMAs (null on the lagging tail and gap-day ctr/position)
       gscClicks: gscClicks[i], gc30: gc30[i], gc90: gc90[i],
       gscImpressions: gscImpressions[i], gi30: gi30[i], gi90: gi90[i],
       gscCtr: gscCtr[i], gctr30: gctr30[i], gctr90: gctr90[i],
@@ -1109,7 +1137,8 @@ export default function GA4InsightsPage() {
 
   const chartData = useMemo(() => {
     if (!fullSeries.length) return [];
-    return fullSeries.filter(d => inRange(d, cutoff, selectedYears));
+    // Trim today's partial row so KPI sums/DMAs agree with the charts.
+    return trimToYesterday(fullSeries.filter(d => inRange(d, cutoff, selectedYears)));
   }, [fullSeries, cutoff, selectedYears]);
 
   // Weighted aggregates over the visible window (KPI tiles). Bounce rate and
@@ -1135,10 +1164,9 @@ export default function GA4InsightsPage() {
     const nsRevenue = sum('nsRevenue');
     const totalGscClicks = sum('gscClicks');
     const totalGscImpressions = sum('gscImpressions');
-    // Latest 30/90 DMAs and 7-day slopes drive the trend arrows. The
-    // StatCard's growth/contracting rule is uniform "30 > 90 = GROWING" —
-    // for avg position (lower is better) the badge will read inverted, the
-    // caller accepts that.
+    // Latest 30/90 DMAs and 7-day slopes drive the trend arrows. Avg position
+    // (lower is better) passes `invert` to its StatCard so the badge reads
+    // Improving/Worsening instead of a backwards Growing.
     const last = chartData[chartData.length - 1];
     const slopeOf = (f) => slopeLastN(chartData.map(d => d[f]), 7);
     return {
@@ -1285,6 +1313,7 @@ export default function GA4InsightsPage() {
 
   return (
     <>
+      <UpdatingPill show={refetching || (loading && !!aggregate)} />
       <div style={{
         padding: '12px clamp(12px, 4vw, 32px)', borderBottom: '1px solid #1e293b',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,
@@ -1376,6 +1405,7 @@ export default function GA4InsightsPage() {
                   value={kpi.gscPosition != null ? kpi.gscPosition.toFixed(1) : '—'}
                   sub="weighted by impressions — lower is better"
                   ma30={kpi.gpos30} ma90={kpi.gpos90} slope30={kpi.gpos30Slope} slope90={kpi.gpos90Slope}
+                  invert
                   formatter={(v) => v == null ? '—' : v.toFixed(1)} />
               </div>
             </>

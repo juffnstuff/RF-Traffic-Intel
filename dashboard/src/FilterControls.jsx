@@ -32,17 +32,16 @@ export function useLocalStorageState(key, defaultValue) {
   return [state, setState];
 }
 
-// Remove every rfti.* key so the "Clear filters" button wipes all persisted
-// filter state. Returns a bumped counter the caller can use as a React `key`
-// to force a remount of components with internal state.
-export function clearAllFilters() {
+// Shared filter keys owned by the range/years controls in this file.
+const SHARED_FILTER_KEYS = ['range', 'years', 'weekdayOnly', 'showDaily'];
+
+// Remove the persisted state for the shared time-filter keys plus any
+// page-specific keys the caller passes (unprefixed, e.g. 'pgR.sizeBucket').
+// Deliberately scoped — wiping every rfti.* key would nuke other tabs'
+// filters. No return value; callers reset their own React state via setters.
+export function clearAllFilters(extraKeys = []) {
   try {
-    const keys = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith('rfti.')) keys.push(k);
-    }
-    keys.forEach(k => localStorage.removeItem(k));
+    [...SHARED_FILTER_KEYS, ...extraKeys].forEach(k => localStorage.removeItem(`rfti.${k}`));
   } catch { /* ignore */ }
 }
 
@@ -101,13 +100,34 @@ export function YearsDropdown({ selected, available, onChange }) {
     selected.length <= 3   ? `Years: ${selected.join(', ')}` :
                              `Years: ${selected.length} selected`;
 
-  const toggle = (y) =>
-    onChange(selected.includes(y) ? selected.filter(v => v !== y) : [...selected, y].sort());
+  // Every window-aggregated fetch spans years[0]-01-01 … years[last]-12-31,
+  // so a non-contiguous selection (e.g. 2023 + 2025) would silently include
+  // the gap years in tables while charts exclude them. Enforce contiguity:
+  // toggling a year on auto-selects any gap years; toggling an interior year
+  // off keeps the contiguous run containing the most recent year.
+  const toggle = (y) => {
+    if (selected.includes(y)) {
+      const rest = selected.filter(v => v !== y).sort();
+      if (rest.length > 1) {
+        let start = rest.length - 1;
+        while (start > 0 && Number(rest[start - 1]) === Number(rest[start]) - 1) start--;
+        onChange(rest.slice(start));
+      } else {
+        onChange(rest);
+      }
+      return;
+    }
+    const next = [...selected, y].sort();
+    const filled = [];
+    for (let n = Number(next[0]); n <= Number(next[next.length - 1]); n++) filled.push(String(n));
+    onChange(filled);
+  };
 
   return (
     <div ref={ref} style={{ position: 'relative' }}>
       <button
         onClick={() => setOpen(o => !o)}
+        title="Year selection is kept contiguous — picking 2023 and 2025 auto-selects 2024 (aggregates span min–max)"
         style={{
           ...SELECT_STYLE,
           background: selected.length > 0 ? '#f59e0b' : '#334155',

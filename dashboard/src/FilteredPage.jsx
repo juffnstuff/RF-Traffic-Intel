@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import DashboardView from './DashboardView';
 import { MultiSelectDropdown, useLocalStorageState } from './FilterControls';
+import { waitForRefreshLocks } from './utils/refresh';
+import UpdatingPill from './components/UpdatingPill';
 
 export default function FilteredPage() {
   const [filterOptions, setFilterOptions] = useState({ partGroups: [], salesReps: [] });
@@ -24,6 +26,7 @@ export default function FilteredPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState(null);
 
   useEffect(() => {
     fetch('/api/filters')
@@ -85,23 +88,21 @@ export default function FilteredPage() {
 
   const handleRefresh = async (mode) => {
     setRefreshing(true);
+    setRefreshError(null);
     try {
       const res = await fetch(`/api/refresh/netsuite-dim?mode=${mode}`, { method: 'POST' });
       const json = await res.json();
-      if (json.success) {
-        setTimeout(() => {
-          loadData();
-          fetch('/api/filters').then(r => r.json()).then(setFilterOptions).catch(() => {});
-          fetch('/api/ga4-campaigns').then(r => r.ok ? r.json() : null).then(j => setGa4Campaigns(j?.campaigns || [])).catch(() => {});
-          fetch('/api/size-buckets').then(r => r.ok ? r.json() : null).then(j => setSizeBuckets(j?.buckets || [])).catch(() => {});
-          setRefreshing(false);
-        }, 500);
-      } else {
-        alert(`Refresh failed: ${json.error}`);
-        setRefreshing(false);
-      }
+      if (!json.success) throw new Error(json.error || `API ${res.status}`);
+      // A dim backfill can take minutes — poll the locks instead of a fixed delay.
+      const done = await waitForRefreshLocks(['netsuite-header', 'netsuite-dim']);
+      if (!done) setRefreshError('Refresh still running after 15 min — reloaded what was available.');
+      loadData();
+      fetch('/api/filters').then(r => r.json()).then(setFilterOptions).catch(() => {});
+      fetch('/api/ga4-campaigns').then(r => r.ok ? r.json() : null).then(j => setGa4Campaigns(j?.campaigns || [])).catch(() => {});
+      fetch('/api/size-buckets').then(r => r.ok ? r.json() : null).then(j => setSizeBuckets(j?.buckets || [])).catch(() => {});
     } catch (e) {
-      alert(`Refresh failed: ${e.message}`);
+      setRefreshError(`Refresh failed: ${e.message}`);
+    } finally {
       setRefreshing(false);
     }
   };
@@ -114,6 +115,11 @@ export default function FilteredPage() {
     setCustomerType('all');
     setSizeBucket(null);
   };
+
+  // Which filter groups are active — drives the scope-disclosure note below.
+  const nsFilterActive = selectedPartGroups.length > 0 || selectedSalesReps.length > 0
+    || customerType !== 'all' || sizeBucket != null;
+  const ga4FilterActive = selectedCampaigns.length > 0 || selectedChannels.length > 0;
 
   const filterPanel = useMemo(() => (
     <div style={{ padding: '14px clamp(12px, 4vw, 32px)', borderBottom: '1px solid #1e293b', background: '#0b1220' }}>
@@ -230,8 +236,16 @@ export default function FilteredPage() {
           })}
         </div>
       </div>
+
+      {/* Scope disclosure — the two filter groups shape different series. */}
+      {(nsFilterActive || ga4FilterActive) && (
+        <div style={{ color: '#64748b', fontSize: 11, marginTop: 10 }}>
+          ⓘ Filter scope: part group / rep / size / customer filters shape the <strong style={{ color: '#94a3b8' }}>NetSuite</strong> quote/order series only;
+          channel / campaign filters shape only the <strong style={{ color: '#94a3b8' }}>GA4</strong> traffic overlay. Neither group affects the other's series.
+        </div>
+      )}
     </div>
-  ), [filterOptions, ga4Campaigns, ga4Channels, sizeBuckets, selectedPartGroups, selectedSalesReps, selectedCampaigns, selectedChannels, customerType, sizeBucket]);
+  ), [filterOptions, ga4Campaigns, ga4Channels, sizeBuckets, selectedPartGroups, selectedSalesReps, selectedCampaigns, selectedChannels, customerType, sizeBucket, nsFilterActive, ga4FilterActive]);
 
   if (loading && !data) {
     return <div style={{ padding: 'clamp(16px, 4vw, 40px)', color: '#94a3b8' }}>Loading filtered data...</div>;
@@ -249,6 +263,7 @@ export default function FilteredPage() {
         }}>
           {refreshing ? 'Fetching line-level data...' : 'Run Full Dim Backfill'}
         </button>
+        {refreshError && <p style={{ color: '#f87171', fontSize: 11, marginTop: 6 }}>{refreshError}</p>}
       </div>
     );
   }
@@ -262,6 +277,8 @@ export default function FilteredPage() {
     `${selectedChannels.length || 'all'} channels`;
 
   return (
+    <>
+    <UpdatingPill show={loading && !!data} />
     <DashboardView
       daily={data?.daily || []}
       ga4Daily={ga4?.daily || []}
@@ -271,6 +288,7 @@ export default function FilteredPage() {
       subtitle={<>netsuite-dim — filtered: {summary}</>}
       onRefresh={handleRefresh}
       refreshing={refreshing}
+      refreshError={refreshError}
       sourceLabel="netsuite-dim"
       onClearFilters={handleClearFilters}
       aiContext={{
@@ -288,5 +306,6 @@ export default function FilteredPage() {
         },
       }}
     />
+    </>
   );
 }

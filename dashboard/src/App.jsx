@@ -8,6 +8,7 @@ import SEOKPIsPage from './SEOKPIsPage';
 import CrossSourcePage from './CrossSourcePage';
 import RFTILogo from './components/RFTILogo';
 import { PinProvider, PinPanel } from './utils/pins';
+import { waitForRefreshLocks } from './utils/refresh';
 
 function OverviewPage() {
   const [data, setData] = useState(null);
@@ -19,6 +20,7 @@ function OverviewPage() {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState(null);
 
   const loadData = useCallback(() => {
     setLoading(true);
@@ -44,17 +46,18 @@ function OverviewPage() {
 
   const handleRefresh = async (mode) => {
     setRefreshing(true);
+    setRefreshError(null);
     try {
       const res = await fetch(`/api/refresh/netsuite?mode=${mode}`, { method: 'POST' });
       const json = await res.json();
-      if (json.success) {
-        setTimeout(() => { loadData(); setRefreshing(false); }, 500);
-      } else {
-        alert(`Refresh failed: ${json.error}`);
-        setRefreshing(false);
-      }
+      if (!json.success) throw new Error(json.error || `API ${res.status}`);
+      // A backfill can take minutes — poll the lock instead of a fixed delay.
+      const done = await waitForRefreshLocks(['netsuite-header']);
+      if (!done) setRefreshError('Refresh still running after 15 min — reloaded what was available.');
+      loadData();
     } catch (e) {
-      alert(`Refresh failed: ${e.message}`);
+      setRefreshError(`Refresh failed: ${e.message}`);
+    } finally {
       setRefreshing(false);
     }
   };
@@ -70,14 +73,85 @@ function OverviewPage() {
       channelsDaily={channelsDaily?.daily || []}
       onRefresh={handleRefresh}
       refreshing={refreshing}
+      refreshError={refreshError}
       sourceLabel={data?.sources?.join(', ') || ''}
       aiContext={{ page: 'overview' }}
     />
   );
 }
 
+// Thin data-freshness warning strip below the tab bar. Only renders when a
+// source is stale or errored; dismissible for the session.
+function FetchHealthStrip() {
+  const [health, setHealth] = useState(null);
+  const [dismissed, setDismissed] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/fetch-health')
+      .then(r => r.ok ? r.json() : null)
+      .then(setHealth)
+      .catch(() => {});
+  }, []);
+
+  if (dismissed) return null;
+  const problems = (health?.sources || []).filter(s => s.stale || s.status === 'error');
+  if (problems.length === 0) return null;
+
+  const ago = (iso) => {
+    if (!iso) return 'never';
+    const ms = Date.now() - new Date(iso).getTime();
+    if (!Number.isFinite(ms) || ms < 0) return 'recently';
+    const h = Math.floor(ms / 3600000);
+    if (h < 1) return '<1h ago';
+    if (h < 48) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+  };
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '5px clamp(12px, 4vw, 32px)',
+      background: 'rgba(127, 29, 29, 0.25)',
+      borderBottom: '1px solid #7f1d1d',
+      color: '#fca5a5', fontSize: 11,
+    }}>
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+        ⚠ Data freshness: {problems.map(s =>
+          `${s.source} last synced ${ago(s.finished_at || s.started_at)}${s.status === 'error' && s.error ? ` (error: ${s.error})` : ''}`
+        ).join(' · ')}
+      </span>
+      <button
+        onClick={() => setDismissed(true)}
+        style={{ background: 'transparent', border: 'none', color: '#fca5a5', cursor: 'pointer', fontSize: 13, lineHeight: 1, padding: '0 2px' }}
+        title="Dismiss for this session"
+      >×</button>
+    </div>
+  );
+}
+
+// Shareable-link tab ids ↔ internal tab state values.
+const HASH_TO_TAB = {
+  overview: 'overview', filtered: 'filtered', partgroups: 'pg-r',
+  ga4: 'ga4', paid: 'paid', seo: 'seo', roas: 'cross',
+};
+const TAB_TO_HASH = Object.fromEntries(Object.entries(HASH_TO_TAB).map(([h, t]) => [t, h]));
+const tabFromHash = () => HASH_TO_TAB[window.location.hash.replace(/^#/, '')] || 'overview';
+
 export default function App() {
-  const [tab, setTab] = useState('overview');
+  const [tab, setTab] = useState(tabFromHash);
+
+  // Back/forward and pasted #hash links select the matching tab.
+  useEffect(() => {
+    const onHash = () => setTab(tabFromHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  const selectTab = (t) => {
+    setTab(t);
+    // replaceState so tab clicks don't spam the history stack.
+    history.replaceState(null, '', `#${TAB_TO_HASH[t] || t}`);
+  };
 
   const tabStyle = (active) => ({
     background: 'transparent',
@@ -114,15 +188,17 @@ export default function App() {
             <span className="dso-auto-tag" style={{ fontSize: 11 }}>Traffic Intelligence · Live</span>
           </div>
           <nav style={{ display: 'flex', gap: 2, overflowX: 'auto', whiteSpace: 'nowrap' }}>
-            <button style={tabStyle(tab === 'overview')} onClick={() => setTab('overview')}>Overview</button>
-            <button style={tabStyle(tab === 'filtered')} onClick={() => setTab('filtered')}>By Part Group / Rep</button>
-            <button style={tabStyle(tab === 'pg-r')} onClick={() => setTab('pg-r')}>Part Group r-Analysis</button>
-            <button style={tabStyle(tab === 'ga4')} onClick={() => setTab('ga4')}>GA4 Insights</button>
-            <button style={tabStyle(tab === 'paid')} onClick={() => setTab('paid')}>Paid KPIs</button>
-            <button style={tabStyle(tab === 'seo')} onClick={() => setTab('seo')}>SEO KPIs</button>
-            <button style={tabStyle(tab === 'cross')} onClick={() => setTab('cross')}>ROAS</button>
+            <button style={tabStyle(tab === 'overview')} onClick={() => selectTab('overview')}>Overview</button>
+            <button style={tabStyle(tab === 'filtered')} onClick={() => selectTab('filtered')}>By Part Group / Rep</button>
+            <button style={tabStyle(tab === 'pg-r')} onClick={() => selectTab('pg-r')}>Part Group r-Analysis</button>
+            <button style={tabStyle(tab === 'ga4')} onClick={() => selectTab('ga4')}>GA4 Insights</button>
+            <button style={tabStyle(tab === 'paid')} onClick={() => selectTab('paid')}>Paid KPIs</button>
+            <button style={tabStyle(tab === 'seo')} onClick={() => selectTab('seo')}>SEO KPIs</button>
+            <button style={tabStyle(tab === 'cross')} onClick={() => selectTab('cross')}>ROAS</button>
           </nav>
         </header>
+
+        <FetchHealthStrip />
 
         {tab === 'overview' && <OverviewPage />}
         {tab === 'filtered' && <FilteredPage />}
