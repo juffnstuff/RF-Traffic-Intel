@@ -429,32 +429,8 @@ export async function initDB() {
     )
   `);
 
-  // HubSpot closed-won deals. One row per deal_id. Source/attribution fields
-  // come from HubSpot's `hs_analytics_source*` on the deal record and power
-  // the "which channel drove this deal" split on the Paid/SEO tabs.
-  await p.query(`
-    CREATE TABLE IF NOT EXISTS hubspot_deals (
-      deal_id TEXT PRIMARY KEY,
-      deal_name TEXT NOT NULL DEFAULT '',
-      amount NUMERIC(15,2) DEFAULT 0,
-      close_date DATE,
-      stage TEXT NOT NULL DEFAULT '',
-      stage_label TEXT NOT NULL DEFAULT '',
-      pipeline TEXT NOT NULL DEFAULT '',
-      owner_id TEXT NOT NULL DEFAULT '',
-      source TEXT NOT NULL DEFAULT '',
-      source_data_1 TEXT NOT NULL DEFAULT '',
-      source_data_2 TEXT NOT NULL DEFAULT '',
-      campaign_guid TEXT NOT NULL DEFAULT '',
-      is_closed_won BOOLEAN DEFAULT FALSE,
-      created_at TIMESTAMPTZ,
-      modified_at TIMESTAMPTZ,
-      updated_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `);
-  await p.query(`CREATE INDEX IF NOT EXISTS idx_hs_close_date ON hubspot_deals(close_date)`);
-  await p.query(`CREATE INDEX IF NOT EXISTS idx_hs_source ON hubspot_deals(source)`);
-  await p.query(`CREATE INDEX IF NOT EXISTS idx_hs_won ON hubspot_deals(is_closed_won)`);
+  // (hubspot_deals was retired: NetSuite quotes are the revenue truth. The
+  //  table is no longer created; existing deployments keep theirs untouched.)
 
   // HubSpot contacts. The NetSuite↔HubSpot middleware writes the originating
   // NetSuite quote number into `netsuite_quote_number`. That COULD give a
@@ -655,25 +631,9 @@ export async function initDB() {
   await p.query(`CREATE INDEX IF NOT EXISTS idx_crux_page_date ON crux_daily_by_page(date)`);
   await p.query(`CREATE INDEX IF NOT EXISTS idx_crux_page_path ON crux_daily_by_page(page)`);
 
-  // Part-group attribution rules. Each row maps a pattern (a campaign
-  // name, a GSC query, or a URL path) to a part_group. match_type picks
-  // the source field; match_kind picks how the pattern is compared.
-  // Curated by hand via the Cross-Source admin UI — no fetcher writes
-  // here.
-  await p.query(`
-    CREATE TABLE IF NOT EXISTS part_group_mappings (
-      id SERIAL PRIMARY KEY,
-      part_group TEXT NOT NULL,
-      match_type TEXT NOT NULL CHECK (match_type IN ('campaign', 'query', 'url')),
-      match_kind TEXT NOT NULL CHECK (match_kind IN ('exact', 'contains', 'prefix')),
-      pattern TEXT NOT NULL,
-      notes TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW(),
-      updated_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `);
-  await p.query(`CREATE INDEX IF NOT EXISTS idx_pgm_partgroup ON part_group_mappings(part_group)`);
-  await p.query(`CREATE INDEX IF NOT EXISTS idx_pgm_type ON part_group_mappings(match_type)`);
+  // (part_group_mappings was retired: the curated campaign→part_group lane
+  //  was replaced by contact-bridge cost allocation. No longer created;
+  //  existing deployments keep theirs untouched.)
 
   // ── CallRail ─────────────────────────────────────────────────────
   // Per-call rows (one row = one phone call). Attribution columns mirror
@@ -2244,66 +2204,6 @@ export async function markOfflineUpload({ quote_no, gclid, conversion_value, con
 
 // ── HubSpot helpers ──────────────────────────────────────────────────
 
-export async function upsertHubSpotDeals(rows) {
-  if (!rows || rows.length === 0) return 0;
-  const p = getPool();
-  const client = await p.connect();
-  try {
-    await client.query('BEGIN');
-    let upserted = 0, skipped = 0;
-    for (const r of rows) {
-      await client.query('SAVEPOINT hs_row');
-      try {
-        await client.query(`
-        INSERT INTO hubspot_deals
-          (deal_id, deal_name, amount, close_date, stage, stage_label, pipeline,
-           owner_id, source, source_data_1, source_data_2, campaign_guid,
-           is_closed_won, created_at, modified_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
-        ON CONFLICT (deal_id) DO UPDATE SET
-          deal_name     = EXCLUDED.deal_name,
-          amount        = EXCLUDED.amount,
-          close_date    = EXCLUDED.close_date,
-          stage         = EXCLUDED.stage,
-          stage_label   = EXCLUDED.stage_label,
-          pipeline      = EXCLUDED.pipeline,
-          owner_id      = EXCLUDED.owner_id,
-          source        = EXCLUDED.source,
-          source_data_1 = EXCLUDED.source_data_1,
-          source_data_2 = EXCLUDED.source_data_2,
-          campaign_guid = EXCLUDED.campaign_guid,
-          is_closed_won = EXCLUDED.is_closed_won,
-          created_at    = EXCLUDED.created_at,
-          modified_at   = EXCLUDED.modified_at,
-          updated_at    = NOW()
-      `, [
-          r.deal_id, r.deal_name ?? '', r.amount ?? 0, r.close_date,
-          r.stage ?? '', r.stage_label ?? '', r.pipeline ?? '',
-          r.owner_id ?? '', r.source ?? '',
-          r.source_data_1 ?? '', r.source_data_2 ?? '', r.campaign_guid ?? '',
-          !!r.is_closed_won, r.created_at, r.modified_at,
-        ]);
-        await client.query('RELEASE SAVEPOINT hs_row');
-        upserted++;
-      } catch (rowErr) {
-        // One malformed row must not roll back the whole batch. Skip it,
-        // keep the good rows, and surface a sample of what failed.
-        await client.query('ROLLBACK TO SAVEPOINT hs_row');
-        skipped++;
-        if (skipped <= 5) console.warn(`    ⚠️  skipped deal ${r.deal_id}: ${rowErr.message}`);
-      }
-    }
-    await client.query('COMMIT');
-    if (skipped) console.warn(`    ⚠️  upsertHubSpotDeals skipped ${skipped}/${rows.length} bad rows`);
-    return upserted;
-  } catch (e) {
-    await client.query('ROLLBACK');
-    throw e;
-  } finally {
-    client.release();
-  }
-}
-
 export async function upsertHubSpotCampaigns(rows) {
   if (!rows || rows.length === 0) return 0;
   const p = getPool();
@@ -2650,31 +2550,6 @@ export async function getHubSpotNetsuiteQuotesCount() {
   const p = getPool();
   const { rows } = await p.query('SELECT COUNT(*)::int as cnt FROM hubspot_netsuite_quotes');
   return rows[0].cnt;
-}
-
-// Lead-source bucket for a row. Mirrors HubSpot's analytics source taxonomy
-// but folds blanks to '(UNKNOWN)' so the rollup doesn't silently drop them.
-// Caller picks which column to bucket on:
-//   'hs_analytics_source' — HubSpot first-touch / original (stable per contact)
-//   'hs_latest_source'    — HubSpot latest session source (overwrites on new sessions)
-//   'netsuite'            — the quote's own NetSuite Customer Lead Source
-//                           (q.ns_lead_source). Independent of the contact join,
-//                           so it works even for the ~93% OFFLINE/integration
-//                           contacts whose HubSpot source is frozen. Treat as
-//                           advisory — it's rep-entered in NetSuite.
-function hsSourceBucketSql(column) {
-  if (column === 'netsuite') return `COALESCE(NULLIF(q.ns_lead_source, ''), '(UNKNOWN)')`;
-  const allowed = new Set(['hs_analytics_source', 'hs_latest_source']);
-  if (!allowed.has(column)) throw new Error(`Invalid attribution column: ${column}`);
-  return `COALESCE(NULLIF(hc.${column}, ''), '(UNKNOWN)')`;
-}
-
-function hsCampaignDrilldownSql(column) {
-  const allowed = new Set(['hs_analytics_source', 'hs_latest_source']);
-  if (!allowed.has(column)) throw new Error(`Invalid attribution column: ${column}`);
-  return column === 'hs_analytics_source'
-    ? 'hc.hs_analytics_source_data_1'
-    : 'hc.hs_latest_source_data_1';
 }
 
 // Revenue attribution by HubSpot traffic source.
@@ -3928,13 +3803,6 @@ export async function getPagePerformance({ limit = 100 } = {}) {
     ga4_engagement_rate: r.ga4_sessions > 0 ? Number(r.ga4_engaged_sessions) / Number(r.ga4_sessions) : null,
   }));
 }
-
-// ── Part-group mapping CRUD (retired) ───────────────────────────────
-// The curated campaign→part_group mapping lane was replaced by the contact
-// bridge: getPartGroupRoasFromHubSpot now allocates each campaign's spend
-// across the part groups its own leads' quotes fell under. The
-// part_group_mappings table is left in the schema (no destructive drop) but
-// nothing reads or writes it anymore.
 
 // ── CallRail helpers ─────────────────────────────────────────────────
 

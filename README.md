@@ -107,6 +107,11 @@ seconds.
 
 ### Step 6 — Run the dashboard
 
+> **Production note:** set `APP_USERNAME` + `APP_PASSWORD` — the server
+> refuses to start in production without them (the API exposes customer
+> emails and revenue). `ALLOW_UNAUTHENTICATED=true` is the explicit escape
+> hatch for deploys behind an authenticating proxy.
+
 **Development (live reload):**
 ```bash
 npm run dev
@@ -125,14 +130,25 @@ node server.js
 
 ## Refresh Schedule
 
-NetSuite data should be refreshed daily. Set up a cron job:
+The server schedules its own nightly refresh: **every day at 2:00 AM**
+(`CRON_TIMEZONE`, default America/New_York) it re-fetches the last 60 days
+from every credentialed source, sharing the same fetch locks as the manual
+refresh endpoints. Every run (success or error) is recorded in `fetch_log`
+and surfaced at `GET /api/fetch-health`, which the dashboard shows as a
+freshness warning strip when a source goes stale (>48h) or errors.
 
-```bash
-# Refresh NetSuite every weekday at 8am
-0 8 * * 1-5 cd /path/to/rf-traffic-intel && npm run fetch:netsuite && node fetchers/fetch-hubspot.js
-```
+No external cron is needed. Manual kicks: `POST /api/refresh/<source>` or the
+per-source npm scripts.
 
-Google data is cached and only needs refresh weekly (Search Console has a 3-day data lag anyway).
+### Offline conversion upload (Google Ads)
+
+`npm run upload:offline-conversions` pushes won-quote revenue back into
+Google Ads as gclid-keyed click conversions, so Smart Bidding optimizes
+toward revenue instead of form fills. It is **dry-run by default** — add
+`-- --live` to actually upload. Requires `GOOGLE_ADS_CONVERSION_ACTION_ID`
+(an Import-type conversion action). Uploads are deduplicated by quote number
+on both sides (local ledger + Google orderId). Run it weekly, or after big
+close-outs.
 
 ---
 
@@ -177,27 +193,32 @@ rf-traffic-intel/
 
 ---
 
-## API Endpoints
+## API Endpoints (main groups)
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /api/unified` | Full merged daily dataset |
-| `GET /api/netsuite` | NetSuite data only |
-| `GET /api/gsc` | Search Console daily aggregate |
-| `GET /api/gsc-top?kind=query\|page` | Top 50 queries/pages for the latest 28d window |
-| `GET /api/ga4` | GA4 data only |
-| `GET /api/google-ads` | Google Ads daily aggregate (cost, clicks, impressions) |
-| `GET /api/google-ads-campaigns?since=&until=` | Per-campaign window stats |
-| `GET /api/hubspot-deals?since=&until=&source=` | Closed-won deals in window |
-| `GET /api/hubspot-deals-daily` | Daily won counts + revenue by attribution source |
-| `GET /api/health` | Server status + cache ages |
-| `POST /api/refresh/netsuite` | Re-fetch NetSuite in background |
-| `POST /api/refresh/ga4?mode=full\|incremental` | Re-fetch GA4 |
-| `POST /api/refresh/google-ads?mode=full\|incremental` | Re-fetch Google Ads |
-| `POST /api/refresh/hubspot?mode=full\|incremental` | Re-fetch HubSpot |
-| `POST /api/refresh/gsc?mode=full\|incremental` | Re-fetch Search Console |
+| `GET /api/unified` | Merged NetSuite daily dataset (`?start=&end=`) |
+| `GET /api/unified-dim` | Same, filtered by part-group / rep / size / customer type |
+| `GET /api/filters`, `/api/size-buckets` | Filter picker options |
+| `GET /api/ga4`, `/api/ga4-by-channel`, `/api/ga4-channels-daily`, `/api/ga4-by-campaign` | GA4 daily series |
+| `GET /api/ga4-landing-pages`, `-source-medium`, `-first-touch`, `-devices`, `-countries`, `-events`, `-new-vs-returning` | GA4 window aggregations |
+| `GET /api/google-ads`, `/api/google-ads-campaigns?since=&until=` | Google Ads daily + per-campaign stats |
+| `GET /api/gsc`, `/api/gsc-top?kind=query\|page`, `/api/gsc-query-history`, `/api/gsc-query-movers`, `/api/gsc-branded-share` | Search Console |
+| `GET /api/crux`, `/api/crux-by-page` | Core Web Vitals (CrUX) |
+| `GET /api/quotes-won`, `/api/quotes-won-daily` | Won NetSuite quotes attributed via HubSpot contact |
+| `GET /api/insights/campaign-roas` | Windowed campaign ROAS via the contact bridge |
+| `GET /api/insights/campaign-roas-cohort` | Cohort ROAS: window spend vs lifetime revenue of leads acquired in window |
+| `GET /api/insights/quote-lag-histogram?paid_only=` | Click-to-quote lag distribution (median/avg) |
+| `GET /api/insights/part-group-roas` | Part-group ROAS (paid-scoped numerator; all-channel context columns) |
+| `GET /api/insights/hubspot-netsuite-attribution?column=` | Revenue by source (first/latest/NetSuite lens) |
+| `GET /api/insights/quote-attribution`, `/api/insights/lead-source-reconciliation` | Attribution drill-downs |
+| `GET /api/insights/campaign-roi`, `/api/insights/page-performance` | Ads×GA4×CallRail ROI, GSC×GA4 pages |
+| `GET /api/callrail-daily`, `-by-campaign`, `-calls`, `-form-submissions`, `-text-messages`, `-trackers` | CallRail |
+| `GET /api/health`, `/api/fetch-health`, `/api/refresh-status`, `/api/meta/date-range` | Ops: status, per-source freshness, in-flight fetches, real data date range |
+| `POST /api/refresh/{netsuite\|netsuite-dim\|ga4\|google-ads\|hubspot\|gsc\|callrail\|crux}?mode=full\|incremental` | Kick a re-fetch in the background |
+| `POST /api/interpret` | AI narrative over a dashboard snapshot (auth-gated) |
 
-Query params for `/api/unified`: `?start=2024-01-01&end=2025-01-01`
+Diagnostics (`/api/diag/*`, `/api/netsuite-customers`, `/api/netsuite-transactions`, `/api/interpret`) require Basic auth even when the rest of the app is deliberately open.
 
 ---
 
