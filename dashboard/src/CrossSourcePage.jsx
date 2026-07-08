@@ -304,6 +304,24 @@ function HubSpotAttributionTable({ rows, lens }) {
 // means the latest source was set in a session AFTER the quote was created,
 // so first-touch is the more trustworthy lens for that row.
 function QuoteAttributionTable({ rows }) {
+  // Free-text search across every displayed column. Multiple words AND
+  // together, each matching anywhere in the row ("acme spill won" finds
+  // Acme's won Spill Containment quotes).
+  const [search, setSearch] = useState('');
+  const filtered = useMemo(() => {
+    if (!rows) return rows;
+    const words = search.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return rows;
+    return rows.filter((r) => {
+      const hay = [
+        r.quote_no, r.created_at ? String(r.created_at).slice(0, 10) : '',
+        r.email, r.company, r.status, r.total,
+        r.parts_group, r.original_source, r.original_campaign,
+        r.latest_source, r.latest_campaign,
+      ].filter(v => v != null).join(' ').toLowerCase();
+      return words.every(w => hay.includes(w));
+    });
+  }, [rows, search]);
   if (!rows) return null;
   if (rows.length === 0) {
     return <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, padding: '20px 0' }}>
@@ -323,6 +341,27 @@ function QuoteAttributionTable({ rows }) {
         means the contact's latest-source timestamp is older than the quote date — the latest source is the source-of-truth
         for that quote. ✗ means latest was overwritten by a later session, so use first-touch for that row.
       </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+        <input
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search quotes — contact, company, product, campaign, status…"
+          style={{ background: 'var(--dso-bg, #0f172a)', border: '1px solid var(--dso-rule)', borderRadius: 3, color: 'var(--dso-text)', fontSize: 12, padding: '4px 8px', minWidth: 320 }}
+        />
+        <span style={{ color: 'var(--dso-text-faint)', fontSize: 11 }}>
+          {filtered.length} of {rows.length} quote{rows.length === 1 ? '' : 's'}
+        </span>
+        {search && (
+          <button onClick={() => setSearch('')} style={{ background: 'transparent', border: 'none', color: 'var(--dso-text-dim)', fontSize: 11, cursor: 'pointer', padding: 0 }}>
+            clear
+          </button>
+        )}
+      </div>
+      {filtered.length === 0 ? (
+        <div style={{ color: 'var(--dso-text-dim)', fontSize: 12, padding: '12px 0' }}>
+          No quotes match “{search}”.
+        </div>
+      ) : (
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
           <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
@@ -338,7 +377,7 @@ function QuoteAttributionTable({ rows }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
+          {filtered.map((r) => (
             <tr key={r.quote_object_id} style={{ borderTop: '1px solid var(--dso-rule)' }}>
               <td style={{ padding: '8px 10px', fontFamily: 'var(--dso-font-mono, monospace)' }}>
                 {r.quote_no || <span style={{ color: 'var(--dso-text-faint)' }}>—</span>}
@@ -370,6 +409,7 @@ function QuoteAttributionTable({ rows }) {
           ))}
         </tbody>
       </table>
+      )}
     </div>
   );
 }
