@@ -68,6 +68,34 @@ async function runReportWithRetry(client, request, label) {
   }
 }
 
+// GA4 caps a single response at `limit` rows (hard per-request max 250k) and
+// runReport does NOT page on its own — a 2-year backfill of a high-cardinality
+// dim (landing page × 730 days) can exceed one request and would silently
+// truncate. Loop with offset until rowCount rows have been collected.
+async function runPagedReport(client, request, label) {
+  const pageSize = Math.min(Number(request.limit) || 100000, 100000);
+  let offset = 0;
+  let rows = [];
+  for (;;) {
+    const [resp] = await runReportWithRetry(
+      client,
+      { ...request, limit: pageSize, offset },
+      offset === 0 ? label : `${label} (offset ${offset})`
+    );
+    const got = resp.rows || [];
+    rows = rows.concat(got);
+    const total = Number(resp.rowCount ?? 0);
+    offset += got.length;
+    if (got.length === 0 || offset >= total) {
+      if (offset < total) {
+        console.warn(`    ⚠️  ${label}: collected ${offset}/${total} rows (short response)`);
+      }
+      return { ...resp, rows };
+    }
+    console.log(`    … ${label}: paging (${offset}/${total})`);
+  }
+}
+
 function parseGa4Date(s) {
   // GA4 returns YYYYMMDD
   if (!s || s.length !== 8) return null;
@@ -159,7 +187,7 @@ export async function fetchGa4({ since = null } = {}) {
 
   // ── 1. Aggregate daily ───────────────────────────────────────────────
   console.log('  → aggregate daily metrics...');
-  const [aggResp] = await runReportWithRetry(client, {
+  const aggResp = await runPagedReport(client, {
     property: `properties/${propertyId}`,
     dateRanges: [{ startDate, endDate }],
     dimensions: [DATE_DIM],
@@ -187,7 +215,7 @@ export async function fetchGa4({ since = null } = {}) {
 
   // ── 2. Per-campaign daily ────────────────────────────────────────────
   console.log('  → daily by campaign...');
-  const [campResp] = await runReportWithRetry(client, {
+  const campResp = await runPagedReport(client, {
     property: `properties/${propertyId}`,
     dateRanges: [{ startDate, endDate }],
     dimensions: [DATE_DIM, CAMPAIGN_DIM],
@@ -215,7 +243,7 @@ export async function fetchGa4({ since = null } = {}) {
 
   // ── 3. Per-channel daily (organic / paid / direct / referral / etc.) ──
   console.log('  → daily by channel...');
-  const [chanResp] = await runReportWithRetry(client, {
+  const chanResp = await runPagedReport(client, {
     property: `properties/${propertyId}`,
     dateRanges: [{ startDate, endDate }],
     dimensions: [DATE_DIM, CHANNEL_DIM],
@@ -245,7 +273,7 @@ export async function fetchGa4({ since = null } = {}) {
   // metric values in METRICS_LIGHT order and tags the dim under `dimKey`.
   const runDimReport = async (dim, dimKey, label, { metrics = METRICS_LIGHT, limit = 250000 } = {}) => {
     console.log(`  → daily by ${label}...`);
-    const [resp] = await runReportWithRetry(client, {
+    const resp = await runPagedReport(client, {
       property: `properties/${propertyId}`,
       dateRanges: [{ startDate, endDate }],
       dimensions: [DATE_DIM, dim],
@@ -284,7 +312,7 @@ export async function fetchGa4({ since = null } = {}) {
   //      separate by either or aggregate together. Requires both dims
   //      since "google" can be both organic and cpc on the same day.
   console.log('  → daily by source/medium...');
-  const [smResp] = await runReportWithRetry(client, {
+  const smResp = await runPagedReport(client, {
     property: `properties/${propertyId}`,
     dateRanges: [{ startDate, endDate }],
     dimensions: [DATE_DIM, SOURCE_DIM, MEDIUM_DIM],
@@ -314,7 +342,7 @@ export async function fetchGa4({ since = null } = {}) {
   //      on a 30-90d B2B cycle tells a very different story than
   //      session-source. Direct often hides paid-then-organic chains.
   console.log('  → daily by first-touch source/medium...');
-  const [ftResp] = await runReportWithRetry(client, {
+  const ftResp = await runPagedReport(client, {
     property: `properties/${propertyId}`,
     dateRanges: [{ startDate, endDate }],
     dimensions: [DATE_DIM, FIRST_SOURCE_DIM, FIRST_MEDIUM_DIM],

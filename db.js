@@ -37,6 +37,10 @@ export async function initDB() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // Idempotent migration for tables created before the adj columns existed
+  // (used to live inside upsertDailyRows, running on every fetch).
+  await p.query(`ALTER TABLE netsuite_daily ADD COLUMN IF NOT EXISTS quotes_adj_count INTEGER DEFAULT 0`);
+  await p.query(`ALTER TABLE netsuite_daily ADD COLUMN IF NOT EXISTS quotes_adj_total NUMERIC(15,2) DEFAULT 0`);
 
   await p.query(`
     CREATE TABLE IF NOT EXISTS fetch_log (
@@ -55,10 +59,10 @@ export async function initDB() {
   await p.query(`CREATE INDEX IF NOT EXISTS idx_fetch_log_source ON fetch_log(source, finished_at DESC)`);
 
   // Auto-migrate: if the dim table exists without the size_bucket or is_first
-  // columns, drop it so the new schema gets created below. An empty dim table
-  // triggers an auto-backfill on startup (see server.js), so the user doesn't
-  // have to do anything manual — the first post-deploy load repopulates with
-  // the current schema.
+  // columns, RENAME it aside so the new schema gets created below. An empty
+  // dim table triggers an auto-backfill on startup (see server.js). Renaming
+  // instead of dropping means a failed refetch leaves the old data
+  // recoverable (netsuite_daily_dim_legacy) instead of gone.
   const tableCheck = await p.query(`SELECT to_regclass('netsuite_daily_dim') as t`);
   if (tableCheck.rows[0].t) {
     const colCheck = await p.query(`
@@ -68,8 +72,14 @@ export async function initDB() {
     `);
     const present = new Set(colCheck.rows.map(r => r.column_name));
     if (!present.has('size_bucket') || !present.has('is_first')) {
-      console.log('⚠️  Migrating netsuite_daily_dim — dropping for schema update (triggers refetch)');
-      await p.query(`DROP TABLE netsuite_daily_dim`);
+      console.log('⚠️  Migrating netsuite_daily_dim — renaming old table to netsuite_daily_dim_legacy (triggers refetch)');
+      await p.query(`DROP TABLE IF EXISTS netsuite_daily_dim_legacy`);
+      await p.query(`ALTER TABLE netsuite_daily_dim RENAME TO netsuite_daily_dim_legacy`);
+      // Indexes move with the rename; drop them so the fresh table's
+      // CREATE INDEX IF NOT EXISTS calls below can claim the names.
+      for (const idx of ['idx_dim_date', 'idx_dim_partgroup', 'idx_dim_salesrep', 'idx_dim_size', 'idx_dim_first']) {
+        await p.query(`DROP INDEX IF EXISTS ${idx}`);
+      }
     }
   }
 
@@ -794,35 +804,71 @@ export async function initDB() {
   console.log('✅  Database tables ready');
 }
 
-export async function upsertDailyRows(rows) {
-  const p = getPool();
+// Chunked multi-row INSERT ... ON CONFLICT. Replaces the per-row query
+// loops that issued up to hundreds of thousands of sequential round-trips
+// per backfill. Rows must be unique on the conflict key within one call
+// (Postgres rejects a multi-row upsert that touches the same row twice) —
+// every caller already aggregates by its PK before upserting.
+async function bulkUpsert(client, { table, cols, conflictCols, updateCols, rows, toParams }) {
+  const updateSet = updateCols.map(c => `${c} = EXCLUDED.${c}`)
+    .concat('updated_at = NOW()').join(', ');
+  const perRow = cols.length;
+  // Positional params cap at 65535 per statement; stay well under it.
+  const chunkSize = Math.max(1, Math.floor(50000 / perRow));
   let upserted = 0;
-
-  // Add columns if upgrading from older schema
-  await p.query(`
-    ALTER TABLE netsuite_daily ADD COLUMN IF NOT EXISTS quotes_adj_count INTEGER DEFAULT 0;
-    ALTER TABLE netsuite_daily ADD COLUMN IF NOT EXISTS quotes_adj_total NUMERIC(15,2) DEFAULT 0;
-  `).catch(() => {});
-
-  for (const r of rows) {
-    await p.query(`
-      INSERT INTO netsuite_daily (date, quotes_count, quotes_total, quotes_adj_count, quotes_adj_total, orders_count, orders_total, shipped_count, shipped_total, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-      ON CONFLICT (date) DO UPDATE SET
-        quotes_count = EXCLUDED.quotes_count,
-        quotes_total = EXCLUDED.quotes_total,
-        quotes_adj_count = EXCLUDED.quotes_adj_count,
-        quotes_adj_total = EXCLUDED.quotes_adj_total,
-        orders_count = EXCLUDED.orders_count,
-        orders_total = EXCLUDED.orders_total,
-        shipped_count = EXCLUDED.shipped_count,
-        shipped_total = EXCLUDED.shipped_total,
-        updated_at = NOW()
-    `, [r.date, r.quotes_count, r.quotes_total, r.quotes_adj_count || 0, r.quotes_adj_total || 0, r.orders_count, r.orders_total, r.shipped_count, r.shipped_total]);
-    upserted++;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    const values = [];
+    const params = [];
+    chunk.forEach((r, j) => {
+      const rowParams = toParams(r);
+      const base = j * perRow;
+      values.push(`(${rowParams.map((_, k) => `$${base + k + 1}`).join(', ')}, NOW())`);
+      params.push(...rowParams);
+    });
+    await client.query(
+      `INSERT INTO ${table} (${cols.join(', ')}, updated_at)
+       VALUES ${values.join(', ')}
+       ON CONFLICT (${conflictCols.join(', ')}) DO UPDATE SET ${updateSet}`,
+      params
+    );
+    upserted += chunk.length;
   }
-
   return upserted;
+}
+
+// replaceSince: delete-then-insert from that date forward so days whose only
+// transaction was deleted or re-dated in NetSuite get zeroed out instead of
+// keeping stale totals forever (upsert alone can only touch dates that still
+// emit a GROUP BY row).
+export async function upsertDailyRows(rows, { replaceSince = null } = {}) {
+  const p = getPool();
+  const client = await p.connect();
+  const COLS = ['date', 'quotes_count', 'quotes_total', 'quotes_adj_count', 'quotes_adj_total',
+                'orders_count', 'orders_total', 'shipped_count', 'shipped_total'];
+  try {
+    await client.query('BEGIN');
+    if (replaceSince) {
+      await client.query(`DELETE FROM netsuite_daily WHERE date >= $1`, [replaceSince]);
+    }
+    const upserted = await bulkUpsert(client, {
+      table: 'netsuite_daily',
+      cols: COLS,
+      conflictCols: ['date'],
+      updateCols: COLS.slice(1),
+      rows,
+      toParams: r => [r.date, r.quotes_count, r.quotes_total, r.quotes_adj_count || 0,
+                      r.quotes_adj_total || 0, r.orders_count, r.orders_total,
+                      r.shipped_count, r.shipped_total],
+    });
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 export async function getAllDaily() {
@@ -900,18 +946,14 @@ export async function upsertDailyDimRows(rows, { replaceSince = null } = {}) {
     if (replaceSince) {
       await client.query(`DELETE FROM netsuite_daily_dim WHERE date >= $1`, [replaceSince]);
     }
-    let upserted = 0;
-    for (const r of rows) {
-      await client.query(`
-        INSERT INTO netsuite_daily_dim
-          (date, trantype, part_group, salesrep_id, salesrep_name, size_bucket, is_first, txn_count, line_total, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-        ON CONFLICT (date, trantype, part_group, salesrep_id, size_bucket, is_first) DO UPDATE SET
-          salesrep_name = EXCLUDED.salesrep_name,
-          txn_count     = EXCLUDED.txn_count,
-          line_total    = EXCLUDED.line_total,
-          updated_at    = NOW()
-      `, [
+    const upserted = await bulkUpsert(client, {
+      table: 'netsuite_daily_dim',
+      cols: ['date', 'trantype', 'part_group', 'salesrep_id', 'salesrep_name',
+             'size_bucket', 'is_first', 'txn_count', 'line_total'],
+      conflictCols: ['date', 'trantype', 'part_group', 'salesrep_id', 'size_bucket', 'is_first'],
+      updateCols: ['salesrep_name', 'txn_count', 'line_total'],
+      rows,
+      toParams: r => [
         r.date, r.trantype,
         r.part_group ?? '',
         r.salesrep_id ?? '',
@@ -920,9 +962,8 @@ export async function upsertDailyDimRows(rows, { replaceSince = null } = {}) {
         r.is_first ?? 'N',
         r.txn_count ?? 0,
         r.line_total ?? 0,
-      ]);
-      upserted++;
-    }
+      ],
+    });
     await client.query('COMMIT');
     return upserted;
   } catch (e) {
@@ -1699,28 +1740,18 @@ async function _upsertGa4Dim(table, dimCols, rows, { replaceSince = null } = {})
     if (replaceSince) {
       await client.query(`DELETE FROM ${table} WHERE date >= $1`, [replaceSince]);
     }
-    const cols = ['date', ...dimCols, ...STD_GA4_METRIC_COLS];
-    const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
-    const updateSet = STD_GA4_METRIC_COLS
-      .map(c => `${c} = EXCLUDED.${c}`)
-      .concat('updated_at = NOW()')
-      .join(', ');
-    const conflict = ['date', ...dimCols].join(', ');
-    const sql = `
-      INSERT INTO ${table} (${cols.join(', ')}, updated_at)
-      VALUES (${placeholders}, NOW())
-      ON CONFLICT (${conflict}) DO UPDATE SET ${updateSet}
-    `;
-    let upserted = 0;
-    for (const r of rows) {
-      const params = [
+    const upserted = await bulkUpsert(client, {
+      table,
+      cols: ['date', ...dimCols, ...STD_GA4_METRIC_COLS],
+      conflictCols: ['date', ...dimCols],
+      updateCols: STD_GA4_METRIC_COLS,
+      rows,
+      toParams: r => [
         r.date,
         ...dimCols.map(c => r[c]),
         ...STD_GA4_METRIC_COLS.map(c => r[c] ?? 0),
-      ];
-      await client.query(sql, params);
-      upserted++;
-    }
+      ],
+    });
     await client.query('COMMIT');
     return upserted;
   } catch (e) {

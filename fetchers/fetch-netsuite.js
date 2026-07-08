@@ -300,11 +300,14 @@ export async function fetchNetSuite({ since = null } = {}) {
   if (process.env.DATABASE_URL) {
     const { upsertDailyRows, logFetch } = await import('../db.js');
     try {
-      const upserted = await upsertDailyRows(daily);
-      await logFetch('netsuite', 'success', upserted, null);
+      // The fetched window fully covers [since, today] (or all history), so
+      // delete-then-insert across it: days whose only transaction was deleted
+      // or re-dated in NetSuite get zeroed instead of keeping stale totals.
+      const upserted = await upsertDailyRows(daily, { replaceSince: since || '1970-01-01' });
+      await logFetch('netsuite-header', 'success', upserted, null);
       console.log(`✅  Upserted ${upserted} rows into PostgreSQL`);
     } catch (e) {
-      await logFetch('netsuite', 'error', 0, e.message).catch(() => {});
+      await logFetch('netsuite-header', 'error', 0, e.message).catch(() => {});
       throw e;
     }
   }

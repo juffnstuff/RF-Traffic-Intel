@@ -141,7 +141,34 @@ export function parseNSDate(s) {
   return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
 }
 
-/** Parse NetSuite datetime to ISO timestamp (preserves time-of-day). */
+// NetSuite SuiteQL returns wall-clock timestamps in the account timezone
+// with no zone marker. The old parser appended 'Z', mislabeling Eastern
+// afternoons as UTC (~4–5h early) — which broke every comparison against
+// genuinely-UTC HubSpot timestamps.
+const NS_TIMEZONE = process.env.NS_TIMEZONE || 'America/New_York';
+
+// Convert a wall-clock time in NS_TIMEZONE to a correct UTC ISO string.
+function nsWallTimeToUtcIso(y, mo, d, hour, mm, ss) {
+  const offsetAt = (t) => {
+    const dtf = new Intl.DateTimeFormat('en-US', {
+      timeZone: NS_TIMEZONE, hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    const parts = Object.fromEntries(dtf.formatToParts(new Date(t)).map(p => [p.type, p.value]));
+    const asUtc = Date.UTC(+parts.year, +parts.month - 1, +parts.day,
+                           +parts.hour, +parts.minute, +parts.second);
+    return asUtc - t; // ms the zone is ahead of UTC at instant t
+  };
+  // Interpret the wall time as UTC, then correct by the zone offset at that
+  // instant; re-measuring once handles DST-boundary edge cases.
+  const guess = Date.UTC(y, mo - 1, d, hour, mm, ss);
+  let ts = guess - offsetAt(guess);
+  ts = guess - offsetAt(ts);
+  return new Date(ts).toISOString();
+}
+
+/** Parse NetSuite datetime to ISO UTC timestamp (preserves time-of-day). */
 export function parseNSDateTime(s) {
   if (!s) return null;
   const str = String(s);
@@ -156,7 +183,7 @@ export function parseNSDateTime(s) {
   let hour = Number(hh);
   if (mer && mer.toLowerCase() === 'pm' && hour < 12) hour += 12;
   if (mer && mer.toLowerCase() === 'am' && hour === 12) hour = 0;
-  return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}T${String(hour).padStart(2, '0')}:${mm.padStart(2, '0')}:${ss.padStart(2, '0')}Z`;
+  return nsWallTimeToUtcIso(Number(y), Number(mo), Number(d), hour, Number(mm), Number(ss));
 }
 
 export function assertIsoDate(s) {

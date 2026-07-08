@@ -141,6 +141,17 @@ const hasCrUX = !!(process.env.CRUX_API_KEY &&
 // competing fetcher (which fights for NetSuite's concurrency budget and
 // takes far longer).
 const runningFetches = new Set();
+// Best-effort fetch_log write — freshness history for /api/fetch-health.
+// Never lets a logging failure mask the fetch result.
+async function logFetchSafe(source, status, startedAt, error = null) {
+  if (!hasDB) return;
+  try {
+    const { logFetch } = await import('./db.js');
+    await logFetch(source, status, 0, error, startedAt);
+  } catch (logErr) {
+    console.warn(`⚠️  fetch_log write failed for ${source}:`, logErr.message);
+  }
+}
 async function withFetchLock(name, fn) {
   if (runningFetches.has(name)) {
     const err = new Error(`A ${name} fetch is already in progress — wait for it to complete.`);
@@ -148,8 +159,17 @@ async function withFetchLock(name, fn) {
     throw err;
   }
   runningFetches.add(name);
-  try { return await fn(); }
-  finally { runningFetches.delete(name); }
+  const startedAt = new Date();
+  try {
+    const result = await fn();
+    await logFetchSafe(name, 'success', startedAt);
+    return result;
+  } catch (e) {
+    await logFetchSafe(name, 'error', startedAt, e.message);
+    throw e;
+  } finally {
+    runningFetches.delete(name);
+  }
 }
 
 // Split comma-separated query params into a trimmed, size-capped, sanitized
@@ -2220,19 +2240,32 @@ app.listen(PORT, async () => {
   // try/catch so one bad source doesn't skip the others.
   const anyNightlySource = hasNS || hasGA4 || hasGAds || hasHubSpot || hasGSC || hasCrUX || hasCallRail;
   if (anyNightlySource) {
-    cron.schedule('0 2 * * 1-5', async () => {
+    // Runs every day (not just weekdays) so weekend NetSuite/ads activity is
+    // reconciled the following night instead of waiting until Monday 2 AM.
+    cron.schedule('0 2 * * *', async () => {
       console.log(`\n⏰  Cron: nightly refresh (${new Date().toISOString()})`);
       const d = new Date();
       d.setDate(d.getDate() - 60);
       const since = d.toISOString().slice(0, 10);
 
+      // Each source shares the fetch lock with the manual /api/refresh/*
+      // endpoints and the startup backfill, so two fetchers never fight for
+      // the same API's concurrency budget; withFetchLock also writes the
+      // fetch_log row that /api/fetch-health reads.
       const runOne = async (label, fn) => {
-        try { await fn(); }
-        catch (e) { console.error(`⚠️  Cron ${label} failed:`, e.message); }
+        try {
+          await withFetchLock(label, fn);
+        } catch (e) {
+          if (e.statusCode === 409) {
+            console.warn(`⏭️  Cron ${label} skipped: already running`);
+            return;
+          }
+          console.error(`⚠️  Cron ${label} failed:`, e.message);
+        }
       };
 
       if (hasNS) {
-        await runOne('netsuite', async () => {
+        await runOne('netsuite-header', async () => {
           const { fetchNetSuite } = await import('./fetchers/fetch-netsuite.js');
           await fetchNetSuite({ since });
         });
@@ -2288,6 +2321,6 @@ app.listen(PORT, async () => {
 
       console.log('✅  Cron refresh complete');
     }, { timezone: CRON_TIMEZONE });
-    console.log(`    ⏰ Cron scheduled: weekdays 2:00 AM (${CRON_TIMEZONE})`);
+    console.log(`    ⏰ Cron scheduled: daily 2:00 AM (${CRON_TIMEZONE})`);
   }
 });

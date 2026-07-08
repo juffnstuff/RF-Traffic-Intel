@@ -31,6 +31,9 @@ const CACHE_PATH = path.join(CACHE_DIR, 'gsc.json');
 const GSC_MAX_LOOKBACK_MONTHS = 16;
 const TOP_WINDOW_DAYS = 28;
 const TOP_ROW_LIMIT = 250;
+// Search Console data is finalized ~2–3 days behind real time; snapshot
+// windows must end this many days back to avoid aggregating partial days.
+const GSC_LAG_DAYS = 3;
 
 function requireEnv(name) {
   const v = process.env[name]?.trim();
@@ -126,16 +129,22 @@ export async function fetchGsc({ since = null } = {}) {
   console.log(`    ${dailyRows.length} daily rows`);
 
   // ── 2. Top queries (trailing window) ────────────────────────────────
+  // GSC data lags 2–3 days. The daily series self-heals (the 60-day replace
+  // window rewrites its tail on the next run), but the top-query/page window
+  // is a one-shot snapshot: ending it at `today` would bake a 2–3-day hole
+  // into every snapshot, understating clicks/impressions ~10% on every run.
+  // End the window at today-3 so it aggregates only finalized days.
   console.log('  → top queries...');
-  const queryWindowStart = daysBackIso(TOP_WINDOW_DAYS);
+  const topWindowEnd = daysBackIso(GSC_LAG_DAYS);
+  const queryWindowStart = daysBackIso(TOP_WINDOW_DAYS + GSC_LAG_DAYS);
   const queryData = await queryWithRetry(client, siteUrl, {
     startDate: queryWindowStart,
-    endDate,
+    endDate: topWindowEnd,
     dimensions: ['query'],
     rowLimit: TOP_ROW_LIMIT,
   }, 'gsc-queries');
   const queryRows = (queryData.rows || []).map(r => ({
-    window_end_date: endDate,
+    window_end_date: topWindowEnd,
     query:           r.keys[0],
     clicks:          num(r.clicks),
     impressions:     num(r.impressions),
@@ -148,12 +157,12 @@ export async function fetchGsc({ since = null } = {}) {
   console.log('  → top pages...');
   const pageData = await queryWithRetry(client, siteUrl, {
     startDate: queryWindowStart,
-    endDate,
+    endDate: topWindowEnd,
     dimensions: ['page'],
     rowLimit: TOP_ROW_LIMIT,
   }, 'gsc-pages');
   const pageRows = (pageData.rows || []).map(r => ({
-    window_end_date: endDate,
+    window_end_date: topWindowEnd,
     page:            r.keys[0],
     clicks:          num(r.clicks),
     impressions:     num(r.impressions),
