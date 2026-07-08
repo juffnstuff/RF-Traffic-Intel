@@ -678,7 +678,8 @@ app.get('/api/ga4', async (req, res) => {
     if (!daily || daily.length === 0) {
       return res.status(404).json({ error: 'No GA4 data yet. Run a GA4 fetch first.' });
     }
-    daily = zerofillDaily(daily);
+    // Rate metrics have no value on gap days — 0 would skew their DMAs.
+    daily = zerofillDaily(daily, { nullKeys: ['bounce_rate', 'avg_session_duration'] });
     const { start, end } = req.query;
     if (start || end) {
       daily = daily.filter(d => (!start || d.date >= start) && (!end || d.date <= end));
@@ -700,7 +701,7 @@ app.get('/api/ga4-by-campaign', async (req, res) => {
     if (!daily || daily.length === 0) {
       return res.json({ generated: new Date().toISOString(), source: 'ga4', campaigns, daily: [] });
     }
-    daily = zerofillDaily(daily);
+    daily = zerofillDaily(daily, { nullKeys: ['bounce_rate', 'avg_session_duration'] });
     const { start, end } = req.query;
     if (start || end) {
       daily = daily.filter(d => (!start || d.date >= start) && (!end || d.date <= end));
@@ -904,7 +905,8 @@ app.get('/api/gsc', async (req, res) => {
     if (!daily || daily.length === 0) {
       return res.status(404).json({ error: 'No GSC data yet. Run a GSC fetch first.' });
     }
-    daily = zerofillDaily(daily);
+    // ctr/position have no value on gap days — zero would read as rank #0.
+    daily = zerofillDaily(daily, { nullKeys: ['ctr', 'position'] });
     const { start, end } = req.query;
     if (start || end) {
       daily = daily.filter(d => (!start || d.date >= start) && (!end || d.date <= end));
