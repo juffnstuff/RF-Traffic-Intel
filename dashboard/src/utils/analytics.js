@@ -65,7 +65,10 @@ export function pearson(xs, ys) {
 
 /**
  * Find the lag (0..maxLag) that maximises |pearson(leading, lagged)|.
- * Returns { bestLag, bestR, correlations[] }.
+ * Returns { bestLag, bestR, correlations[], lagRange: [lo, hi] } where
+ * lagRange is the contiguous span of lags around bestLag whose |r| stays
+ * within 95% of |bestR| — a point estimate on smoothed series is false
+ * precision, so the UI can report a range instead.
  */
 export function leadLag(leading, lagging, maxLag = 45) {
   const correlations = [];
@@ -83,7 +86,30 @@ export function leadLag(leading, lagging, maxLag = 45) {
     }
   }
 
-  return { bestLag, bestR, correlations };
+  // Contiguous plateau around the peak where |r| ≥ 0.95 × |bestR|.
+  const threshold = 0.95 * Math.abs(bestR);
+  let lo = bestLag;
+  let hi = bestLag;
+  while (lo > 0 && Math.abs(correlations[lo - 1]) >= threshold) lo--;
+  while (hi < correlations.length - 1 && Math.abs(correlations[hi + 1]) >= threshold) hi++;
+
+  return { bestLag, bestR, correlations, lagRange: [lo, hi] };
+}
+
+/**
+ * Effective sample size of an autocorrelated series: n·(1−ρ)/(1+ρ) with
+ * ρ = lag-1 autocorrelation (computed over the non-null values). Heavily
+ * smoothed series (30 DMA − 90 DMA) have ρ near 1, so 300 daily rows can
+ * carry only a handful of independent observations — correlations on them
+ * look strong but mean little. Returns null when fewer than 3 valid points.
+ */
+export function effectiveN(series) {
+  const vals = series.filter(v => v != null && !Number.isNaN(v));
+  const n = vals.length;
+  if (n < 3) return null;
+  const rho = pearson(vals.slice(0, -1), vals.slice(1));
+  if (rho >= 1) return 0;
+  return n * (1 - rho) / (1 + rho);
 }
 
 /**
@@ -104,7 +130,11 @@ export function leadLagDetrended(leading30, leading90, lagging30, lagging90, max
       const w = long[i];
       return (v == null || w == null) ? null : v - w;
     });
-  return leadLag(detrend(leading30, leading90), detrend(lagging30, lagging90), maxLag);
+  const detrendedLeading = detrend(leading30, leading90);
+  const result = leadLag(detrendedLeading, detrend(lagging30, lagging90), maxLag);
+  // Effective sample size of the (autocorrelated) detrended leading series —
+  // the UI grays out cards whose smoothing leaves too few independent samples.
+  return { ...result, effectiveN: effectiveN(detrendedLeading) };
 }
 
 /**

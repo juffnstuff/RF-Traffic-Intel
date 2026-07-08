@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
-  DMALineChart, StatCard, fmtNum, fmtMoney, fmtPct, fmtRatio,
+  DMALineChart, StatCard, fmtNum, fmtMoney, fmtPct, fmtRatio, CHART_GRID_STYLE,
 } from './DashboardView';
 import {
   RELATIVE_RANGES, RangeDropdown, YearsDropdown,
@@ -26,13 +26,20 @@ function inRange(row, cutoff, selectedYears) {
   return row.date >= cutoff;
 }
 
-// GA4's sessionDefaultChannelGroup labels used for Paid attribution. Matches
-// the values GA4 returns for channel groupings that spend money.
-const PAID_CHANNEL_NAMES = new Set(['Paid Search', 'Paid Social', 'Paid Video', 'Paid Shopping', 'Paid Other', 'Display', 'Cross-network']);
+// GA4's sessionDefaultChannelGroup labels used for Paid attribution. Cost on
+// this page is Google Ads ONLY, so the numerators must be Google-only too:
+// Paid Search + Cross-network (Performance Max — still Google spend). Paid
+// Social/Video/etc. would inflate ratios against a cost they didn't incur.
+const PAID_CHANNEL_NAMES = new Set(['Paid Search', 'Cross-network']);
 
-// HubSpot source labels that correspond to paid acquisition. HubSpot returns
-// these as upper-snake strings; we compare against them verbatim.
-const PAID_HS_SOURCES = new Set(['PAID_SEARCH', 'PAID_SOCIAL', 'OTHER_CAMPAIGNS']);
+// HubSpot source labels that correspond to Google-paid acquisition. PAID_SOCIAL
+// and OTHER_CAMPAIGNS are deliberately excluded — their spend isn't in the
+// Google Ads cost this page divides by.
+const PAID_HS_SOURCES = new Set(['PAID_SEARCH']);
+
+// Campaign-name join key: campaign strings arrive with mixed case/whitespace
+// from Google Ads vs HubSpot source_data_1/2 — normalize both sides.
+const normCampaignKey = (x) => String(x ?? '').trim().toLowerCase();
 
 // Column defs: key, label, alignment, cell renderer, and a numeric/string
 // accessor used for sorting. Derived columns (won quotes/revenue, CPA, ROAS)
@@ -56,7 +63,9 @@ function CampaignTable({ rows, dealsByCampaign }) {
   const [sortDir, setSortDir] = useState('desc');
 
   const enriched = rows.map(r => {
-    const hs = dealsByCampaign.get(r.campaign_id) || dealsByCampaign.get(r.campaign_name) || { deals: 0, revenue: 0 };
+    // Deals are keyed by normalized campaign NAME (source_data_1/2 carries the
+    // campaign string, never the numeric Ads campaign_id).
+    const hs = dealsByCampaign.get(normCampaignKey(r.campaign_name)) || { deals: 0, revenue: 0 };
     const cpa = hs.deals > 0 ? r.cost / hs.deals : null;
     const roas = r.cost > 0 ? hs.revenue / r.cost : null;
     return { r, hs, cpa, roas };
@@ -220,8 +229,14 @@ export default function PaidKPIsPage() {
     if (!rows.length) return undefined;
     const ac = new AbortController();
     setRefetching(true);
+    // Cap the window at yesterday — the last Ads row can be today's partial
+    // day, and the tiles above are trimmed to yesterday. min(last, yesterday)
+    // keeps the campaign table on the same window.
     const last = rows[rows.length - 1].date;
-    const params = new URLSearchParams({ until: last });
+    const y = new Date();
+    y.setDate(y.getDate() - 1);
+    const yesterday = y.toISOString().slice(0, 10);
+    const params = new URLSearchParams({ until: last < yesterday ? last : yesterday });
     if (selectedYears.length > 0) {
       params.set('since', `${selectedYears[0]}-01-01`);
       params.set('until', `${selectedYears[selectedYears.length - 1]}-12-31`);
@@ -299,16 +314,20 @@ export default function PaidKPIsPage() {
     const mmm = (xs) => [movingAverage(xs, 30), movingAverage(xs, 90)];
     const [cost30, cost90]     = mmm(cost);
     const [clk30, clk90]       = mmm(clicks);
-    const [ctr30, ctr90]       = mmm(ctr);
-    const [cpc30, cpc90]       = mmm(cpc);
+    const [imp30, imp90]       = mmm(impr);
     const [calls30, calls90]   = mmm(calls);
     // Ratio metrics use ratio-of-DMAs (DMA numerator ÷ DMA denominator), not
-    // DMA-of-daily-ratios: averaging daily cpa with 0 on no-deal days badly
-    // understates true CPA. Same pattern as DashboardView's AOV.
+    // DMA-of-daily-ratios: averaging daily ratios weights every day equally
+    // regardless of volume (and averaging daily cpa with 0 on no-deal days
+    // badly understates true CPA). Same pattern as DashboardView's AOV.
     const [deals30, deals90]   = mmm(hsDeals);
     const [rev30, rev90]       = mmm(hsRev);
     const ratio = (num, den) => num.map((v, i) =>
       (v == null || den[i] == null || den[i] === 0) ? null : v / den[i]);
+    const ctr30    = ratio(clk30, imp30);
+    const ctr90    = ratio(clk90, imp90);
+    const cpc30    = ratio(cost30, clk30);
+    const cpc90    = ratio(cost90, clk90);
     const cpa30    = ratio(cost30, deals30);
     const cpa90    = ratio(cost90, deals90);
     const roas30   = ratio(rev30, cost30);
@@ -410,13 +429,14 @@ export default function PaidKPIsPage() {
       // The contact's source_data_1/2 (aliased per the active lens — first-
       // or latest-touch) carries the campaign/keyword that drove the quote;
       // key won-quote revenue onto it to line up with Google Ads campaigns.
-      const keys = [d.source_data_1, d.source_data_2].filter(Boolean);
-      for (const k of keys) {
-        const cur = map.get(k) || { deals: 0, revenue: 0 };
-        cur.deals += 1;
-        cur.revenue += Number(d.amount) || 0;
-        map.set(k, cur);
-      }
+      // ONE key per quote — source_data_1 preferred, source_data_2 fallback —
+      // so a quote can never count in two campaign rows.
+      const k = normCampaignKey(d.source_data_1) || normCampaignKey(d.source_data_2);
+      if (!k) continue;
+      const cur = map.get(k) || { deals: 0, revenue: 0 };
+      cur.deals += 1;
+      cur.revenue += Number(d.amount) || 0;
+      map.set(k, cur);
     }
     return map;
   }, [hsDealsWindow]);
@@ -502,23 +522,28 @@ export default function PaidKPIsPage() {
         </div>
         {kpi && (
           <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
-            <StatCard label="Cost" value={fmtMoney(kpi.cost)} sub="Google Ads, in range" ma30={kpi.ma.cost[0]} ma90={kpi.ma.cost[1]} formatter={fmtMoney} />
-            <StatCard label="Clicks" value={fmtNum(kpi.clicks)} sub="Google Ads" ma30={kpi.ma.clicks[0]} ma90={kpi.ma.clicks[1]} formatter={fmtNum} />
-            <StatCard label="Impressions" value={fmtNum(kpi.impressions)} sub="Google Ads" />
+            <StatCard label="Cost" value={fmtMoney(kpi.cost)} sub={`Google Ads, in range${weekdayOnly ? ' (weekdays only)' : ''}`} ma30={kpi.ma.cost[0]} ma90={kpi.ma.cost[1]} formatter={fmtMoney} />
+            <StatCard label="Clicks" value={fmtNum(kpi.clicks)} sub={`Google Ads${weekdayOnly ? ' (weekdays only)' : ''}`} ma30={kpi.ma.clicks[0]} ma90={kpi.ma.clicks[1]} formatter={fmtNum} />
+            <StatCard label="Impressions" value={fmtNum(kpi.impressions)} sub={`Google Ads${weekdayOnly ? ' (weekdays only)' : ''}`} />
             <StatCard label="CTR" value={fmtPct(kpi.ctr)} sub="clicks / impressions" ma30={kpi.ma.ctr[0]} ma90={kpi.ma.ctr[1]} formatter={fmtPct} />
-            <StatCard label="Avg CPC" value={kpi.avgCpc != null ? '$' + kpi.avgCpc.toFixed(2) : '—'} sub="cost / clicks" ma30={kpi.ma.avgCpc[0]} ma90={kpi.ma.avgCpc[1]} formatter={(v) => v == null ? '—' : '$' + v.toFixed(2)} />
-            <StatCard label="Paid sessions" value={fmtNum(kpi.paidSessions)} sub="GA4, paid channels" />
+            <StatCard label="Avg CPC" value={kpi.avgCpc != null ? '$' + kpi.avgCpc.toFixed(2) : '—'} sub="cost / clicks" ma30={kpi.ma.avgCpc[0]} ma90={kpi.ma.avgCpc[1]} formatter={(v) => v == null ? '—' : '$' + v.toFixed(2)} invert />
+            <StatCard label="Paid sessions" value={fmtNum(kpi.paidSessions)} sub="GA4, Google-paid channels" />
             <StatCard label="Cost / session" value={kpi.costPerSession != null ? '$' + kpi.costPerSession.toFixed(2) : '—'} sub="cost / paid sessions" />
-            <StatCard label="Won quotes (paid)" value={fmtNum(kpi.hsDeals)} sub="NetSuite, paid-sourced" />
+            <StatCard label="Won quotes (paid)" value={fmtNum(kpi.hsDeals)} sub="NetSuite, paid-search-sourced" />
             <StatCard label="Won revenue (paid)" value={fmtMoney(kpi.hsRevenue)} sub="NetSuite" />
-            <StatCard label="CPA" value={kpi.cpa != null ? fmtMoney(kpi.cpa) : '—'} sub="cost / won quotes" ma30={kpi.ma.cpa[0]} ma90={kpi.ma.cpa[1]} formatter={fmtMoney} />
-            <StatCard label="ROAS" value={kpi.roas != null ? fmtRatio(kpi.roas) : '—'} sub="revenue / cost" ma30={kpi.ma.roas[0]} ma90={kpi.ma.roas[1]} formatter={fmtRatio} />
-            <StatCard label="CPA (GAds conv.)" value={kpi.cpaGa4 != null ? fmtMoney(kpi.cpaGa4) : '—'} sub="cost / GAds conversions" />
+            <StatCard label="CPA" value={kpi.cpa != null ? fmtMoney(kpi.cpa) : '—'} sub="cost / won quotes" ma30={kpi.ma.cpa[0]} ma90={kpi.ma.cpa[1]} formatter={fmtMoney} invert
+              small="paid-search-attributed only, matching Google-only cost"
+              title="paid-search-attributed only, matching Google-only cost" />
+            <StatCard label="ROAS" value={kpi.roas != null ? fmtRatio(kpi.roas) : '—'} sub="revenue / cost" ma30={kpi.ma.roas[0]} ma90={kpi.ma.roas[1]} formatter={fmtRatio}
+              small="paid-search-attributed only, matching Google-only cost"
+              title="paid-search-attributed only, matching Google-only cost" />
+            <StatCard label="CPA (GAds conv.)" value={kpi.cpaGa4 != null ? fmtMoney(kpi.cpaGa4) : '—'} sub="cost / GAds conversions" invert
+              title="Once offline conversion uploads run --live, GAds conversions include uploaded won quotes — this tile then partially restates the NetSuite wins beside it." />
             {kpi.calls > 0 && (
               <>
                 <StatCard label="Calls" value={fmtNum(kpi.calls)} sub="CallRail, in range" />
                 <StatCard label="Answered" value={kpi.answeredRate != null ? `${fmtNum(kpi.answered)} (${fmtPct(kpi.answeredRate)})` : '—'} sub="CallRail" />
-                <StatCard label="Cost / call" value={kpi.costPerCall != null ? fmtMoney(kpi.costPerCall) : '—'} sub="cost / CallRail calls" ma30={kpi.ma.costPerCall[0]} ma90={kpi.ma.costPerCall[1]} formatter={fmtMoney} />
+                <StatCard label="Cost / call" value={kpi.costPerCall != null ? fmtMoney(kpi.costPerCall) : '—'} sub="cost / CallRail calls" ma30={kpi.ma.costPerCall[0]} ma90={kpi.ma.costPerCall[1]} formatter={fmtMoney} invert />
               </>
             )}
           </div>
@@ -529,7 +554,7 @@ export default function PaidKPIsPage() {
             <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
               Spend trend
             </h2>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+            <div style={{ ...CHART_GRID_STYLE, marginBottom: 12 }}>
               <DMALineChart title="Cost DMA" data={chartData}
                 fieldRaw="cost" field30="cost30" field90="cost90"
                 formatter={fmtMoney} showDaily={showDaily} />
@@ -537,7 +562,7 @@ export default function PaidKPIsPage() {
                 fieldRaw="clicks" field30="clk30" field90="clk90"
                 formatter={fmtNum} showDaily={showDaily} />
             </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+            <div style={{ ...CHART_GRID_STYLE, marginBottom: 20 }}>
               <DMALineChart title="CTR DMA" data={chartData}
                 fieldRaw="ctr" field30="ctr30" field90="ctr90"
                 formatter={fmtPct} showDaily={showDaily} />
@@ -549,7 +574,7 @@ export default function PaidKPIsPage() {
             <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
               Acquisition quality
             </h2>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+            <div style={{ ...CHART_GRID_STYLE, marginBottom: 20 }}>
               <DMALineChart title="CPA DMA (cost / won quotes)" data={chartData}
                 fieldRaw="cpa" field30="cpa30" field90="cpa90"
                 formatter={(v) => v == null || v === 0 ? '—' : fmtMoney(v)} showDaily={showDaily} />
@@ -563,7 +588,7 @@ export default function PaidKPIsPage() {
                 <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
                   Phone leads (CallRail)
                 </h2>
-                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+                <div style={{ ...CHART_GRID_STYLE, marginBottom: 20 }}>
                   <DMALineChart title="Calls DMA" data={chartData}
                     fieldRaw="calls" field30="calls30" field90="calls90"
                     formatter={fmtNum} showDaily={showDaily} />

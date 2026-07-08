@@ -10,18 +10,6 @@ import { movingAverage, weekdaysOnly } from './utils/analytics';
 import { trimToYesterday } from './utils/pins';
 import UpdatingPill from './components/UpdatingPill';
 
-// GSC daily data lags 2-3 days — the trailing rows are incomplete, not a real
-// crash. Returns the first date of the trailing 3-day window (values on dates
-// >= this should be treated as null), or null when there are no GSC rows.
-function gscLagCutoff(rows) {
-  if (!rows?.length) return null;
-  let max = '';
-  for (const r of rows) if (r.date > max) max = r.date;
-  const d = new Date(max + 'T00:00:00Z');
-  d.setUTCDate(d.getUTCDate() - 2);
-  return d.toISOString().slice(0, 10);
-}
-
 function rangeCutoff(range, selectedYears) {
   if (selectedYears.length > 0) return null;
   if (range === 'all') return null;
@@ -128,10 +116,7 @@ export default function SEOKPIsPage() {
   const cutoff = useMemo(() => rangeCutoff(range, selectedYears), [range, selectedYears]);
 
   const fullSeries = useMemo(() => {
-    const rows = gsc?.daily || [];
-    if (!rows.length) return [];
-    let ordered = [...rows].sort((a, b) => a.date.localeCompare(b.date));
-    if (weekdayOnly) ordered = weekdaysOnly(ordered);
+    const gscRows = gsc?.daily || [];
 
     // Organic sessions + conversions from GA4 by-channel.
     const sessByDate = new Map();
@@ -149,14 +134,31 @@ export default function SEOKPIsPage() {
       revByDate.set(r.date, (revByDate.get(r.date) || 0) + (r.revenue || 0));
     }
 
-    // Null (don't zero) the lagging GSC tail and the API's null gap-day
-    // ctr/position — the null-aware MA skips them and charts break the line.
-    const lagCut = gscLagCutoff(gsc?.daily);
-    const lagged = (d) => lagCut != null && d.date >= lagCut;
-    const clicks   = ordered.map(d => lagged(d) ? null : Number(d.clicks) || 0);
-    const impr     = ordered.map(d => lagged(d) ? null : Number(d.impressions) || 0);
-    const ctr      = ordered.map(d => (lagged(d) || d.ctr == null) ? null : Number(d.ctr));
-    const pos      = ordered.map(d => (lagged(d) || d.position == null) ? null : Number(d.position));
+    // Date spine: GA4 organic daily dates (fresher and longer than GSC's
+    // finalized-only, 16-month-capped feed) — GSC values are looked up by
+    // date and stay null on dates GSC hasn't published, which the null-aware
+    // MAs skip. Falls back to the GSC spine when GA4 isn't available.
+    const spineDates = sessByDate.size > 0
+      ? [...sessByDate.keys()].sort()
+      : gscRows.map(d => d.date).sort();
+    if (!spineDates.length) return [];
+    let ordered = spineDates.map(date => ({ date }));
+    if (weekdayOnly) ordered = weekdaysOnly(ordered);
+
+    // GSC lookups by date — a missing date (GSC not finalized yet, or beyond
+    // its 16-month history) is null, the honest gap. The GSC API already
+    // returns only finalized days, so no extra lag-nulling.
+    const gscByDate = new Map(gscRows.map(d => [d.date, d]));
+    const clicks   = ordered.map(d => gscByDate.has(d.date) ? Number(gscByDate.get(d.date).clicks) || 0 : null);
+    const impr     = ordered.map(d => gscByDate.has(d.date) ? Number(gscByDate.get(d.date).impressions) || 0 : null);
+    const ctr      = ordered.map(d => {
+      const v = gscByDate.get(d.date)?.ctr;
+      return v == null ? null : Number(v);
+    });
+    const pos      = ordered.map(d => {
+      const v = gscByDate.get(d.date)?.position;
+      return v == null ? null : Number(v);
+    });
     const orgSess  = ordered.map(d => sessByDate.get(d.date) || 0);
     const orgConv  = ordered.map(d => convByDate.get(d.date) || 0);
     const orgDeals = ordered.map(d => dealsByDate.get(d.date) || 0);
@@ -230,7 +232,7 @@ export default function SEOKPIsPage() {
     clearAllFilters();
   }, [setRange, setSelectedYears, setWeekdayOnly, setShowDaily]);
 
-  const subtitle = `Search Console + GA4 + HubSpot · ${chartData.length} days visible · GSC lags ~2-3 days`;
+  const subtitle = `Search Console + GA4 + HubSpot · ${chartData.length} days visible · GSC data is finalized ~2-3 days behind — series end where Google's finalized data ends`;
 
   if (loading && !gsc) {
     return <div style={{ padding: 'clamp(16px, 4vw, 40px)', color: '#94a3b8' }}>Loading SEO data...</div>;

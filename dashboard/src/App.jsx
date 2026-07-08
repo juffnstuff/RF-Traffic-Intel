@@ -17,6 +17,8 @@ function OverviewPage() {
   // lead-lag panel — both are optional and degrade quietly if missing.
   const [gscDaily, setGscDaily] = useState(null);
   const [channelsDaily, setChannelsDaily] = useState(null);
+  // Observed contact→quote lag (all-time) — headlines the lead-lag panel.
+  const [lagHistogram, setLagHistogram] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -43,6 +45,17 @@ function OverviewPage() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // All-time observed lag, fetched once — independent of the range filters.
+  // Abort-safe so a slow response can't set state after unmount.
+  useEffect(() => {
+    const ac = new AbortController();
+    fetch('/api/insights/quote-lag-histogram', { signal: ac.signal })
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (!ac.signal.aborted) setLagHistogram(j); })
+      .catch(() => {});
+    return () => ac.abort();
+  }, []);
 
   const handleRefresh = async (mode) => {
     setRefreshing(true);
@@ -71,6 +84,7 @@ function OverviewPage() {
       ga4Daily={ga4?.daily || []}
       gscDaily={gscDaily?.daily || []}
       channelsDaily={channelsDaily?.daily || []}
+      lagHistogram={lagHistogram}
       onRefresh={handleRefresh}
       refreshing={refreshing}
       refreshError={refreshError}

@@ -120,7 +120,8 @@ function CampaignRoiTable({ rows }) {
             {anyForms && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', borderLeft: '1px solid var(--dso-rule)', color: '#34d399' }}>Forms</th>}
             {anyForms && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', color: '#34d399' }}>$/Form</th>}
             {(anyCalls || anyForms) && <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', borderLeft: '1px solid var(--dso-rule)' }}>$/Lead</th>}
-            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>CPA</th>
+            <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}
+              title="cost ÷ GA4 key events — not comparable to the won-quote CPA on the Paid tab">CPA (GA4 key events)</th>
             <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}
               title="NS won revenue ÷ ad cost — real ROAS from NetSuite, not GA4's ≈$0 revenue metric">ROAS (won)</th>
           </tr>
@@ -244,6 +245,7 @@ function HubSpotAttributionTable({ rows, lens }) {
         Quotes whose email doesn't match any contact land in the (UNKNOWN) bucket — see Unattributed columns.
         "via domain" counts quotes matched through the corporate-domain fallback (quote email's company
         domain ↔ contact domain) rather than an exact email match — same company, lower confidence.
+        Windowing: opps = quotes created in window; won = quotes closed in window.
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
         <thead>
@@ -556,6 +558,7 @@ function PartGroupRoasTable({ rows }) {
           ROAS numerators are <strong>paid-attributed only</strong> (ROAS (opps) = paid quote opps ÷ cost; ROAS (won) = paid won revenue ÷ cost) —
           "Quote opps (all sources)" includes organic/direct/etc. and is context, not a return on the ad spend.
           Quote opps are the total value of all quotes (open + won + lost); only the won columns are realized revenue.
+          Windowing: opps = quotes created in window; won = quotes closed in window.
         </div>
         <ExportButton filename="part-group-roas.csv" rows={sorted.map(r => ({
           part_group: r.part_group, cost: r.cost, quotes: r.quotes, quotes_won: r.quotes_won,
@@ -664,10 +667,12 @@ function CampaignRoasTable({ rows }) {
         Google Ads spend per campaign vs the <strong>whole-order</strong> NetSuite quote opportunities of the contacts that campaign acquired —
         all quotes, open + won + lost; only "Revenue (won)" is realized revenue
         (paid-search contact's <code>hs_analytics_source_data_1</code> = campaign, contact → quotes by email). Orders aren't split across part-groups,
-        so brand / catalog campaigns get credited for all the quote value their leads drove. Paid-search only, first-touch.
+        so brand / catalog campaigns get credited for all the quote value their leads drove.
+        Attribution ladder: first-touch paid search, gclid-proven clicks, and corporate-domain fallback (guarded).
         The grey line under each campaign shows the record-level part groups (custbody4) those orders fell under, by revenue share — the campaign→part-group link, no order splitting.
         "via domain" counts quotes matched through the corporate-domain fallback (quote email's company domain ↔ contact domain)
         rather than an exact email match — same company, lower confidence.
+        Windowing: opps = quotes created in window; won = quotes closed in window.
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 10, flexWrap: 'wrap' }}>
         <input value={q} onChange={e => setQ(e.target.value)} placeholder="Filter campaigns…" style={{ ...inputStyle, minWidth: 200 }} />
@@ -685,7 +690,7 @@ function CampaignRoasTable({ rows }) {
           <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
             <SortTh id="campaign"    label="Campaign"      align="left" sortKey={sortKey} sortDir={sortDir} onSort={(k) => onSort(k, true)} />
             <SortTh id="cost"        label="Ad Cost"       sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-            <SortTh id="leads"       label="Leads"         sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <SortTh id="leads"       label="Quoted leads"  title="Contacts of this campaign that produced at least one quote — the cohort table's Leads counts all leads" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="quotes"      label="Quotes"        sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="revenue"     label="Quote opps ($)" title="Total value of ALL quotes from this campaign's leads — open + won + lost. Won revenue is the realized subset." sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
             <SortTh id="revenue_won" label="Revenue (won)" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -945,7 +950,130 @@ const SECTION_DEFAULTS = {
   'page-perf':      false,
   'cr-trackers':    false,
   'cr-texts':       false,
+  'data-audit':     false,
 };
+
+// ── Data audit (truth-source reconciliation) ─────────────────────────
+// Renders the latest saved audit run and can trigger a fresh one. Verdicts
+// come from the server: green (ties), amber (refresh-lag drift), red
+// (investigate), skipped (creds missing), error (API call failed).
+const AUDIT_VERDICT_COLORS = {
+  green: '#22c55e', amber: '#fbbf24', red: '#ef4444',
+  skipped: '#64748b', unknown: '#64748b', error: '#f97316',
+};
+const fmtAuditNum = (v) => v == null ? '—'
+  : Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 });
+
+function DataAuditPanel() {
+  const [run, setRun] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [err, setErr] = useState(null);
+
+  // Fetch the latest saved run on expand (this component only mounts when
+  // the section is open).
+  useEffect(() => {
+    const ac = new AbortController();
+    fetch('/api/audit/latest', { signal: ac.signal })
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (!ac.signal.aborted) { setRun(j?.run || null); setLoading(false); } })
+      .catch(() => { if (!ac.signal.aborted) setLoading(false); });
+    return () => ac.abort();
+  }, []);
+
+  const runNow = async () => {
+    setRunning(true);
+    setErr(null);
+    try {
+      const res = await fetch('/api/audit/run', { method: 'POST' });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || `API ${res.status}`);
+      // The POST response IS the fresh run (since/until/results).
+      setRun({ ran_at: new Date().toISOString(), ...json });
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const results = run?.results || [];
+  return (
+    <div style={{
+      background: 'var(--dso-surface)',
+      borderRadius: 4,
+      padding: '14px 16px',
+      border: '1px solid var(--dso-rule)',
+      overflowX: 'auto',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
+        <div style={{ color: 'var(--dso-text-dim)', fontSize: 11, flex: 1, minWidth: 260 }}>
+          Live pulls from each API compared to the warehouse for a finalized 28-day window.
+          Notes explain deltas that are structural, not bugs.
+          {run?.since && run?.until && <> Window: <strong>{run.since} → {run.until}</strong>.</>}
+          {run?.ran_at && <> Last run: {String(run.ran_at).slice(0, 19).replace('T', ' ')}.</>}
+        </div>
+        <button
+          onClick={runNow}
+          disabled={running}
+          style={{
+            background: running ? 'transparent' : 'var(--dso-accent-hot)',
+            color: running ? 'var(--dso-text-dim)' : 'white',
+            border: `1px solid ${running ? 'var(--dso-rule)' : 'var(--dso-accent-hot)'}`,
+            borderRadius: 3, padding: '5px 12px', fontSize: 11, fontWeight: 700,
+            letterSpacing: '0.1em', textTransform: 'uppercase',
+            cursor: running ? 'wait' : 'pointer', flexShrink: 0,
+          }}
+        >
+          {running ? 'Running… (~10-30s)' : 'Run audit now'}
+        </button>
+      </div>
+      {err && <div style={{ color: '#f87171', fontSize: 12, marginBottom: 8 }}>Audit failed: {err}</div>}
+      {loading && !run && <div style={{ color: 'var(--dso-text-dim)', fontSize: 12 }}>Loading latest audit…</div>}
+      {!loading && !run && !running && (
+        <div style={{ color: 'var(--dso-text-dim)', fontSize: 12 }}>
+          No audit run stored yet — click "Run audit now" to pull live totals from each API.
+        </div>
+      )}
+      {results.length > 0 && (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, color: 'var(--dso-text)' }}>
+          <thead>
+            <tr style={{ color: 'var(--dso-text-dim)', fontSize: 10, textAlign: 'left', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+              <th style={{ padding: '8px 10px', fontWeight: 600 }}>Source</th>
+              <th style={{ padding: '8px 10px', fontWeight: 600 }}>Metric</th>
+              <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Warehouse</th>
+              <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Truth (live API)</th>
+              <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Δ%</th>
+              <th style={{ padding: '8px 10px', fontWeight: 600 }}>Verdict</th>
+              <th style={{ padding: '8px 10px', fontWeight: 600 }}>Note</th>
+            </tr>
+          </thead>
+          <tbody>
+            {results.map((r, i) => {
+              const color = AUDIT_VERDICT_COLORS[r.verdict] || '#64748b';
+              return (
+                <tr key={`${r.source}-${r.metric}-${i}`} style={{ borderTop: '1px solid var(--dso-rule)' }}>
+                  <td style={{ padding: '8px 10px', fontWeight: 600 }}>{r.source}</td>
+                  <td style={{ padding: '8px 10px', color: 'var(--dso-text-dim)' }}>{r.metric}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFeatureSettings: '"tnum"' }}>{fmtAuditNum(r.warehouse)}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFeatureSettings: '"tnum"' }}>{fmtAuditNum(r.truth)}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFeatureSettings: '"tnum"', color: r.delta_pct != null && Math.abs(r.delta_pct) > 5 ? '#f87171' : 'var(--dso-text-dim)' }}>
+                    {r.delta_pct != null ? `${r.delta_pct >= 0 ? '+' : ''}${Number(r.delta_pct).toFixed(1)}%` : '—'}
+                  </td>
+                  <td style={{ padding: '8px 10px', whiteSpace: 'nowrap' }}>
+                    <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 999, background: color, marginRight: 6 }} />
+                    <span style={{ color, fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{r.verdict}</span>
+                  </td>
+                  <td style={{ padding: '8px 10px', color: 'var(--dso-text-dim)', fontSize: 11, maxWidth: 420 }}>{r.note || '—'}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
 
 // A section with a clickable header that collapses its body. `open`/`onToggle`
 // are lifted to the parent so Expand-all / Collapse-all can drive every one.
@@ -1103,18 +1231,26 @@ export default function CrossSourcePage() {
   const execSummary = useMemo(() => {
     if (!campaignRoas || campaignRoas.length === 0) return null;
     const t = campaignRoas.reduce((acc, r) => {
-      acc.cost += r.cost || 0;
+      const cost = r.cost || 0;
+      acc.cost += cost;
       acc.revenue += r.revenue || 0;
       acc.revenueWon += r.revenue_won || 0;
+      // Blended ROAS numerators only from campaigns with window spend —
+      // no_ad_spend (legacy-campaign) rows carry won revenue but zero cost
+      // here, which would overstate the blend against window-spend-only cost.
+      if (cost > 0) {
+        acc.spendRevenue += r.revenue || 0;
+        acc.spendRevenueWon += r.revenue_won || 0;
+      }
       acc.quotes += r.quotes || 0;
       acc.domainMatched += r.quotes_domain_matched || 0;
-      if ((r.quotes || 0) === 0) acc.unattributedSpend += r.cost || 0;
+      if ((r.quotes || 0) === 0) acc.unattributedSpend += cost;
       return acc;
-    }, { cost: 0, revenue: 0, revenueWon: 0, quotes: 0, domainMatched: 0, unattributedSpend: 0 });
+    }, { cost: 0, revenue: 0, revenueWon: 0, spendRevenue: 0, spendRevenueWon: 0, quotes: 0, domainMatched: 0, unattributedSpend: 0 });
     return {
       ...t,
-      roasWon: t.cost > 0 ? t.revenueWon / t.cost : null,
-      roasAll: t.cost > 0 ? t.revenue / t.cost : null,
+      roasWon: t.cost > 0 ? t.spendRevenueWon / t.cost : null,
+      roasAll: t.cost > 0 ? t.spendRevenue / t.cost : null,
       pctDomainMatched: t.quotes > 0 ? t.domainMatched / t.quotes : null,
     };
   }, [campaignRoas]);
@@ -1172,10 +1308,10 @@ export default function CrossSourcePage() {
       {execSummary && (
         <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
           <StatCard label="Total spend" value={fmtMoney(execSummary.cost)} sub="Google Ads, in window" />
-          <StatCard label="Quote opportunities (paid)" value={fmtMoney(execSummary.revenue)} sub="all quotes from paid leads (open + won + lost)" />
-          <StatCard label="Won revenue" value={fmtMoney(execSummary.revenueWon)} sub="closed-won quotes" />
+          <StatCard label="Quote opportunities (paid)" value={fmtMoney(execSummary.revenue)} sub="all quotes from paid leads (open + won + lost) · incl. legacy-campaign leads" />
+          <StatCard label="Won revenue" value={fmtMoney(execSummary.revenueWon)} sub="closed-won quotes · incl. legacy-campaign leads" />
           <StatCard label="Blended ROAS (won)" value={execSummary.roasWon != null ? fmtRatio(execSummary.roasWon) : '—'}
-            sub={`opps variant: ${execSummary.roasAll != null ? fmtRatio(execSummary.roasAll) : '—'}`} />
+            sub={`opps variant: ${execSummary.roasAll != null ? fmtRatio(execSummary.roasAll) : '—'} · campaigns with window spend only`} />
           <StatCard label="Unattributed spend" value={fmtMoney(execSummary.unattributedSpend)} sub="campaigns with 0 quotes" />
           <StatCard label="Quotes domain-matched" value={execSummary.pctDomainMatched != null ? fmtPct(execSummary.pctDomainMatched) : '—'}
             sub={`${fmtNum(execSummary.domainMatched)} of ${fmtNum(execSummary.quotes)} quotes`} />
@@ -1232,6 +1368,10 @@ export default function CrossSourcePage() {
           <TextsTable rows={texts} />
         </CollapsibleSection>
       )}
+
+      <CollapsibleSection title="Data audit (truth-source reconciliation)" open={isOpen('data-audit')} onToggle={() => toggleSec('data-audit')}>
+        <DataAuditPanel />
+      </CollapsibleSection>
 
     </div>
   );

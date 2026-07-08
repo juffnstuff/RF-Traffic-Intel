@@ -72,11 +72,12 @@ function TrendArrow({ slope, size = 12 }) {
  *   invert           for lower-is-better metrics (e.g. GSC avg position):
  *                    flips the badge to Improving/Worsening with the colors
  *                    keyed to "lower = good"
+ *   title            optional hover tooltip on the whole tile
  *
  * Without those, the card renders the legacy label/value/sub/small layout.
  */
 export function StatCard({
-  label, value, sub, small,
+  label, value, sub, small, title,
   ma30, ma90, slope30, slope90, formatter, invert = false,
 }) {
   const hasCompare = ma30 != null && ma90 != null;
@@ -84,7 +85,7 @@ export function StatCard({
   const good = hasCompare ? (invert ? !growth : growth) : null;
   const showTrendRow = slope30 != null || slope90 != null || hasCompare || ma90 != null;
   return (
-    <div style={{
+    <div title={title} style={{
       background: 'var(--dso-surface)',
       borderRadius: 4,
       padding: '14px 16px',
@@ -165,6 +166,64 @@ const LINE_COLORS = {
   ma30: '#ff2d6f',
   ma90: '#a8d8e8',
 };
+
+// Responsive 2-column chart grid shared by every DMA chart stack (also used
+// by GA4InsightsPage / PaidKPIsPage). auto-fit collapses to 1 column on
+// narrow screens; a lone chart spans the full row.
+export const CHART_GRID_STYLE = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
+  gap: 12,
+};
+
+// Overview chart catalog. `key` drives the persisted rfti.ov.chart.<key>
+// visibility toggle; `band` groups charts into the collapsible bands below.
+// Charts flagged ga4 only render when GA4 daily data is present.
+const OVERVIEW_BANDS = [
+  { id: 'money',      label: 'Money' },
+  { id: 'efficiency', label: 'Efficiency' },
+  { id: 'volume',     label: 'Volume & Traffic' },
+];
+const OVERVIEW_CHARTS = [
+  { key: 'quoteDollars',   band: 'money',      title: 'Total Quote DMA (by quote creation date)',          fieldRaw: 'quotesDollars',  field30: 'q30',         field90: 'q90',    formatter: fmtMoney },
+  { key: 'orderDollars',   band: 'money',      title: 'Total Sales Order DMA (by date converted)',         fieldRaw: 'ordersDollars',  field30: 'o30',         field90: 'o90',    formatter: fmtMoney },
+  { key: 'shippedDollars', band: 'money',      title: 'Total Shipped DMA (by actual ship date)',           fieldRaw: 'shippedDollars', field30: 's30',         field90: 's90',    formatter: fmtMoney },
+  { key: 'captureRate',    band: 'efficiency', title: 'Capture Rate DMA (sales order$ / quote$)',                                      field30: 'captureRate', field90: 'capt90', formatter: fmtPct },
+  { key: 'closeRate',      band: 'efficiency', title: 'Close Rate DMA (count)',                                                        field30: 'closeRate',   field90: 'cr90',   formatter: fmtPct },
+  { key: 'aovOrder',       band: 'efficiency', title: 'Avg Order Value DMA (orders$ / orders count)',      fieldRaw: 'aovOrderDaily',  field30: 'aovO30',      field90: 'aovO90', formatter: fmtMoney },
+  { key: 'aovShipped',     band: 'efficiency', title: 'Avg Shipped Value DMA (shipped$ / shipped count)',  fieldRaw: 'aovShipDaily',   field30: 'aovS30',      field90: 'aovS90', formatter: fmtMoney },
+  { key: 'quoteCount',     band: 'volume',     title: 'Quote Count DMA',                                   fieldRaw: 'quotes',         field30: 'qc30',        field90: 'qc90',   formatter: fmtNum },
+  { key: 'orderCount',     band: 'volume',     title: 'Sales Order Count DMA',                             fieldRaw: 'orders',         field30: 'oc30',        field90: 'oc90',   formatter: fmtNum },
+  { key: 'shippedCount',   band: 'volume',     title: 'Shipped Order Count DMA (by actual ship date)',     fieldRaw: 'shipped',        field30: 'sc30',        field90: 'sc90',   formatter: fmtNum },
+  { key: 'sessions',       band: 'volume',     title: 'Sessions DMA',    ga4: true,                        fieldRaw: 'sessions',       field30: 'sess30',      field90: 'sess90', formatter: fmtNum },
+  { key: 'totalUsers',     band: 'volume',     title: 'Total Users DMA', ga4: true,                        fieldRaw: 'totalUsers',     field30: 'tu30',        field90: 'tu90',   formatter: fmtNum },
+  { key: 'newUsers',       band: 'volume',     title: 'New Users DMA',   ga4: true,                        fieldRaw: 'newUsers',       field30: 'nu30',        field90: 'nu90',   formatter: fmtNum },
+  { key: 'conversions',    band: 'volume',     title: 'Conversions DMA', ga4: true,                        fieldRaw: 'conversions',    field30: 'conv30',      field90: 'conv90', formatter: fmtNum },
+  { key: 'pageviews',      band: 'volume',     title: 'Pageviews DMA',   ga4: true,                        fieldRaw: 'pageviews',      field30: 'pv30',        field90: 'pv90',   formatter: fmtNum },
+];
+
+// Minimal collapsible band for the Overview chart stack (same affordance as
+// the lead-lag collapse toggle above).
+function ChartBand({ label, open, onToggle, children }) {
+  return (
+    <section style={{ marginBottom: open ? 20 : 10 }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
+          marginBottom: open ? 10 : 0,
+        }}
+      >
+        <span style={{ fontSize: 10, color: '#64748b', width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
+        <h2 style={{ fontSize: 13, color: '#94a3b8', margin: 0, fontWeight: 600 }}>{label}</h2>
+      </button>
+      {open && <div style={CHART_GRID_STYLE}>{children}</div>}
+    </section>
+  );
+}
 
 export function DMALineChart({ title, data: rawData, field30, field90, fieldRaw, formatter = fmtNum, currentValue, showDaily = true }) {
   // Drop today's still-in-progress row from every chart. Today's quotes /
@@ -448,14 +507,25 @@ function LegendChip({ color, label }) {
 
 function LeadLagCard({ title, subtitle, result }) {
   if (!result) return null;
-  const { bestLag, bestR, correlations } = result;
+  const { bestLag, bestR, correlations, lagRange, effectiveN: effN } = result;
   const absR = Math.abs(bestR);
   const maxLag = correlations.length - 1;
+
+  // Effective-sample guard: heavily smoothed series carry very few
+  // independent observations — below ~20 the correlation is not evidence.
+  const lowSample = effN != null && effN < 20;
 
   // Confidence scale matches the AI analysis prompt — keep these in sync.
   const strength = absR >= 0.7 ? 'Strong' : absR >= 0.4 ? 'Moderate' : 'Weak';
   const strengthColor = absR >= 0.7 ? '#22c55e' : absR >= 0.4 ? '#fbbf24' : '#94a3b8';
   const inverse = bestR < 0;
+
+  // Lag plateau (|r| ≥ 95% of |bestR|) — report a range instead of a false-
+  // precision point estimate when the peak is broad.
+  const [lagLo, lagHi] = lagRange || [bestLag, bestLag];
+  const lagHeadline = lagHi > lagLo
+    ? `leads by ~${lagLo}–${lagHi}d (peak ${bestLag}d)`
+    : `${bestLag}-day lag`;
 
   // Boundary flag: best lag pinned to 0 or the scan maximum is a strong hint
   // that the real relationship is outside our scan range, or that the series
@@ -475,20 +545,29 @@ function LeadLagCard({ title, subtitle, result }) {
   const data = correlations.map((r, lag) => ({ lag, r: +r.toFixed(3) }));
 
   return (
-    <div style={{ background: '#1e293b', borderRadius: 8, padding: 16, flex: '1 1 320px', minWidth: 0 }}>
+    <div style={{
+      background: '#1e293b', borderRadius: 8, padding: 16, flex: '1 1 320px', minWidth: 0,
+      opacity: lowSample ? 0.55 : 1, filter: lowSample ? 'grayscale(0.8)' : 'none',
+    }}>
       <div style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 600 }}>{title}</div>
       {subtitle && <div style={{ color: '#64748b', fontSize: 10, marginTop: 2 }}>{subtitle}</div>}
 
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
         <div style={{ color: '#f8fafc', fontSize: 18, fontWeight: 700 }}>
-          {bestLag}-day lag
+          {lagHeadline}
         </div>
         <div style={{ color: '#94a3b8', fontSize: 13 }}>
           r = {bestR.toFixed(2)}
         </div>
-        <div style={{ color: strengthColor, fontSize: 11, fontWeight: 600 }}>
-          {strength}{inverse ? ' · inverse' : ''}
-        </div>
+        {lowSample ? (
+          <div style={{ color: '#94a3b8', fontSize: 11, fontWeight: 600 }}>
+            insufficient independent signal (smoothing leaves ~{Math.max(0, Math.round(effN))} effective samples)
+          </div>
+        ) : (
+          <div style={{ color: strengthColor, fontSize: 11, fontWeight: 600 }}>
+            {strength}{inverse ? ' · inverse' : ''}
+          </div>
+        )}
       </div>
 
       <div style={{ color: blurbColor, fontSize: 11, marginTop: 2, marginBottom: 6 }}>
@@ -558,6 +637,7 @@ export default function DashboardView({
   ga4Daily = [],                       // optional — GA4 daily rows aligned to `daily`
   gscDaily = [],                       // optional — GSC daily clicks/impressions/ctr/position
   channelsDaily = [],                  // optional — one row per (date, channel) for channel-split lead-lag
+  lagHistogram = null,                 // optional — /api/insights/quote-lag-histogram response (observed contact→quote lag)
   headerExtras = null,
   subtitle = null,
   onRefresh,
@@ -585,16 +665,51 @@ export default function DashboardView({
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState(null);
 
+  // Chart-band collapse state (persisted per band: rfti.ov.band.*).
+  const [bandMoneyOpen, setBandMoneyOpen] = useLocalStorageState('ov.band.money', true);
+  const [bandEffOpen, setBandEffOpen] = useLocalStorageState('ov.band.efficiency', true);
+  const [bandVolOpen, setBandVolOpen] = useLocalStorageState('ov.band.volume', false);
+  const bandOpen = {
+    money:      [bandMoneyOpen, setBandMoneyOpen],
+    efficiency: [bandEffOpen, setBandEffOpen],
+    volume:     [bandVolOpen, setBandVolOpen],
+  };
+  // Per-chart visibility — persisted as individual rfti.ov.chart.<key>
+  // booleans (default true) so the customize list survives reloads.
+  const [chartVis, setChartVis] = useState(() => {
+    const vis = {};
+    for (const c of OVERVIEW_CHARTS) {
+      try {
+        const stored = localStorage.getItem(`rfti.ov.chart.${c.key}`);
+        vis[c.key] = stored !== null ? JSON.parse(stored) !== false : true;
+      } catch {
+        vis[c.key] = true;
+      }
+    }
+    return vis;
+  });
+  const toggleChart = useCallback((key) => {
+    setChartVis(prev => {
+      const next = { ...prev, [key]: !prev[key] };
+      try { localStorage.setItem(`rfti.ov.chart.${key}`, JSON.stringify(next[key])); } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+
   const availableYears = useMemo(() => {
     if (!daily?.length) return [];
     const years = new Set(daily.map(d => d.date.slice(0, 4)));
     return Array.from(years).sort();
   }, [daily]);
 
-  const fullSeries = useMemo(() => {
+  // Series builder — `applyWeekday` controls the weekday filter so the
+  // lead-lag scans can run on the unfiltered CALENDAR series (a lag in
+  // weekday-filtered rows would silently mean "N weekday rows", not N days).
+  const buildSeries = useCallback((applyWeekday) => {
     if (!daily?.length) return [];
     let rows = [...daily].sort((a, b) => a.date.localeCompare(b.date));
-    if (weekdayOnly) rows = weekdaysOnly(rows);
+    if (applyWeekday) rows = weekdaysOnly(rows);
 
     const quotes         = rows.map(d => d.quotes_count || 0);
     const quotesDollars  = rows.map(d => d.quotes_total || 0);
@@ -701,25 +816,37 @@ export default function DashboardView({
       gscClicks: gscClicks[i], gscC30: gscC30[i], gscC90: gscC90[i],
       gscImpressions: gscImpressions[i], gscI30: gscI30[i], gscI90: gscI90[i],
     }));
-  }, [daily, ga4Daily, gscDaily, weekdayOnly]);
+  }, [daily, ga4Daily, gscDaily]);
 
-  const chartData = useMemo(() => {
-    if (!fullSeries.length) return [];
-    // Trim today's still-in-progress row here (not just inside DMALineChart)
-    // so the KPI tiles' summary / period totals / slopes agree with the charts.
+  const fullSeries = useMemo(() => buildSeries(weekdayOnly), [buildSeries, weekdayOnly]);
+  // Calendar-day series for the lead-lag scans — never weekday-filtered.
+  const calendarSeries = useMemo(
+    () => (weekdayOnly ? buildSeries(false) : fullSeries),
+    [weekdayOnly, buildSeries, fullSeries],
+  );
+
+  // Trim today's still-in-progress row here (not just inside DMALineChart)
+  // so the KPI tiles' summary / period totals / slopes agree with the charts.
+  const applyRange = useCallback((series) => {
+    if (!series.length) return [];
     if (selectedYears.length > 0) {
       const ySet = new Set(selectedYears);
-      return trimToYesterday(fullSeries.filter(d => ySet.has(d.date.slice(0, 4))));
+      return trimToYesterday(series.filter(d => ySet.has(d.date.slice(0, 4))));
     }
-    if (range === 'all') return trimToYesterday(fullSeries);
+    if (range === 'all') return trimToYesterday(series);
     if (RELATIVE_RANGES[range]) {
       const cutoff = new Date();
       cutoff.setDate(cutoff.getDate() - RELATIVE_RANGES[range]);
       const cutStr = cutoff.toISOString().slice(0, 10);
-      return trimToYesterday(fullSeries.filter(d => d.date >= cutStr));
+      return trimToYesterday(series.filter(d => d.date >= cutStr));
     }
-    return trimToYesterday(fullSeries);
-  }, [fullSeries, range, selectedYears]);
+    return trimToYesterday(series);
+  }, [range, selectedYears]);
+
+  const chartData = useMemo(() => applyRange(fullSeries), [applyRange, fullSeries]);
+  // Lead-lag input: same visible window, but on the calendar spine so a
+  // "14-day lag" means 14 real days even with the weekday filter on.
+  const leadLagData = useMemo(() => applyRange(calendarSeries), [applyRange, calendarSeries]);
 
   const summary = useMemo(() => {
     if (chartData.length === 0) return null;
@@ -756,11 +883,12 @@ export default function DashboardView({
   }, [chartData]);
 
   const leadLagResults = useMemo(() => {
-    if (chartData.length < 30) return {};
+    if (leadLagData.length < 30) return {};
     // Correlate 30-DMA MINUS 90-DMA (detrended) so long-term opposing trends
     // don't produce artifactual inverse-at-every-lag readings. This reveals
     // the real short-term co-movement that lead-lag analysis is for.
-    const pluck = (f30, f90) => [chartData.map(d => d[f30]), chartData.map(d => d[f90])];
+    // Runs on leadLagData (calendar spine) — never the weekday-filtered rows.
+    const pluck = (f30, f90) => [leadLagData.map(d => d[f30]), leadLagData.map(d => d[f90])];
     const [qc30, qc90] = pluck('qc30', 'qc90');
     const [oc30, oc90] = pluck('oc30', 'oc90');
     const [sc30, sc90] = pluck('sc30', 'sc90');
@@ -771,9 +899,9 @@ export default function DashboardView({
     // Upstream lead-lag scans use a wider window (B2B engineered-product
     // cycles routinely run 60–180 days), but only as wide as the visible
     // window can support without producing meaningless tiny samples at the
-    // far end. 60% of the chartData length is a conservative cap; 120 is the
+    // far end. 60% of the window length is a conservative cap; 120 is the
     // hard ceiling so the chart itself stays readable.
-    const upstreamMaxLag = Math.min(120, Math.max(45, Math.floor(chartData.length * 0.6)));
+    const upstreamMaxLag = Math.min(120, Math.max(45, Math.floor(leadLagData.length * 0.6)));
 
     const out = {
       // Count-based — "how many transactions" predicts "how many transactions"
@@ -815,7 +943,7 @@ export default function DashboardView({
     // the middle, organic non-branded lags long.
     const channelResults = [];
     if ((channelsDaily?.length ?? 0) > 0) {
-      const dateSet = new Set(chartData.map(d => d.date));
+      const dateSet = new Set(leadLagData.map(d => d.date));
       const byChannel = new Map(); // channel -> Map<date, sessions>
       for (const r of channelsDaily) {
         if (!r.channel || !dateSet.has(r.date)) continue;
@@ -829,7 +957,7 @@ export default function DashboardView({
       // Skip "Unassigned" because it's GA4's catch-all and rarely meaningful.
       const top = totals.filter(t => t.channel !== 'Unassigned').slice(0, 5);
       for (const { channel, m } of top) {
-        const raw  = chartData.map(d => m.get(d.date) ?? 0);
+        const raw  = leadLagData.map(d => m.get(d.date) ?? 0);
         const c30  = movingAverage(raw, 30);
         const c90  = movingAverage(raw, 90);
         channelResults.push({
@@ -843,7 +971,7 @@ export default function DashboardView({
     out.upstreamMaxLag = upstreamMaxLag;
 
     return out;
-  }, [chartData, ga4Daily, gscDaily, channelsDaily]);
+  }, [leadLagData, ga4Daily, gscDaily, channelsDaily]);
 
   // Build the compact JSON snapshot Claude reads. Gives explicit anchor points
   // (today / 30d / 90d / YoY) with both 30 DMA and 90 DMA values so the model
@@ -1155,6 +1283,18 @@ export default function DashboardView({
             </button>
             {!leadLagCollapsed && (
             <>
+            {lagHistogram?.median_days != null && (
+              <div style={{ background: '#1e293b', borderRadius: 8, padding: '12px 16px', marginTop: 4, marginBottom: 10, borderLeft: '3px solid var(--dso-accent-hot)' }}>
+                <div style={{ color: '#f8fafc', fontSize: 14, fontWeight: 700 }}>
+                  Observed contact→quote lag: median {Math.round(lagHistogram.median_days)}d
+                  {lagHistogram.avg_days != null && <> · avg {Math.round(lagHistogram.avg_days)}d</>}
+                  {lagHistogram.quotes != null && <> (n={fmtNum(lagHistogram.quotes)} matched quotes)</>}
+                </div>
+                <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 3 }}>
+                  measured from your own HubSpot↔NetSuite bridge — the correlation scans below are approximate co-movement, not causation
+                </div>
+              </div>
+            )}
             <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10, marginTop: 4 }}>
               How many days of delay give the tightest predictive link between the two series.
               Computed on <em>detrended</em> momentum (30 DMA minus 90 DMA) so opposing long-term trends don't
@@ -1247,71 +1387,53 @@ export default function DashboardView({
           </div>
         )}
 
-        {chartData.length > 0 && (
-          <>
-            <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
-              Dollar Value &amp; AOV
-            </h2>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-              <DMALineChart title="Total Quote DMA (by quote creation date)" data={chartData}
-                fieldRaw="quotesDollars" field30="q30" field90="q90" formatter={fmtMoney} showDaily={showDaily} />
-              <DMALineChart title="Total Sales Order DMA (by date converted)" data={chartData}
-                fieldRaw="ordersDollars" field30="o30" field90="o90" formatter={fmtMoney} showDaily={showDaily} />
-            </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-              <DMALineChart title="Total Shipped DMA (by actual ship date)" data={chartData}
-                fieldRaw="shippedDollars" field30="s30" field90="s90" formatter={fmtMoney} showDaily={showDaily} />
-              <DMALineChart title="Capture Rate DMA (sales order$ / quote$)" data={chartData}
-                field30="captureRate" field90="capt90" formatter={fmtPct} showDaily={showDaily} />
-            </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
-              <DMALineChart title="Avg Order Value DMA (orders$ / orders count)" data={chartData}
-                fieldRaw="aovOrderDaily" field30="aovO30" field90="aovO90" formatter={fmtMoney} showDaily={showDaily} />
-              <DMALineChart title="Avg Shipped Value DMA (shipped$ / shipped count)" data={chartData}
-                fieldRaw="aovShipDaily" field30="aovS30" field90="aovS90" formatter={fmtMoney} showDaily={showDaily} />
-            </div>
-
-            <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
-              Transaction Counts
-            </h2>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-              <DMALineChart title="Quote Count DMA" data={chartData}
-                fieldRaw="quotes" field30="qc30" field90="qc90" formatter={fmtNum} showDaily={showDaily} />
-              <DMALineChart title="Sales Order Count DMA" data={chartData}
-                fieldRaw="orders" field30="oc30" field90="oc90" formatter={fmtNum} showDaily={showDaily} />
-            </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-              <DMALineChart title="Shipped Order Count DMA (by actual ship date)" data={chartData}
-                fieldRaw="shipped" field30="sc30" field90="sc90" formatter={fmtNum} showDaily={showDaily} />
-              <DMALineChart title="Close Rate DMA (count)" data={chartData}
-                field30="closeRate" field90="cr90" formatter={fmtPct} showDaily={showDaily} />
-            </div>
-
-            {ga4Daily && ga4Daily.length > 0 && (
-              <>
-                <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, marginTop: 8, fontWeight: 600 }}>
-                  Website Traffic (GA4)
-                </h2>
-                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-                  <DMALineChart title="Sessions DMA" data={chartData}
-                    fieldRaw="sessions" field30="sess30" field90="sess90" formatter={fmtNum} showDaily={showDaily} />
-                  <DMALineChart title="Total Users DMA" data={chartData}
-                    fieldRaw="totalUsers" field30="tu30" field90="tu90" formatter={fmtNum} showDaily={showDaily} />
+        {chartData.length > 0 && (() => {
+          const hasGa4Charts = (ga4Daily?.length ?? 0) > 0;
+          const availableCharts = OVERVIEW_CHARTS.filter(c => !c.ga4 || hasGa4Charts);
+          return (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => setCustomizeOpen(o => !o)}
+                  style={{
+                    background: 'transparent', border: '1px solid #475569', color: '#94a3b8',
+                    borderRadius: 4, padding: '3px 10px', fontSize: 11, cursor: 'pointer',
+                  }}
+                >
+                  {customizeOpen ? 'Done' : 'Customize charts'}
+                </button>
+              </div>
+              {customizeOpen && (
+                <div style={{
+                  background: '#1e293b', borderRadius: 8, padding: '10px 14px', marginBottom: 12,
+                  display: 'flex', flexWrap: 'wrap', gap: '6px 18px',
+                }}>
+                  {availableCharts.map(c => (
+                    <label key={c.key} style={{ display: 'flex', alignItems: 'center', gap: 5, color: '#cbd5e1', fontSize: 11, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={chartVis[c.key] !== false} onChange={() => toggleChart(c.key)} />
+                      {c.title}
+                    </label>
+                  ))}
                 </div>
-                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-                  <DMALineChart title="New Users DMA" data={chartData}
-                    fieldRaw="newUsers" field30="nu30" field90="nu90" formatter={fmtNum} showDaily={showDaily} />
-                  <DMALineChart title="Conversions DMA" data={chartData}
-                    fieldRaw="conversions" field30="conv30" field90="conv90" formatter={fmtNum} showDaily={showDaily} />
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                  <DMALineChart title="Pageviews DMA" data={chartData}
-                    fieldRaw="pageviews" field30="pv30" field90="pv90" formatter={fmtNum} showDaily={showDaily} />
-                </div>
-              </>
-            )}
-          </>
-        )}
+              )}
+              {OVERVIEW_BANDS.map(band => {
+                const charts = availableCharts.filter(c => c.band === band.id && chartVis[c.key] !== false);
+                if (charts.length === 0) return null;
+                const [open, setOpen] = bandOpen[band.id];
+                return (
+                  <ChartBand key={band.id} label={band.label} open={open} onToggle={() => setOpen(!open)}>
+                    {charts.map(c => (
+                      <DMALineChart key={c.key} title={c.title} data={chartData}
+                        fieldRaw={c.fieldRaw} field30={c.field30} field90={c.field90}
+                        formatter={c.formatter} showDaily={showDaily} />
+                    ))}
+                  </ChartBand>
+                );
+              })}
+            </>
+          );
+        })()}
       </main>
     </>
   );

@@ -4,7 +4,7 @@ import {
   XAxis, YAxis, Tooltip, Legend, CartesianGrid,
 } from 'recharts';
 import {
-  DMALineChart, StatCard, fmtNum, fmtMoney, fmtPct, fmtRatio, fmtDate, fmtAxisDate,
+  DMALineChart, StatCard, fmtNum, fmtMoney, fmtPct, fmtRatio, fmtDate, fmtAxisDate, CHART_GRID_STYLE,
 } from './DashboardView';
 import {
   RELATIVE_RANGES, RangeDropdown, YearsDropdown,
@@ -14,18 +14,6 @@ import { movingAverage, slopeLastN, weekdaysOnly } from './utils/analytics';
 import { usePins, trimToYesterday } from './utils/pins';
 import { ReferenceLine } from 'recharts';
 import UpdatingPill from './components/UpdatingPill';
-
-// GSC daily data lags 2-3 days — the trailing rows are incomplete, not a real
-// crash. Returns the first date of the trailing 3-day window (values on dates
-// >= this should be treated as null), or null when there are no GSC rows.
-function gscLagCutoff(rows) {
-  if (!rows?.length) return null;
-  let max = '';
-  for (const r of rows) if (r.date > max) max = r.date;
-  const d = new Date(max + 'T00:00:00Z');
-  d.setUTCDate(d.getUTCDate() - 2);
-  return d.toISOString().slice(0, 10);
-}
 
 // Seconds → "1m 23s" or "45s". Used for avg session duration KPI.
 function fmtDuration(secs) {
@@ -213,9 +201,15 @@ function QueryMoversPanel({ data, onPick, selected }) {
         <tbody>
           {data.movers.map((m, i) => {
             const isSelected = selected === m.query;
+            // change_kind: 'new' = entered the top list (no prior side),
+            // 'lost' = dropped out entirely (no latest side), 'moved' = both.
+            const isNew = m.change_kind === 'new';
+            const isLost = m.change_kind === 'lost';
             // position_delta = prior - latest. Positive means rank improved
             // (smaller number is better in GSC), negative means rank lost.
             const improved = m.position_delta > 0;
+            const clickDelta = Number(m.click_delta) || 0;
+            const clickColor = clickDelta > 0 ? '#22c55e' : clickDelta < 0 ? '#ef4444' : '#94a3b8';
             return (
               <tr
                 key={m.query}
@@ -228,26 +222,36 @@ function QueryMoversPanel({ data, onPick, selected }) {
               >
                 <td style={{ padding: '6px 8px', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={m.query}>
                   {m.query}
+                  {isNew && (
+                    <span style={{ marginLeft: 6, padding: '1px 6px', borderRadius: 3, background: '#14532d', color: '#4ade80', fontSize: 9, fontWeight: 700, letterSpacing: '0.1em' }}>NEW</span>
+                  )}
+                  {isLost && (
+                    <span style={{ marginLeft: 6, padding: '1px 6px', borderRadius: 3, background: '#7f1d1d', color: '#fca5a5', fontSize: 9, fontWeight: 700, letterSpacing: '0.1em' }}>LOST</span>
+                  )}
                 </td>
                 <td style={{ padding: '6px 8px', textAlign: 'right', color: '#cbd5e1', fontFeatureSettings: '"tnum"' }}>
-                  {Number(m.prior_position).toFixed(1)} → {Number(m.latest_position).toFixed(1)}
+                  {m.prior_position != null ? Number(m.prior_position).toFixed(1) : '—'}
+                  {' → '}
+                  {m.latest_position != null ? Number(m.latest_position).toFixed(1) : '—'}
                 </td>
                 <td style={{
                   padding: '6px 8px', textAlign: 'right', fontWeight: 600,
-                  color: improved ? '#22c55e' : '#ef4444',
+                  color: m.position_delta == null ? '#94a3b8' : improved ? '#22c55e' : '#ef4444',
                   fontFeatureSettings: '"tnum"',
                 }}>
-                  {improved ? '↑' : '↓'} {Math.abs(Number(m.position_delta)).toFixed(1)}
+                  {m.position_delta == null
+                    ? '—'
+                    : <>{improved ? '↑' : '↓'} {Math.abs(Number(m.position_delta)).toFixed(1)}</>}
                 </td>
                 <td style={{ padding: '6px 8px', textAlign: 'right', color: '#cbd5e1', fontFeatureSettings: '"tnum"' }}>
-                  {fmtNum(m.prior_clicks ?? 0)} → {fmtNum(m.latest_clicks ?? 0)}
+                  {isNew ? '—' : fmtNum(m.prior_clicks ?? 0)} → {isLost ? '—' : fmtNum(m.latest_clicks ?? 0)}
                 </td>
                 <td style={{
                   padding: '6px 8px', textAlign: 'right', fontWeight: 600,
-                  color: m.click_delta >= 0 ? '#22c55e' : '#ef4444',
+                  color: clickColor,
                   fontFeatureSettings: '"tnum"',
                 }}>
-                  {m.click_delta >= 0 ? '+' : ''}{fmtNum(m.click_delta)}
+                  {clickDelta > 0 ? '+' : ''}{fmtNum(clickDelta)}
                 </td>
               </tr>
             );
@@ -285,7 +289,8 @@ function QueryRankTrendChart({ query, history, onClose }) {
         <button onClick={onClose} style={{ background: 'transparent', border: '1px solid #475569', borderRadius: 4, padding: '2px 8px', fontSize: 10, color: '#94a3b8', cursor: 'pointer' }}>close</button>
       </div>
       <div style={{ color: '#64748b', fontSize: 10, marginBottom: 8 }}>
-        Avg position over time (lower is better) — Y axis inverted. Bars show daily clicks.
+        28-day rolling average position per snapshot — real overnight moves appear as gradual slopes.
+        Lower is better; Y axis inverted.
       </div>
       <ResponsiveContainer width="100%" height={180}>
         <LineChart data={data} margin={{ top: 4, right: 6, left: 6, bottom: 0 }}>
@@ -570,13 +575,22 @@ function FunnelTable({
   );
 }
 
-function BrandedSharePanel({ data }) {
+function BrandedSharePanel({ data, dailyStats }) {
   if (!data || !data.branded || !data.non_branded) return null;
   const totalClicks = (data.branded.clicks || 0) + (data.non_branded.clicks || 0);
   const totalImpressions = (data.branded.impressions || 0) + (data.non_branded.impressions || 0);
-  if (totalClicks === 0 && totalImpressions === 0) return null;
-  const brandedClickShare = totalClicks > 0 ? data.branded.clicks / totalClicks : null;
-  const brandedImprShare  = totalImpressions > 0 ? data.branded.impressions / totalImpressions : null;
+  if (totalClicks === 0 && totalImpressions === 0 && !dailyStats) return null;
+  // Share tiles: prefer the full-universe daily series (window sums via the
+  // API's regex filter) over the biased top-250 snapshot piles when present.
+  const brandedClickShare = dailyStats
+    ? dailyStats.clickShare
+    : totalClicks > 0 ? data.branded.clicks / totalClicks : null;
+  const brandedImprShare = dailyStats
+    ? dailyStats.imprShare
+    : totalImpressions > 0 ? data.branded.impressions / totalImpressions : null;
+  const shareSourceNote = dailyStats
+    ? 'measured over ALL queries via API filter'
+    : 'snapshot-based (top 250 queries) — full-universe series populates after the next GSC sync';
 
   const Pile = ({ title, color, summary, top }) => (
     <div style={{
@@ -664,6 +678,7 @@ function BrandedSharePanel({ data }) {
           <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 4 }}>
             of organic clicks come from brand-name searches
           </div>
+          <div style={{ color: '#64748b', fontSize: 10, marginTop: 4 }}>{shareSourceNote}</div>
         </div>
         <div style={{
           flex: '1 1 220px', minWidth: 200,
@@ -679,8 +694,31 @@ function BrandedSharePanel({ data }) {
           <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 4 }}>
             of search impressions are brand-name searches
           </div>
+          <div style={{ color: '#64748b', fontSize: 10, marginTop: 4 }}>{shareSourceNote}</div>
         </div>
       </div>
+      {dailyStats && dailyStats.chart.length > 0 && (
+        <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, marginBottom: 12 }}>
+          <div style={{ color: '#cbd5e1', fontSize: 11, fontWeight: 700, marginBottom: 6 }}>
+            Branded vs non-branded clicks over time (30 DMA) — measured over ALL queries via API filter
+          </div>
+          <ResponsiveContainer width="100%" height={180}>
+            <LineChart data={dailyStats.chart} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155" strokeOpacity={0.5} />
+              <XAxis dataKey="date" tickFormatter={fmtAxisDate} tick={{ fill: '#94a3b8', fontSize: 10 }}
+                axisLine={{ stroke: '#475569' }} tickLine={false} />
+              <YAxis tickFormatter={fmtNum} tick={{ fill: '#94a3b8', fontSize: 10 }}
+                axisLine={false} tickLine={false} width={45} />
+              <Tooltip content={<ChartTooltip formatter={fmtNum} />} />
+              <Line type="monotone" dataKey="branded30" name="Branded (30 DMA)"
+                stroke="var(--dso-accent-hot)" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line type="monotone" dataKey="nonbrand30" name="Non-branded (30 DMA)"
+                stroke="#a8d8e8" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Legend wrapperStyle={{ fontSize: 10, color: '#cbd5e1', paddingTop: 8 }} iconType="plainline" />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <Pile title="BRANDED — demand capture" color="var(--dso-accent-hot)" summary={data.branded} top={data.branded.top} />
         <Pile title="NON-BRANDED — demand creation" color="#a8d8e8" summary={data.non_branded} top={data.non_branded.top} />
@@ -733,7 +771,7 @@ function ChannelTable({ rows }) {
 }
 
 function CampaignTable({ rows, wonRevByCampaign }) {
-  const nsWonRev = (name) => wonRevByCampaign?.get(String(name || '').toLowerCase());
+  const nsWonRev = (name) => wonRevByCampaign?.get(String(name || '').trim().toLowerCase());
   return (
     <div style={{
       background: '#334155', borderRadius: 8, padding: '14px 16px',
@@ -932,6 +970,9 @@ export default function GA4InsightsPage() {
   const [crux, setCrux] = useState(null);
   const [cruxPages, setCruxPages] = useState(null);
   const [brandedShare, setBrandedShare] = useState(null);
+  // Full-universe branded/non-brand daily series (API regex filter) — the
+  // unbiased source for the share tiles once the GSC sync populates it.
+  const [brandedDaily, setBrandedDaily] = useState(null);
   const [queryMovers, setQueryMovers] = useState(null);
   const [nsRevDaily, setNsRevDaily] = useState(null);
   const [trendQuery, setTrendQuery] = useState(null);
@@ -964,6 +1005,7 @@ export default function GA4InsightsPage() {
       fetch('/api/ga4-channels-daily', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/gsc', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/gsc-branded-share', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/gsc-branded-daily', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/crux', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/crux-by-page', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/gsc-query-movers', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
@@ -972,12 +1014,13 @@ export default function GA4InsightsPage() {
       // GA4 trend by date and split it organic vs paid on the channel table.
       fetch('/api/quotes-won-daily', { signal: ac.signal }).then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([agg, chans, gscResp, brandResp, cruxResp, cruxPagesResp, moversResp, nsRev]) => {
+      .then(([agg, chans, gscResp, brandResp, brandDailyResp, cruxResp, cruxPagesResp, moversResp, nsRev]) => {
         if (ac.signal.aborted) return;
         setAggregate(agg);
         setChannelsDaily(chans);
         setGsc(gscResp);
         setBrandedShare(brandResp);
+        setBrandedDaily(brandDailyResp);
         setCrux(cruxResp);
         setCruxPages(cruxPagesResp);
         setQueryMovers(moversResp);
@@ -1021,8 +1064,14 @@ export default function GA4InsightsPage() {
     if (!rows.length) return undefined;
     const ac = new AbortController();
     setRefetching(true);
+    // Cap at yesterday — the last aggregate row can be today's partial day,
+    // and the tiles above are trimmed to yesterday; min(last, yesterday)
+    // keeps the campaign/landing/source tables on the same window.
     const last = rows[rows.length - 1].date;
-    const params = new URLSearchParams({ until: last });
+    const y = new Date();
+    y.setDate(y.getDate() - 1);
+    const yesterday = y.toISOString().slice(0, 10);
+    const params = new URLSearchParams({ until: last < yesterday ? last : yesterday });
     if (selectedYears.length > 0) {
       params.set('since', `${selectedYears[0]}-01-01`);
       params.set('until', `${selectedYears[selectedYears.length - 1]}-12-31`);
@@ -1081,20 +1130,19 @@ export default function GA4InsightsPage() {
 
     // GSC daily aligned to GA4 dates. CTR and position are weighted means in
     // GSC's own response, so we keep them as-is per day rather than re-deriving.
-    // Gap-day ctr/position come back null from the API and stay null here, and
-    // the lagging 3-day GSC tail is nulled too — the null-aware MA skips both.
+    // The GSC API only returns finalized days, so no extra lag-nulling here —
+    // dates GSC hasn't published yet simply miss the lookup and stay null,
+    // which the null-aware MA skips.
     const gscByDate = new Map((gsc?.daily || []).map(d => [d.date, d]));
-    const lagCut = gscLagCutoff(gsc?.daily);
-    const lagged = (d) => lagCut != null && d.date >= lagCut;
-    const gscClicks      = ordered.map(d => lagged(d) ? null : Number(gscByDate.get(d.date)?.clicks) || 0);
-    const gscImpressions = ordered.map(d => lagged(d) ? null : Number(gscByDate.get(d.date)?.impressions) || 0);
+    const gscClicks      = ordered.map(d => gscByDate.has(d.date) ? Number(gscByDate.get(d.date)?.clicks) || 0 : null);
+    const gscImpressions = ordered.map(d => gscByDate.has(d.date) ? Number(gscByDate.get(d.date)?.impressions) || 0 : null);
     const gscCtr         = ordered.map(d => {
       const v = gscByDate.get(d.date)?.ctr;
-      return (lagged(d) || v == null) ? null : Number(v);
+      return v == null ? null : Number(v);
     });
     const gscPosition    = ordered.map(d => {
       const v = gscByDate.get(d.date)?.position;
-      return (lagged(d) || v == null) ? null : Number(v);
+      return v == null ? null : Number(v);
     });
 
     // NetSuite won-quote revenue per date (summed across all lead sources) —
@@ -1300,16 +1348,16 @@ export default function GA4InsightsPage() {
   }, [channelsDaily, cutoff, selectedYears, chartData, nsRevDaily]);
 
   // Won NetSuite quote revenue keyed by the contact's first-touch campaign
-  // (lowercased source_data_1/2), for the GA4 campaign table join.
+  // (normalized source_data_1, source_data_2 fallback), for the GA4 campaign
+  // table join. ONE key per quote so revenue can't count in two rows.
   const wonRevByCampaign = useMemo(() => {
+    const norm = (x) => String(x ?? '').trim().toLowerCase();
     const map = new Map();
     for (const q of (wonWindow?.quotes || [])) {
       const amt = Number(q.amount) || 0;
-      for (const k of [q.source_data_1, q.source_data_2]) {
-        if (!k) continue;
-        const key = String(k).toLowerCase();
-        map.set(key, (map.get(key) || 0) + amt);
-      }
+      const key = norm(q.source_data_1) || norm(q.source_data_2);
+      if (!key) continue;
+      map.set(key, (map.get(key) || 0) + amt);
     }
     return map;
   }, [wonWindow]);
@@ -1325,6 +1373,60 @@ export default function GA4InsightsPage() {
     }
     return map;
   }, [firstPageRev]);
+
+  // Landing-page rows arrive per landingPagePlusQueryString — merge client-
+  // side by path (query stripped, lowercased) so ?utm variants don't fragment
+  // the table or repeat the same NS first-page dollars on every variant.
+  const mergedLandingPages = useMemo(() => {
+    const rows = landingPages?.landing_pages || [];
+    if (!rows.length) return [];
+    const byPath = new Map();
+    for (const r of rows) {
+      const path = String(r.landing_page || '').split('?')[0].toLowerCase() || '/';
+      const cur = byPath.get(path) || {
+        landing_page: path, sessions: 0, total_users: 0, new_users: 0,
+        engaged_sessions: 0, conversions: 0, active_days: 0,
+      };
+      cur.sessions         += Number(r.sessions) || 0;
+      cur.total_users      += Number(r.total_users) || 0;
+      cur.new_users        += Number(r.new_users) || 0;
+      cur.engaged_sessions += Number(r.engaged_sessions) || 0;
+      cur.conversions      += Number(r.conversions) || 0;
+      // Query variants overlap in time — max is honest; summing overcounts.
+      cur.active_days = Math.max(cur.active_days, Number(r.active_days) || 0);
+      byPath.set(path, cur);
+    }
+    // Rates recomputed from the summed parts, not averaged across variants.
+    return [...byPath.values()]
+      .map(r => ({
+        ...r,
+        engagement_rate: r.sessions > 0 ? r.engaged_sessions / r.sessions : null,
+        conversion_rate: r.sessions > 0 ? r.conversions / r.sessions : null,
+      }))
+      .sort((a, b) => b.sessions - a.sessions);
+  }, [landingPages]);
+
+  // Branded share from the full-universe daily series (visible range). Null
+  // until the branded lane is actually populated (the endpoint left-joins
+  // gsc_daily, so pre-sync rows exist with all-zero branded columns) — the
+  // panel then keeps its snapshot-based behavior.
+  const brandedDailyStats = useMemo(() => {
+    const rows = (brandedDaily?.daily || []).filter(r => inRange(r, cutoff, selectedYears));
+    const inWin = trimToYesterday([...rows].sort((a, b) => a.date.localeCompare(b.date)));
+    if (!inWin.length) return null;
+    const hasBranded = inWin.some(r => (Number(r.branded_clicks) || 0) > 0 || (Number(r.branded_impressions) || 0) > 0);
+    if (!hasBranded) return null;
+    const sum = (f) => inWin.reduce((s, r) => s + (Number(r[f]) || 0), 0);
+    const totalClicks = sum('total_clicks');
+    const totalImpr = sum('total_impressions');
+    const b30 = movingAverage(inWin.map(r => Number(r.branded_clicks) || 0), 30);
+    const n30 = movingAverage(inWin.map(r => Number(r.nonbrand_clicks) || 0), 30);
+    return {
+      clickShare: totalClicks > 0 ? sum('branded_clicks') / totalClicks : null,
+      imprShare: totalImpr > 0 ? sum('branded_impressions') / totalImpr : null,
+      chart: inWin.map((r, i) => ({ date: r.date, branded30: b30[i], nonbrand30: n30[i] })),
+    };
+  }, [brandedDaily, cutoff, selectedYears]);
 
   const handleClear = useCallback(() => {
     setRange('6m');
@@ -1458,7 +1560,7 @@ export default function GA4InsightsPage() {
             <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
               Traffic &amp; revenue trend
             </h2>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+            <div style={{ ...CHART_GRID_STYLE, marginBottom: 12 }}>
               <DMALineChart title="Sessions DMA" data={chartData}
                 fieldRaw="sessions" field30="sess30" field90="sess90"
                 formatter={fmtNum} showDaily={showDaily} />
@@ -1466,7 +1568,7 @@ export default function GA4InsightsPage() {
                 fieldRaw="engagedSessions" field30="eng30" field90="eng90"
                 formatter={fmtNum} showDaily={showDaily} />
             </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+            <div style={{ ...CHART_GRID_STYLE, marginBottom: 12 }}>
               <DMALineChart title="New users DMA" data={chartData}
                 fieldRaw="newUsers" field30="nu30" field90="nu90"
                 formatter={fmtNum} showDaily={showDaily} />
@@ -1474,7 +1576,7 @@ export default function GA4InsightsPage() {
                 fieldRaw="nsRevenue" field30="nsRev30" field90="nsRev90"
                 formatter={fmtMoney} showDaily={showDaily} />
             </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+            <div style={{ ...CHART_GRID_STYLE, marginBottom: 20 }}>
               <DMALineChart title="Conversions DMA" data={chartData}
                 fieldRaw="conversions" field30="conv30" field90="conv90"
                 formatter={fmtNum} showDaily={showDaily} />
@@ -1486,7 +1588,7 @@ export default function GA4InsightsPage() {
             <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
               Engagement quality
             </h2>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+            <div style={{ ...CHART_GRID_STYLE, marginBottom: 12 }}>
               <DMALineChart title="Engagement rate DMA (engaged / sessions)" data={chartData}
                 fieldRaw="engagementRate" field30="er30" field90="er90"
                 formatter={fmtPct} showDaily={showDaily} />
@@ -1494,7 +1596,7 @@ export default function GA4InsightsPage() {
                 fieldRaw="engPerUser" field30="epu30" field90="epu90"
                 formatter={fmtRatio} showDaily={showDaily} />
             </div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+            <div style={{ ...CHART_GRID_STYLE, marginBottom: 20 }}>
               <DMALineChart title="Avg session duration DMA (seconds)" data={chartData}
                 fieldRaw="avgSessionDuration" field30="d30" field90="d90"
                 formatter={(v) => v == null ? '—' : fmtDuration(v)} showDaily={showDaily} />
@@ -1508,7 +1610,7 @@ export default function GA4InsightsPage() {
                 <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
                   Search Console trend
                 </h2>
-                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+                <div style={{ ...CHART_GRID_STYLE, marginBottom: 12 }}>
                   <DMALineChart title="GSC clicks DMA (organic Google clicks)" data={chartData}
                     fieldRaw="gscClicks" field30="gc30" field90="gc90"
                     formatter={fmtNum} showDaily={showDaily} />
@@ -1516,7 +1618,7 @@ export default function GA4InsightsPage() {
                     fieldRaw="gscImpressions" field30="gi30" field90="gi90"
                     formatter={fmtNum} showDaily={showDaily} />
                 </div>
-                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+                <div style={{ ...CHART_GRID_STYLE, marginBottom: 20 }}>
                   <DMALineChart title="GSC CTR DMA (clicks / impressions)" data={chartData}
                     fieldRaw="gscCtr" field30="gctr30" field90="gctr90"
                     formatter={fmtPct} showDaily={showDaily} />
@@ -1538,7 +1640,7 @@ export default function GA4InsightsPage() {
                   Latest GSC top-queries snapshot ({brandedShare.window_end || '—'}, 28-day window).
                 </div>
                 <div style={{ marginBottom: 20 }}>
-                  <BrandedSharePanel data={brandedShare} />
+                  <BrandedSharePanel data={brandedShare} dailyStats={brandedDailyStats} />
                 </div>
               </>
             )}
@@ -1549,9 +1651,10 @@ export default function GA4InsightsPage() {
                   GSC query rank movers
                 </h2>
                 <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
-                  Position changes between the most recent two GSC snapshots. A query slipping
-                  from rank 4 to 9 loses ~70% of clicks — this surfaces those slips weeks before
-                  the session counts catch up. Click any row to chart its full snapshot history.
+                  Latest 28-day window vs the window ending {queryMovers?.prior ?? '—'} (no overlap).
+                  A query slipping from rank 4 to 9 loses ~70% of clicks — this surfaces those slips
+                  weeks before the session counts catch up. NEW/LOST rows entered or dropped out of
+                  the tracked top queries entirely. Click any row to chart its full snapshot history.
                 </div>
                 <div style={{ marginBottom: 8 }}>
                   <QueryMoversPanel data={queryMovers} onPick={setTrendQuery} selected={trendQuery} />
@@ -1615,7 +1718,7 @@ export default function GA4InsightsPage() {
               <CampaignTable rows={campaignStats?.campaigns || []} wonRevByCampaign={wonRevByCampaign} />
             </div>
 
-            {(landingPages?.landing_pages?.length ?? 0) > 0 && (
+            {mergedLandingPages.length > 0 && (
               <>
                 <h2 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 10, fontWeight: 600 }}>
                   Top landing pages
@@ -1623,8 +1726,8 @@ export default function GA4InsightsPage() {
                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
                   <FunnelTable
                     title="Top landing pages by sessions in range"
-                    subtitle="The single most useful SEO read — which pages earn their keep, and which drop off. Click (not set) to investigate. NS won rev = revenue of won quotes from contacts whose FIRST page seen was this page (first-touch, populates after next HubSpot sync)."
-                    rows={landingPages.landing_pages}
+                    subtitle="The single most useful SEO read — which pages earn their keep, and which drop off. Rows are merged by path (?query variants combined). Click (not set) to investigate. NS won rev = revenue of won quotes from contacts whose FIRST page seen was this page (first-touch, populates after next HubSpot sync)."
+                    rows={mergedLandingPages}
                     columns={[
                       { key: 'landing_page', label: 'Landing page', maxWidth: 360 },
                       { key: 'sessions', label: 'Sessions', align: 'right', format: fmtNum },
