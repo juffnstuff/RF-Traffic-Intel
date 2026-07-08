@@ -446,6 +446,38 @@ app.get('/api/refresh-status', (req, res) => {
   res.json({ running: [...runningFetches], startupReady });
 });
 
+// ── Data audit: live truth-source reconciliation ─────────────────────
+// Pulls fresh totals from each upstream API and diffs them against the
+// warehouse for a finalized 28-day window. Green = numbers tie; the note
+// column explains the deltas that are structural (expected).
+app.post('/api/audit/run', async (req, res) => {
+  if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const result = await withFetchLock('data-audit', async () => {
+      const { runDataAudit } = await import('./lib/audit.js');
+      const { getPool, saveAuditRun } = await import('./db.js');
+      const run = await runDataAudit(getPool());
+      await saveAuditRun({ since: run.since, until: run.until, results: run.results });
+      return run;
+    });
+    res.json(result);
+  } catch (e) {
+    console.error('audit/run error:', e);
+    res.status(e.statusCode || 500).json({ error: e.message });
+  }
+});
+
+app.get('/api/audit/latest', async (req, res) => {
+  if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const { getLatestAuditRun } = await import('./db.js');
+    res.json({ run: await getLatestAuditRun() });
+  } catch (e) {
+    console.error('audit/latest error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Main data endpoint — reads from DB first, falls back to JSON cache
 app.get('/api/unified', async (req, res) => {
   try {
@@ -2424,5 +2456,29 @@ app.listen(PORT, async () => {
       console.log('✅  Cron refresh complete');
     }, { timezone: CRON_TIMEZONE });
     console.log(`    ⏰ Cron scheduled: daily 2:00 AM (${CRON_TIMEZONE})`);
+
+    // Weekly truth-source audit (Sunday 3 AM, after the nightly refresh) —
+    // keeps a standing "do the numbers tie?" record without anyone
+    // remembering to click the button.
+    if (hasDB) {
+      cron.schedule('0 3 * * 0', async () => {
+        try {
+          await withFetchLock('data-audit', async () => {
+            console.log('🔍  Cron: weekly data audit...');
+            const { runDataAudit } = await import('./lib/audit.js');
+            const { getPool, saveAuditRun } = await import('./db.js');
+            const run = await runDataAudit(getPool());
+            await saveAuditRun({ since: run.since, until: run.until, results: run.results });
+            const bad = run.results.filter(r => r.verdict === 'red' || r.verdict === 'error');
+            console.log(bad.length
+              ? `⚠️  Data audit: ${bad.length} metric(s) failing reconciliation`
+              : '✅  Data audit: all metrics reconcile');
+          });
+        } catch (e) {
+          if (e.statusCode !== 409) console.error('⚠️  Weekly data audit failed:', e.message);
+        }
+      }, { timezone: CRON_TIMEZONE });
+      console.log(`    ⏰ Data audit scheduled: Sundays 3:00 AM (${CRON_TIMEZONE})`);
+    }
   }
 });

@@ -560,6 +560,18 @@ export async function initDB() {
     )
   `);
 
+  // Truth-source audit runs (lib/audit.js): live API totals vs warehouse
+  // sums, one JSONB result set per run.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS audit_runs (
+      id SERIAL PRIMARY KEY,
+      ran_at TIMESTAMPTZ DEFAULT NOW(),
+      window_since DATE,
+      window_until DATE,
+      results JSONB
+    )
+  `);
+
   // Branded-query daily series (API regex filter — full query universe, not
   // the top-250 snapshot). Non-brand = gsc_daily totals − these.
   await p.query(`
@@ -3365,6 +3377,22 @@ export async function getQuoteLagHistogram({ since = null, until = null, paidOnl
     WHERE ${conds.join(' AND ')}
   `, params);
   return { buckets, ...stats };
+}
+
+export async function saveAuditRun({ since, until, results }) {
+  const p = getPool();
+  await p.query(`
+    INSERT INTO audit_runs (window_since, window_until, results) VALUES ($1, $2, $3)
+  `, [since, until, JSON.stringify(results)]);
+}
+
+export async function getLatestAuditRun() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT ran_at, window_since::text as since, window_until::text as until, results
+    FROM audit_runs ORDER BY ran_at DESC LIMIT 1
+  `);
+  return rows[0] || null;
 }
 
 // Last outcome per source from fetch_log — the "is my data fresh?" strip.
