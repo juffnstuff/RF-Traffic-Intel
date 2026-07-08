@@ -560,6 +560,17 @@ export async function initDB() {
     )
   `);
 
+  // Branded-query daily series (API regex filter — full query universe, not
+  // the top-250 snapshot). Non-brand = gsc_daily totals − these.
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS gsc_branded_daily (
+      date DATE PRIMARY KEY,
+      branded_clicks INTEGER DEFAULT 0,
+      branded_impressions INTEGER DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   // Top queries / pages over a trailing window. window_end_date is the last
   // day of the window (we default to a rolling 28-day window). Keeping the
   // windowed shape lets us retain history for a trend line per query/page
@@ -3432,6 +3443,55 @@ export async function upsertGscDaily(rows, { replaceSince = null } = {}) {
   }
 }
 
+export async function upsertGscBrandedDaily(rows, { replaceSince = null } = {}) {
+  if (!rows || rows.length === 0) return 0;
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    if (replaceSince) {
+      await client.query(`DELETE FROM gsc_branded_daily WHERE date >= $1`, [replaceSince]);
+    }
+    const upserted = await bulkUpsert(client, {
+      table: 'gsc_branded_daily',
+      cols: ['date', 'branded_clicks', 'branded_impressions'],
+      conflictCols: ['date'],
+      updateCols: ['branded_clicks', 'branded_impressions'],
+      rows,
+      toParams: r => [r.date, r.branded_clicks ?? 0, r.branded_impressions ?? 0],
+    });
+    await client.query('COMMIT');
+    return upserted;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// Branded vs non-branded daily series over the FULL query universe (the
+// branded lane comes from the API's regex filter; non-brand = total −
+// branded). This replaces the snapshot-based share, which was biased by the
+// top-250 cap and query anonymization.
+export async function getGscBrandedDaily() {
+  const p = getPool();
+  const { rows } = await p.query(`
+    SELECT
+      d.date::text,
+      d.clicks::int                                          as total_clicks,
+      d.impressions::int                                     as total_impressions,
+      COALESCE(b.branded_clicks, 0)::int                     as branded_clicks,
+      COALESCE(b.branded_impressions, 0)::int                as branded_impressions,
+      GREATEST(0, d.clicks - COALESCE(b.branded_clicks, 0))::int           as nonbrand_clicks,
+      GREATEST(0, d.impressions - COALESCE(b.branded_impressions, 0))::int as nonbrand_impressions
+    FROM gsc_daily d
+    LEFT JOIN gsc_branded_daily b ON b.date = d.date
+    ORDER BY d.date ASC
+  `);
+  return rows;
+}
+
 export async function upsertGscTopQueries(rows) {
   if (!rows || rows.length === 0) return 0;
   const p = getPool();
@@ -3562,39 +3622,55 @@ export async function getGscQueryHistory({ query, sinceDate = null } = {}) {
   return rows;
 }
 
-// "Most volatile" queries — top movers by absolute position delta between
-// the most recent two snapshots. Surfaces queries that gained or lost
-// ranking visibility week-over-week.
-export async function getGscQueryMovers({ limit = 25 } = {}) {
+// Query movers — the latest 28-day snapshot vs the snapshot ending ~28 days
+// EARLIER (zero window overlap). The previous version compared the two most
+// recent nightly snapshots, whose 28-day windows overlap 27/28 days — real
+// rank moves showed at ~1/28th strength. FULL OUTER JOIN so brand-new
+// queries (entered the top list) and lost queries (dropped out entirely —
+// often the biggest losses) surface too, with an impressions floor to keep
+// 1-impression long-tail noise out of the ranking.
+export async function getGscQueryMovers({ limit = 25, minImpressions = 50 } = {}) {
   const p = getPool();
-  const { rows: dateRows } = await p.query(`
-    SELECT window_end_date::text as date
-    FROM gsc_top_queries
-    GROUP BY window_end_date
-    ORDER BY window_end_date DESC
-    LIMIT 2
+  const { rows: latestRows } = await p.query(`
+    SELECT MAX(window_end_date)::text as date FROM gsc_top_queries
   `);
-  if (dateRows.length < 2) return { latest: null, prior: null, movers: [] };
-  const [latest, prior] = dateRows.map(r => r.date);
+  const latest = latestRows[0]?.date;
+  if (!latest) return { latest: null, prior: null, movers: [] };
+  // Closest snapshot at least 21 days older — tolerates fetch gaps while
+  // guaranteeing mostly-disjoint windows.
+  const { rows: priorRows } = await p.query(`
+    SELECT MAX(window_end_date)::text as date
+    FROM gsc_top_queries
+    WHERE window_end_date <= $1::date - INTERVAL '21 days'
+  `, [latest]);
+  const prior = priorRows[0]?.date;
+  if (!prior) return { latest, prior: null, movers: [] };
   const { rows } = await p.query(`
     SELECT
-      l.query,
+      COALESCE(l.query, p.query) as query,
       l.clicks::int        as latest_clicks,
       l.impressions::int   as latest_impressions,
       l.position::float    as latest_position,
       p.clicks::int        as prior_clicks,
       p.impressions::int   as prior_impressions,
       p.position::float    as prior_position,
-      (p.position - l.position)::float       as position_delta,
-      (l.clicks - COALESCE(p.clicks, 0))::int as click_delta
-    FROM gsc_top_queries l
-    LEFT JOIN gsc_top_queries p
-      ON p.query = l.query AND p.window_end_date = $2::date
-    WHERE l.window_end_date = $1::date
-      AND p.position IS NOT NULL
-    ORDER BY ABS(p.position - l.position) DESC NULLS LAST
+      (p.position - l.position)::float                          as position_delta,
+      (COALESCE(l.clicks, 0) - COALESCE(p.clicks, 0))::int      as click_delta,
+      CASE WHEN p.query IS NULL THEN 'new'
+           WHEN l.query IS NULL THEN 'lost'
+           ELSE 'moved' END                                     as change_kind
+    FROM      (SELECT * FROM gsc_top_queries WHERE window_end_date = $1::date) l
+    FULL OUTER JOIN (SELECT * FROM gsc_top_queries WHERE window_end_date = $2::date) p
+      ON p.query = l.query
+    WHERE GREATEST(COALESCE(l.impressions, 0), COALESCE(p.impressions, 0)) >= $4
+    ORDER BY
+      -- rank by click impact first, then rank movement; new/lost queries
+      -- sort by their single-window clicks
+      ABS(COALESCE(l.clicks, 0) - COALESCE(p.clicks, 0)) DESC,
+      ABS(COALESCE(p.position - l.position, 0)) DESC
     LIMIT $3
-  `, [latest, prior, Math.min(200, Math.max(5, parseInt(limit, 10) || 25))]);
+  `, [latest, prior, Math.min(200, Math.max(5, parseInt(limit, 10) || 25)),
+      Math.max(0, parseInt(minImpressions, 10) || 0)]);
   return { latest, prior, movers: rows };
 }
 

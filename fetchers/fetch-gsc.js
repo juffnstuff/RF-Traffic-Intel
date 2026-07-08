@@ -171,6 +171,36 @@ export async function fetchGsc({ since = null } = {}) {
   }));
   console.log(`    ${pageRows.length} top pages`);
 
+  // ── 3b. Branded daily series ─────────────────────────────────────────
+  // Daily clicks/impressions for BRANDED queries only, via the API's query
+  // regex filter. This sidesteps the top-250 snapshot truncation entirely:
+  // branded share becomes (branded / date-dim total) per day, with the
+  // long tail fully counted in the denominator. Non-brand = total − branded.
+  // The regex must be RE2 (no \b) — see lib/brand.js getBrandRegexRe2().
+  console.log('  → branded daily series...');
+  let brandedRows = [];
+  try {
+    const { getBrandRegexRe2 } = await import('../lib/brand.js');
+    const brandedData = await queryWithRetry(client, siteUrl, {
+      startDate, endDate,
+      dimensions: ['date'],
+      dimensionFilterGroups: [{
+        filters: [{ dimension: 'query', operator: 'includingRegex', expression: getBrandRegexRe2() }],
+      }],
+      rowLimit: 25000,
+    }, 'gsc-branded-daily');
+    brandedRows = (brandedData.rows || []).map(r => ({
+      date:                r.keys[0],
+      branded_clicks:      num(r.clicks),
+      branded_impressions: num(r.impressions),
+    }));
+    console.log(`    ${brandedRows.length} branded daily rows`);
+  } catch (e) {
+    // A bad custom regex (BRAND_QUERY_REGEX_RE2) 400s — don't fail the
+    // whole GSC fetch over the branded lane.
+    console.warn(`    ⚠️  branded daily series skipped: ${e.message.slice(0, 160)}`);
+  }
+
   // ── 4. Persist ──────────────────────────────────────────────────────
   fs.mkdirSync(CACHE_DIR, { recursive: true });
   fs.writeFileSync(CACHE_PATH, JSON.stringify({
@@ -185,14 +215,15 @@ export async function fetchGsc({ since = null } = {}) {
   console.log(`✅  Wrote GSC cache: ${dailyRows.length} daily + ${queryRows.length} queries + ${pageRows.length} pages`);
 
   if (process.env.DATABASE_URL) {
-    const { upsertGscDaily, upsertGscTopQueries, upsertGscTopPages } = await import('../db.js');
+    const { upsertGscDaily, upsertGscTopQueries, upsertGscTopPages, upsertGscBrandedDaily } = await import('../db.js');
     const dailyInserted   = await upsertGscDaily(dailyRows, { replaceSince: since });
     const queriesInserted = await upsertGscTopQueries(queryRows);
     const pagesInserted   = await upsertGscTopPages(pageRows);
-    console.log(`✅  Upserted ${dailyInserted} daily + ${queriesInserted} queries + ${pagesInserted} pages into PostgreSQL`);
-    return { daily: dailyInserted, topQueries: queriesInserted, topPages: pagesInserted };
+    const brandedInserted = await upsertGscBrandedDaily(brandedRows, { replaceSince: since });
+    console.log(`✅  Upserted ${dailyInserted} daily + ${queriesInserted} queries + ${pagesInserted} pages + ${brandedInserted} branded-daily into PostgreSQL`);
+    return { daily: dailyInserted, topQueries: queriesInserted, topPages: pagesInserted, brandedDaily: brandedInserted };
   }
-  return { daily: dailyRows.length, topQueries: queryRows.length, topPages: pageRows.length };
+  return { daily: dailyRows.length, topQueries: queryRows.length, topPages: pageRows.length, brandedDaily: brandedRows.length };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

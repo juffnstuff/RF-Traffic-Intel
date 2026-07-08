@@ -80,12 +80,17 @@ export async function fetchGoogleAdsClicks({ since = null } = {}) {
         break;
       } catch (e) {
         lastError = e;
-        if (shapeIdx < QUERY_SHAPES.length - 1) {
+        // Only a 400 means "this query shape is invalid" — step the ladder
+        // down and retry the same day. Transient failures (429/5xx that
+        // exhausted retries, network) must NOT permanently degrade the
+        // shape for the rest of the run; skip just this day instead.
+        const isQueryRejection = /HTTP 400|INVALID_ARGUMENT|PROHIBITED|UNRECOGNIZED/i.test(e.message);
+        if (isQueryRejection && shapeIdx < QUERY_SHAPES.length - 1) {
           console.warn(`    ⚠️  shape "${QUERY_SHAPES[shapeIdx].label}" rejected (${e.message.slice(0, 200)}) — retrying ${iso} with "${QUERY_SHAPES[shapeIdx + 1].label}"`);
           shapeIdx++;
         } else {
-          // Simplest shape also failed — this day is genuinely unfetchable
-          // (retention boundary or a real API problem). Skip it.
+          // Transient failure, or the simplest shape also failed (retention
+          // boundary / real API problem). Skip this day.
           results = null;
           break;
         }

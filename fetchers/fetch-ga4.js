@@ -125,7 +125,7 @@ const METRICS_AGG = [
   { name: 'screenPageViews' },
   { name: 'averageSessionDuration' },
   { name: 'bounceRate' },
-  { name: 'conversions' },
+  { name: 'keyEvents' },  // GA4's current name for the old 'conversions' metric
   { name: 'totalRevenue' },
 ];
 
@@ -138,7 +138,7 @@ const METRICS_CAMPAIGN = [
   { name: 'newUsers' },
   { name: 'engagedSessions' },
   { name: 'screenPageViews' },
-  { name: 'conversions' },
+  { name: 'keyEvents' },  // GA4's current name for the old 'conversions' metric
   { name: 'totalRevenue' },
 ];
 
@@ -149,7 +149,7 @@ const METRICS_LIGHT = [
   { name: 'newUsers' },
   { name: 'engagedSessions' },
   { name: 'screenPageViews' },
-  { name: 'conversions' },
+  { name: 'keyEvents' },  // GA4's current name for the old 'conversions' metric
   { name: 'totalRevenue' },
 ];
 
@@ -158,7 +158,7 @@ const METRICS_LIGHT = [
 // tail of fired events for context).
 const METRICS_EVENT = [
   { name: 'eventCount' },
-  { name: 'conversions' },
+  { name: 'keyEvents' },  // GA4's current name for the old 'conversions' metric
   { name: 'totalRevenue' },
 ];
 
@@ -476,7 +476,7 @@ export async function fetchGa4NotSetBreakdown({ since = null, until = null } = {
       { name: 'sessions' },
       { name: 'engagedSessions' },
       { name: 'screenPageViews' },
-      { name: 'conversions' },
+      { name: 'keyEvents' },  // GA4's current name for the old 'conversions' metric
       { name: 'eventCount' },
     ],
     dimensionFilter: notSetFilter,

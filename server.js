@@ -983,6 +983,24 @@ app.get('/api/gsc', async (req, res) => {
   }
 });
 
+// Branded vs non-branded daily series (full query universe via the API's
+// regex filter — not the biased top-250 snapshot).
+app.get('/api/gsc-branded-daily', async (req, res) => {
+  if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const { getGscBrandedDaily } = await import('./db.js');
+    let daily = await getGscBrandedDaily();
+    const { start, end } = req.query;
+    if (start || end) {
+      daily = daily.filter(d => (!start || d.date >= start) && (!end || d.date <= end));
+    }
+    res.json({ generated: new Date().toISOString(), daily });
+  } catch (e) {
+    console.error('gsc-branded-daily error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/gsc-top', async (req, res) => {
   if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
   const kind = req.query.kind === 'page' ? 'page' : 'query';
@@ -1246,8 +1264,9 @@ app.post('/api/refresh/google-ads', async (req, res) => {
       const { fetchGoogleAds } = await import('./fetchers/fetch-google-ads.js');
       let since = null;
       if (mode !== 'full') {
+        // 90 days: Ads conversions restate up to the click-through window.
         const d = new Date();
-        d.setDate(d.getDate() - 60);
+        d.setDate(d.getDate() - 90);
         since = d.toISOString().slice(0, 10);
       }
       return fetchGoogleAds({ since });
@@ -2313,6 +2332,11 @@ app.listen(PORT, async () => {
       const d = new Date();
       d.setDate(d.getDate() - 60);
       const since = d.toISOString().slice(0, 10);
+      // Google Ads conversions restate up to the (typically 90-day)
+      // click-through window; a 60-day refetch would freeze days 61–90.
+      const d90 = new Date();
+      d90.setDate(d90.getDate() - 90);
+      const sinceAds = d90.toISOString().slice(0, 10);
 
       // Each source shares the fetch lock with the manual /api/refresh/*
       // endpoints and the startup backfill, so two fetchers never fight for
@@ -2363,7 +2387,7 @@ app.listen(PORT, async () => {
         });
         await runOne('google-ads', async () => {
           const { fetchGoogleAds } = await import('./fetchers/fetch-google-ads.js');
-          await fetchGoogleAds({ since });
+          await fetchGoogleAds({ since: sinceAds });
         });
         // gclid → campaign map (click_view). The fetcher clamps to the
         // API's 90-day click_view retention on its own.
