@@ -1169,10 +1169,11 @@ app.get('/api/quotes-won', async (req, res) => {
   const since = iso.test(req.query.since) ? req.query.since : null;
   const until = iso.test(req.query.until) ? req.query.until : null;
   const source = sanitizeScalar(req.query.source);
+  const lens = req.query.lens === 'latest' ? 'latest' : 'original';
   try {
     const { getQuotesWonWindow } = await import('./db.js');
-    const quotes = await getQuotesWonWindow({ since, until, source });
-    res.json({ generated: new Date().toISOString(), since, until, source, quotes });
+    const quotes = await getQuotesWonWindow({ since, until, source, lens });
+    res.json({ generated: new Date().toISOString(), since, until, source, lens, quotes });
   } catch (e) {
     console.error('quotes-won error:', e);
     res.status(500).json({ error: e.message });
@@ -1186,12 +1187,30 @@ app.get('/api/quotes-won-daily', async (req, res) => {
   if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
   const iso = /^\d{4}-\d{2}-\d{2}$/;
   const since = iso.test(req.query.since) ? req.query.since : null;
+  const lens = req.query.lens === 'latest' ? 'latest' : 'original';
   try {
     const { getQuotesWonDailyBySource } = await import('./db.js');
-    const daily = await getQuotesWonDailyBySource({ since });
-    res.json({ generated: new Date().toISOString(), since, daily });
+    const daily = await getQuotesWonDailyBySource({ since, lens });
+    res.json({ generated: new Date().toISOString(), since, lens, daily });
   } catch (e) {
     console.error('quotes-won-daily error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Won-quote revenue by the contact's first page seen — lets the GA4 tab put
+// real revenue next to landing pages (GA4's own revenue is ≈0 on this site).
+app.get('/api/insights/won-revenue-by-first-page', async (req, res) => {
+  if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  const since = iso.test(req.query.since) ? req.query.since : null;
+  const until = iso.test(req.query.until) ? req.query.until : null;
+  try {
+    const { getWonRevenueByFirstPage } = await import('./db.js');
+    const pages = await getWonRevenueByFirstPage({ since, until });
+    res.json({ generated: new Date().toISOString(), since, until, pages });
+  } catch (e) {
+    console.error('insights/won-revenue-by-first-page error:', e);
     res.status(500).json({ error: e.message });
   }
 });

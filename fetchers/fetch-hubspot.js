@@ -114,6 +114,9 @@ const CONTACT_PROPS = [
   'hs_latest_source_timestamp',
   'lead_source', 'source',
   'gclid',
+  // First page seen — the only user-level key that can tie won-quote
+  // revenue back to a GA4 landing page.
+  'hs_analytics_first_url',
   'first_campaign_contacted', 'last_campaign_contacted', 'current_roi_campaign',
   // NetSuite bridge fields (written by the existing NS↔HS integration)
   'netsuite_quote_number', 'netsuite_quote_date', 'netsuite_quote_status',
@@ -466,6 +469,7 @@ export async function fetchHubSpot({ since = null } = {}) {
       lead_source:               p.lead_source || '',
       source:                    p.source || '',
       gclid:                     p.gclid || '',
+      first_url:                 p.hs_analytics_first_url || '',
       first_campaign_contacted:  p.first_campaign_contacted || '',
       last_campaign_contacted:   p.last_campaign_contacted || '',
       current_roi_campaign:      p.current_roi_campaign || '',

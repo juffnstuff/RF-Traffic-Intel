@@ -489,6 +489,9 @@ export async function initDB() {
   // when the column already exists.
   await p.query(`ALTER TABLE hubspot_contacts ADD COLUMN IF NOT EXISTS hs_analytics_first_timestamp TIMESTAMPTZ`);
   await p.query(`ALTER TABLE hubspot_contacts ADD COLUMN IF NOT EXISTS hs_latest_source_timestamp   TIMESTAMPTZ`);
+  // First page seen (hs_analytics_first_url) — the user-level key that lets
+  // won-quote revenue join GA4 landing pages (see getWonRevenueByFirstPage).
+  await p.query(`ALTER TABLE hubspot_contacts ADD COLUMN IF NOT EXISTS first_url TEXT NOT NULL DEFAULT ''`);
 
   // Rubberform NetSuite Quotes custom object, mirrored from HubSpot.
   // Each row is one quote; `parts_group` is the canonical part-group
@@ -2313,21 +2316,44 @@ const CONTACTS_ONE_PER_DOMAIN = `
 // history (and every DMA/CPA computed for that past window).
 const WON_DATE_SQL = `COALESCE(q.won_detected_at, q.created_at)`;
 
+// Attribution lens → contact column set. 'original' = first touch
+// (hs_analytics_source, stable per contact); 'latest' = last session source
+// (hs_latest_source, self-overwrites on every new session). Data note from
+// the live portal scan: ~1,040 contacts are original=PAID_SEARCH but only
+// ~40 are latest=PAID_SEARCH (the NetSuite integration's activity keeps
+// stamping OFFLINE as the latest source), so the latest lens reads much
+// smaller for paid — that's the data, not a bug.
+function lensColumns(lens) {
+  if (lens === 'latest') {
+    return {
+      source: 'hs_latest_source',
+      data1: 'hs_latest_source_data_1',
+      data2: 'hs_latest_source_data_2',
+    };
+  }
+  return {
+    source: 'hs_analytics_source',
+    data1: 'hs_analytics_source_data_1',
+    data2: 'hs_analytics_source_data_2',
+  };
+}
+
 // ── Won NetSuite quotes by lead source (replaces the HubSpot-deal tiles) ──
 // The team's revenue truth is the NetSuite quote object, not HubSpot deals.
-// Attribution comes from the matched contact's first-touch hs_analytics_source
-// (joined by email). "Won" = quote status ILIKE '%won%'. The time axis is the
+// Attribution comes from the matched contact (joined by email) via the
+// chosen lens. "Won" = quote status ILIKE '%won%'. The time axis is the
 // won date (see WON_DATE_SQL). Returned shape matches the old deal-daily
 // rows — { date, source, quotes, revenue } — so the Paid/SEO tiles map 1:1.
-export async function getQuotesWonDailyBySource({ since = null } = {}) {
+export async function getQuotesWonDailyBySource({ since = null, lens = 'original' } = {}) {
   const p = getPool();
+  const cols = lensColumns(lens);
   const params = [];
   const where = [`q.status ILIKE '%won%'`, `q.created_at IS NOT NULL`];
   if (since) { params.push(since); where.push(`${WON_DATE_SQL} >= $${params.length}::date`); }
   const { rows } = await p.query(`
     SELECT
       (${WON_DATE_SQL})::date::text                              as date,
-      COALESCE(NULLIF(hc.hs_analytics_source, ''), 'UNKNOWN')    as source,
+      COALESCE(NULLIF(hc.${cols.source}, ''), 'UNKNOWN')         as source,
       COUNT(*)::int                                              as quotes,
       SUM(q.total)::float                                        as revenue
     FROM hubspot_netsuite_quotes q
@@ -2344,25 +2370,68 @@ export async function getQuotesWonDailyBySource({ since = null } = {}) {
 // fields, so the Paid campaign table can attribute won-quote revenue to a
 // Google Ads campaign the same way it did with deals (keyed by source_data_*).
 // Returns { amount, source, source_data_1, source_data_2 } per won quote.
-export async function getQuotesWonWindow({ since = null, until = null, source = null } = {}) {
+// source_data_1/2 are aliased from whichever lens is active so consumers
+// (the Paid tab's campaign matching) don't care which lens produced them.
+export async function getQuotesWonWindow({ since = null, until = null, source = null, lens = 'original' } = {}) {
   const p = getPool();
+  const cols = lensColumns(lens);
   const where = [`q.status ILIKE '%won%'`, `q.created_at IS NOT NULL`];
   const params = [];
   if (since)  { params.push(since);  where.push(`${WON_DATE_SQL} >= $${params.length}::date`); }
   if (until)  { params.push(until);  where.push(`${WON_DATE_SQL} <  $${params.length}::date + INTERVAL '1 day'`); }
-  if (source) { params.push(source); where.push(`hc.hs_analytics_source = $${params.length}`); }
+  if (source) { params.push(source); where.push(`hc.${cols.source} = $${params.length}`); }
   const { rows } = await p.query(`
     SELECT
       q.quote_no,
       q.total::float                                as amount,
-      COALESCE(NULLIF(hc.hs_analytics_source, ''), 'UNKNOWN') as source,
-      hc.hs_analytics_source_data_1                 as source_data_1,
-      hc.hs_analytics_source_data_2                 as source_data_2
+      COALESCE(NULLIF(hc.${cols.source}, ''), 'UNKNOWN') as source,
+      hc.${cols.data1}                              as source_data_1,
+      hc.${cols.data2}                              as source_data_2
     FROM hubspot_netsuite_quotes q
     LEFT JOIN (${CONTACTS_ONE_PER_EMAIL}) hc
       ON hc.email_normalized = q.email_normalized
     WHERE ${where.join(' AND ')}
     ORDER BY q.total DESC NULLS LAST
+  `, params);
+  return rows;
+}
+
+// Won revenue by the contact's FIRST PAGE SEEN (hs_analytics_first_url) —
+// the only user-level key that can tie NetSuite revenue to a GA4 landing
+// page (GA4 itself exposes no PII). Path-normalized to match GA4's
+// landingPagePlusQueryString rows with their query strings stripped.
+export async function getWonRevenueByFirstPage({ since = null, until = null } = {}) {
+  const p = getPool();
+  const params = [];
+  const conds = [`q.created_at IS NOT NULL`];
+  if (since) { params.push(since); conds.push(`q.created_at >= $${params.length}::date`); }
+  if (until) { params.push(until); conds.push(`q.created_at < $${params.length}::date + INTERVAL '1 day'`); }
+  const { rows } = await p.query(`
+    WITH matched AS (
+      SELECT
+        COALESCE(NULLIF(he.first_url, ''), NULLIF(hd.first_url, '')) as first_url,
+        q.total::float as total,
+        q.status
+      FROM hubspot_netsuite_quotes q
+      LEFT JOIN (${CONTACTS_ONE_PER_EMAIL}) he
+        ON he.email_normalized = q.email_normalized
+      LEFT JOIN (${CONTACTS_ONE_PER_DOMAIN}) hd
+        ON he.contact_id IS NULL
+       AND hd.domain = split_part(q.email_normalized, '@', 2)
+      WHERE COALESCE(he.contact_id, hd.contact_id) IS NOT NULL
+        AND ${conds.join(' AND ')}
+    )
+    SELECT
+      -- strip protocol+host and the query string; default bare hosts to '/'
+      COALESCE(NULLIF(split_part(lower(regexp_replace(first_url, '^https?://[^/]+', '')), '?', 1), ''), '/') as page,
+      COUNT(*)::int                                          as quotes,
+      SUM(total)::float                                      as quote_value,
+      COUNT(*) FILTER (WHERE status ILIKE '%won%')::int      as quotes_won,
+      SUM(total) FILTER (WHERE status ILIKE '%won%')::float  as revenue_won
+    FROM matched
+    WHERE first_url IS NOT NULL
+    GROUP BY 1
+    ORDER BY revenue_won DESC NULLS LAST, quote_value DESC NULLS LAST
   `, params);
   return rows;
 }
@@ -2384,7 +2453,7 @@ export async function upsertHubSpotContacts(rows) {
           contact_id, email, email_normalized, first_name, last_name,
           hs_analytics_source, hs_analytics_source_data_1, hs_analytics_source_data_2, hs_analytics_first_timestamp,
           hs_latest_source, hs_latest_source_data_1, hs_latest_source_data_2, hs_latest_source_timestamp,
-          lead_source, source, gclid,
+          lead_source, source, gclid, first_url,
           first_campaign_contacted, last_campaign_contacted, current_roi_campaign,
           netsuite_quote_number, netsuite_quote_date, netsuite_quote_status,
           netsuite_contact_status, netsuite_lifecycle_stage,
@@ -2396,13 +2465,13 @@ export async function upsertHubSpotContacts(rows) {
           $1, $2, $3, $4, $5,
           $6, $7, $8, $9,
           $10, $11, $12, $13,
-          $14, $15, $16,
-          $17, $18, $19,
-          $20, $21, $22,
-          $23, $24,
-          $25, $26,
-          $27, $28, $29,
-          $30, $31, NOW()
+          $14, $15, $16, $17,
+          $18, $19, $20,
+          $21, $22, $23,
+          $24, $25,
+          $26, $27,
+          $28, $29, $30,
+          $31, $32, NOW()
         )
         ON CONFLICT (contact_id) DO UPDATE SET
           email                        = EXCLUDED.email,
@@ -2420,6 +2489,7 @@ export async function upsertHubSpotContacts(rows) {
           lead_source                  = EXCLUDED.lead_source,
           source                       = EXCLUDED.source,
           gclid                        = EXCLUDED.gclid,
+          first_url                    = EXCLUDED.first_url,
           first_campaign_contacted     = EXCLUDED.first_campaign_contacted,
           last_campaign_contacted      = EXCLUDED.last_campaign_contacted,
           current_roi_campaign         = EXCLUDED.current_roi_campaign,
@@ -2440,7 +2510,7 @@ export async function upsertHubSpotContacts(rows) {
         r.contact_id, r.email ?? '', r.email_normalized, r.first_name ?? '', r.last_name ?? '',
         r.hs_analytics_source ?? '', r.hs_analytics_source_data_1 ?? '', r.hs_analytics_source_data_2 ?? '', r.hs_analytics_first_timestamp,
         r.hs_latest_source ?? '', r.hs_latest_source_data_1 ?? '', r.hs_latest_source_data_2 ?? '', r.hs_latest_source_timestamp,
-        r.lead_source ?? '', r.source ?? '', r.gclid ?? '',
+        r.lead_source ?? '', r.source ?? '', r.gclid ?? '', r.first_url ?? '',
         r.first_campaign_contacted ?? '', r.last_campaign_contacted ?? '', r.current_roi_campaign ?? '',
         r.netsuite_quote_number ?? '', r.netsuite_quote_date, r.netsuite_quote_status ?? '',
         r.netsuite_contact_status ?? '', r.netsuite_lifecycle_stage ?? '',
