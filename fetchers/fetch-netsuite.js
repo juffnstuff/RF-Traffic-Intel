@@ -203,6 +203,7 @@ export async function fetchNetSuite({ since = null } = {}) {
     FROM transaction t
     WHERE t.recordType = 'estimate' ${quoteCreatedFilter}
     GROUP BY TRUNC(t.createddate)
+    ORDER BY TRUNC(t.createddate)
   `.trim();
 
   const ordersQ = `
@@ -210,6 +211,7 @@ export async function fetchNetSuite({ since = null } = {}) {
     FROM transaction t
     WHERE t.recordType = 'salesorder' ${orderCreatedFilter}
     GROUP BY TRUNC(t.createddate)
+    ORDER BY TRUNC(t.createddate)
   `.trim();
 
   const shippedQ = `
@@ -219,6 +221,7 @@ export async function fetchNetSuite({ since = null } = {}) {
       AND t.actualShipDate IS NOT NULL
       ${shipFilter}
     GROUP BY t.actualShipDate
+    ORDER BY t.actualShipDate
   `.trim();
 
   // Adjusted quotes: exclude "Lost: Alternate RF Solution/Quote" (custbody_rf_lost_reason = 13)
@@ -229,6 +232,7 @@ export async function fetchNetSuite({ since = null } = {}) {
       AND (t.custbody_rf_lost_reason IS NULL OR t.custbody_rf_lost_reason != 13)
       ${quoteCreatedFilter}
     GROUP BY TRUNC(t.createddate)
+    ORDER BY TRUNC(t.createddate)
   `.trim();
 
   console.log('  → querying estimates...');

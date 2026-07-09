@@ -213,7 +213,13 @@ async function runDimQuery({ recordType, dateCol, extraWhere = '', since, tranty
       ${extraWhere}
       ${dateFilter}
     GROUP BY ${dateCol}, BUILTIN.DF(i.custitem1), t.employee, BUILTIN.DF(t.employee), ${SIZE_BUCKET_CASE}, ${firstCase}
+    ORDER BY ${dateCol}, BUILTIN.DF(i.custitem1), t.employee, ${SIZE_BUCKET_CASE}, ${firstCase}
   `.trim();
+  // NB: the ORDER BY is load-bearing, not cosmetic — SuiteQL REST paginates
+  // with limit/offset, and without a deterministic order the same group row
+  // can appear on two pages while another is silently skipped. The duplicate
+  // half of that bug surfaced as "ON CONFLICT DO UPDATE command cannot
+  // affect row a second time" in the dim upsert; the skip half was invisible.
 
   console.log(`  → ${trantype}...`);
   const raw = await runSuiteQL(sql);

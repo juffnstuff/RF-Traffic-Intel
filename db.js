@@ -867,6 +867,12 @@ export async function upsertDailyRows(rows, { replaceSince = null } = {}) {
     if (replaceSince) {
       await client.query(`DELETE FROM netsuite_daily WHERE date >= $1`, [replaceSince]);
     }
+    // Same duplicate-PK defense as upsertDailyDimRows (keep last, warn).
+    const byDate = new Map(rows.map(r => [r.date, r]));
+    if (byDate.size < rows.length) {
+      console.warn(`    ⚠️  upsertDailyRows: merged ${rows.length - byDate.size} duplicate-date row(s) (kept last)`);
+    }
+    rows = [...byDate.values()];
     const upserted = await bulkUpsert(client, {
       table: 'netsuite_daily',
       cols: COLS,
@@ -962,6 +968,21 @@ export async function upsertDailyDimRows(rows, { replaceSince = null } = {}) {
     if (replaceSince) {
       await client.query(`DELETE FROM netsuite_daily_dim WHERE date >= $1`, [replaceSince]);
     }
+    // Defense in depth: a multi-row upsert rejects duplicate PKs within one
+    // statement ("cannot affect row a second time"). SuiteQL pagination
+    // without ORDER BY once produced page-boundary duplicates; the fetcher
+    // now orders deterministically, but if a duplicate ever slips through
+    // again, keep the last row (the old per-row loop's semantics) and warn
+    // instead of failing the whole fetch.
+    const byKey = new Map();
+    for (const r of rows) {
+      byKey.set([r.date, r.trantype, r.part_group ?? '', r.salesrep_id ?? '',
+                 r.size_bucket ?? 'Under $5K', r.is_first ?? 'N'].join(' '), r);
+    }
+    if (byKey.size < rows.length) {
+      console.warn(`    ⚠️  upsertDailyDimRows: merged ${rows.length - byKey.size} duplicate-key row(s) (kept last)`);
+    }
+    rows = [...byKey.values()];
     const upserted = await bulkUpsert(client, {
       table: 'netsuite_daily_dim',
       cols: ['date', 'trantype', 'part_group', 'salesrep_id', 'salesrep_name',
