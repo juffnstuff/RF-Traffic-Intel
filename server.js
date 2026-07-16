@@ -408,6 +408,9 @@ app.get('/api/health', async (req, res) => {
 app.get('/api/fetch-health', async (req, res) => {
   if (!hasDB) return res.status(503).json({ error: 'Database not configured' });
   const staleAfterHours = 48;
+  // Sources that run on a slower cadence by design get their own threshold —
+  // the weekly data audit would otherwise read "stale" five days out of seven.
+  const staleOverrides = { 'data-audit': 8 * 24 };
   try {
     const { getFetchHealth } = await import('./db.js');
     const sources = await getFetchHealth();
@@ -418,7 +421,7 @@ app.get('/api/fetch-health', async (req, res) => {
       sources: sources.map(s => ({
         ...s,
         stale: s.finished_at
-          ? (now - new Date(s.finished_at).getTime()) > staleAfterHours * 3600 * 1000
+          ? (now - new Date(s.finished_at).getTime()) > (staleOverrides[s.source] ?? staleAfterHours) * 3600 * 1000
           : true,
       })),
     });
