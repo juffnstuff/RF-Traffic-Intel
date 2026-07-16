@@ -196,30 +196,36 @@ async function runDimQuery({ recordType, dateCol, extraWhere = '', since, tranty
   const firstCase = firstFlagCase(trantype);
   // Line amounts on sales-side transactions are stored negative in NetSuite's
   // credit-natural convention; negate so the dashboard shows positive $.
-  const sql = `
-    SELECT
-      ${dateCol} as bucket_date,
-      COALESCE(BUILTIN.DF(i.custitem1), '') as part_group,
-      COALESCE(TO_CHAR(t.employee), '') as salesrep_id,
-      BUILTIN.DF(t.employee) as salesrep_name,
-      ${SIZE_BUCKET_CASE} as size_bucket,
-      ${firstCase} as is_first,
-      COUNT(DISTINCT t.id) as txn_cnt,
-      -SUM(tl.foreignamount) as line_total
-    FROM transaction t
-    ${lineJoinsAndFilter()}
-    WHERE t.recordType = '${recordType}'
-      ${baseLineConditions()}
-      ${extraWhere}
-      ${dateFilter}
-    GROUP BY ${dateCol}, BUILTIN.DF(i.custitem1), t.employee, BUILTIN.DF(t.employee), ${SIZE_BUCKET_CASE}, ${firstCase}
-    ORDER BY ${dateCol}, BUILTIN.DF(i.custitem1), t.employee, ${SIZE_BUCKET_CASE}, ${firstCase}
-  `.trim();
-  // NB: the ORDER BY is load-bearing, not cosmetic — SuiteQL REST paginates
+  // The ORDER BY is load-bearing, not cosmetic — SuiteQL REST paginates
   // with limit/offset, and without a deterministic order the same group row
   // can appear on two pages while another is silently skipped. The duplicate
   // half of that bug surfaced as "ON CONFLICT DO UPDATE command cannot
   // affect row a second time" in the dim upsert; the skip half was invisible.
+  //
+  // SuiteQL's parser rejects BUILTIN.DF(...)/CASE expressions inside ORDER BY
+  // (400 "Invalid or unsupported search"), so the aggregation is wrapped in
+  // an inline view and ordered by its plain column aliases instead.
+  const sql = `
+    SELECT * FROM (
+      SELECT
+        ${dateCol} as bucket_date,
+        COALESCE(BUILTIN.DF(i.custitem1), '') as part_group,
+        COALESCE(TO_CHAR(t.employee), '') as salesrep_id,
+        BUILTIN.DF(t.employee) as salesrep_name,
+        ${SIZE_BUCKET_CASE} as size_bucket,
+        ${firstCase} as is_first,
+        COUNT(DISTINCT t.id) as txn_cnt,
+        -SUM(tl.foreignamount) as line_total
+      FROM transaction t
+      ${lineJoinsAndFilter()}
+      WHERE t.recordType = '${recordType}'
+        ${baseLineConditions()}
+        ${extraWhere}
+        ${dateFilter}
+      GROUP BY ${dateCol}, BUILTIN.DF(i.custitem1), t.employee, BUILTIN.DF(t.employee), ${SIZE_BUCKET_CASE}, ${firstCase}
+    )
+    ORDER BY bucket_date, part_group, salesrep_id, size_bucket, is_first
+  `.trim();
 
   console.log(`  → ${trantype}...`);
   const raw = await runSuiteQL(sql);
